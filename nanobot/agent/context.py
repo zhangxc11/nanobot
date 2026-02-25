@@ -168,7 +168,11 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         # Current message (with optional image attachments)
         user_content = self._build_user_content(current_message, media)
         user_content = self._inject_runtime_context(user_content, channel, chat_id)
-        messages.append({"role": "user", "content": user_content})
+        messages.append({
+            "role": "user",
+            "content": user_content,
+            "timestamp": datetime.now().isoformat(),
+        })
 
         return messages
 
@@ -213,7 +217,8 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
             "role": "tool",
             "tool_call_id": tool_call_id,
             "name": tool_name,
-            "content": result
+            "content": result,
+            "timestamp": datetime.now().isoformat(),
         })
         return messages
     
@@ -236,7 +241,10 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         Returns:
             Updated message list.
         """
-        msg: dict[str, Any] = {"role": "assistant"}
+        msg: dict[str, Any] = {
+            "role": "assistant",
+            "timestamp": datetime.now().isoformat(),
+        }
 
         # Always include content — some providers (e.g. StepFun) reject
         # assistant messages that omit the key entirely.
