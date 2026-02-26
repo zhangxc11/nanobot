@@ -302,4 +302,12 @@ Phase 4:
 
 ---
 
+## §10 Bug Fix: SessionManager 路径双重嵌套 (commit `aaaf81d`)
+
+**问题**: `AgentRunner.from_config()` 传入 `config.workspace_path / "sessions"` 给 `SessionManager`，但 `SessionManager.__init__` 内部再追加 `/sessions`，导致 SDK 模式下 session 数据写入 `~/.nanobot/workspace/sessions/sessions/`。
+
+**修复**: `sdk/runner.py` 改为 `SessionManager(config.workspace_path)`。
+
+---
+
 *本文档随 local 分支改动持续更新。*

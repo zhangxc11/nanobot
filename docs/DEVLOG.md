@@ -200,4 +200,25 @@
 
 ---
 
+## Bug Fix: SessionManager 路径双重嵌套 (2026-02-26)
+
+### 问题
+- **现象**: web-chat 发送消息后能执行，但 session 不记录消息，刷新/切换后消息消失
+- **根因**: `AgentRunner.from_config()` 传入 `config.workspace_path / "sessions"` 给 `SessionManager`，但 `SessionManager.__init__` 内部又追加 `/sessions`，导致实际写入路径变成 `~/.nanobot/workspace/sessions/sessions/`（双重嵌套）
+- **影响**: 所有通过 SDK（web-chat worker）执行的 session 数据写入了错误目录，gateway 读取正确目录时找不到消息
+
+### 修复
+- `sdk/runner.py`: `SessionManager(config.workspace_path)` 改为传入 workspace root，而非 sessions_dir
+- 恢复 `sessions/sessions/` 下的误写数据到正确位置
+- 清理错误的嵌套目录
+
+### 验证
+- Worker 重启后发送测试消息，确认 JSONL 写入 `~/.nanobot/workspace/sessions/`（正确）
+- `sessions/sessions/` 不再被创建
+
+### Commit
+- `aaaf81d` on local
+
+---
+
 *本文件随开发进展持续更新。*
