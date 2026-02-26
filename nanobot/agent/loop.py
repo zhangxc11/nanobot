@@ -178,9 +178,11 @@ class AgentLoop:
     ) -> tuple[str | None, list[str], list[dict], dict[str, int]]:
         """Run the agent iteration loop.
         
-        Returns (final_content, tools_used, messages, accumulated_usage).
+        Returns (final_content, tools_used, messages, accumulated_usage, loop_started_at).
         accumulated_usage keys: prompt_tokens, completion_tokens, total_tokens, llm_calls.
         """
+        from datetime import datetime
+        loop_started_at = datetime.now().isoformat()
         messages = initial_messages
         iteration = 0
         final_content = None
@@ -256,7 +258,7 @@ class AgentLoop:
                 "without completing the task. You can try breaking the task into smaller steps."
             )
 
-        return final_content, tools_used, messages, accumulated_usage
+        return final_content, tools_used, messages, accumulated_usage, loop_started_at
 
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus."""
@@ -334,9 +336,9 @@ class AgentLoop:
                 history=history,
                 current_message=msg.content, channel=channel, chat_id=chat_id,
             )
-            final_content, _, all_msgs, usage = await self._run_agent_loop(messages)
+            final_content, _, all_msgs, usage, started_at = await self._run_agent_loop(messages)
             self._save_turn(session, all_msgs, 1 + len(history))
-            self._save_usage(session, usage)
+            self._save_usage(session, usage, started_at)
             self.sessions.save(session)
             return OutboundMessage(channel=channel, chat_id=chat_id,
                                   content=final_content or "Background task completed.")
@@ -422,7 +424,7 @@ class AgentLoop:
                 channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
             ))
 
-        final_content, _, all_msgs, usage = await self._run_agent_loop(
+        final_content, _, all_msgs, usage, started_at = await self._run_agent_loop(
             initial_messages, on_progress=on_progress or _bus_progress,
         )
 
@@ -433,7 +435,7 @@ class AgentLoop:
         logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
 
         self._save_turn(session, all_msgs, 1 + len(history))
-        self._save_usage(session, usage)
+        self._save_usage(session, usage, started_at)
         self.sessions.save(session)
 
         if message_tool := self.tools.get("message"):
@@ -460,11 +462,12 @@ class AgentLoop:
             session.messages.append(entry)
         session.updated_at = datetime.now()
 
-    def _save_usage(self, session: Session, usage: dict[str, int]) -> None:
+    def _save_usage(self, session: Session, usage: dict[str, int], started_at: str = "") -> None:
         """Save token usage record into session."""
         from datetime import datetime
         if not usage or usage.get("llm_calls", 0) == 0:
             return
+        finished_at = datetime.now().isoformat()
         record = {
             "_type": "usage",
             "model": self.model,
@@ -472,7 +475,8 @@ class AgentLoop:
             "completion_tokens": usage.get("completion_tokens", 0),
             "total_tokens": usage.get("total_tokens", 0),
             "llm_calls": usage.get("llm_calls", 0),
-            "timestamp": datetime.now().isoformat(),
+            "started_at": started_at or finished_at,
+            "finished_at": finished_at,
         }
         session.messages.append(record)
         logger.info(
