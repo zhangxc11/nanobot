@@ -302,6 +302,10 @@ def gateway(
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
     
+    # Unified usage recorder (SQLite)
+    from nanobot.usage.recorder import UsageRecorder
+    usage_recorder = UsageRecorder()
+
     # Create agent with cron service
     agent = AgentLoop(
         bus=bus,
@@ -319,6 +323,7 @@ def gateway(
         session_manager=session_manager,
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
+        usage_recorder=usage_recorder,
     )
     
     # Set cron callback (needs agent)
@@ -459,6 +464,10 @@ def agent(
         logger.enable("nanobot")
     else:
         logger.disable("nanobot")
+
+    # Unified usage recorder (SQLite)
+    from nanobot.usage.recorder import UsageRecorder
+    usage_recorder = UsageRecorder()
     
     agent_loop = AgentLoop(
         bus=bus,
@@ -475,6 +484,7 @@ def agent(
         restrict_to_workspace=config.tools.restrict_to_workspace,
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
+        usage_recorder=usage_recorder,
     )
     
     # Show spinner when logs are off (no output to miss); skip when logs are on
@@ -951,6 +961,10 @@ def cron_run(
     config = load_config()
     provider = _make_provider(config)
     bus = MessageBus()
+
+    from nanobot.usage.recorder import UsageRecorder
+    usage_recorder = UsageRecorder()
+
     agent_loop = AgentLoop(
         bus=bus,
         provider=provider,
@@ -965,6 +979,7 @@ def cron_run(
         restrict_to_workspace=config.tools.restrict_to_workspace,
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
+        usage_recorder=usage_recorder,
     )
 
     store_path = get_data_dir() / "cron" / "jobs.json"

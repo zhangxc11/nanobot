@@ -25,6 +25,7 @@ from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider
 from nanobot.session.manager import Session, SessionManager
+from nanobot.usage.recorder import UsageRecorder
 
 if TYPE_CHECKING:
     from nanobot.config.schema import ChannelsConfig, ExecToolConfig
@@ -60,6 +61,7 @@ class AgentLoop:
         session_manager: SessionManager | None = None,
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
+        usage_recorder: UsageRecorder | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         self.bus = bus
@@ -75,6 +77,7 @@ class AgentLoop:
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
+        self.usage_recorder = usage_recorder
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
@@ -284,13 +287,16 @@ class AgentLoop:
             if session is not None:
                 self.sessions.append_message(session, messages[-1])
 
-        # Print usage to stdout as a JSON line for external consumers (e.g. worker.py)
+        # Print usage to stderr as a JSON line for external consumers (e.g. worker.py)
+        # AND record to SQLite via UsageRecorder (unified for all invocation modes).
         if accumulated_usage.get("llm_calls", 0) > 0:
             import sys
             finished_at = datetime.now().isoformat()
+            session_key = session.key if session is not None else "unknown"
             usage_record = {
                 "__usage__": True,
                 "model": self.model,
+                "session_key": session_key,
                 "prompt_tokens": accumulated_usage.get("prompt_tokens", 0),
                 "completion_tokens": accumulated_usage.get("completion_tokens", 0),
                 "total_tokens": accumulated_usage.get("total_tokens", 0),
@@ -298,6 +304,21 @@ class AgentLoop:
                 "started_at": loop_started_at,
                 "finished_at": finished_at,
             }
+
+            # SQLite recording (unified across CLI/IM/Web/Cron)
+            if self.usage_recorder is not None:
+                self.usage_recorder.record(
+                    session_key=session_key,
+                    model=self.model,
+                    prompt_tokens=accumulated_usage.get("prompt_tokens", 0),
+                    completion_tokens=accumulated_usage.get("completion_tokens", 0),
+                    total_tokens=accumulated_usage.get("total_tokens", 0),
+                    llm_calls=accumulated_usage.get("llm_calls", 0),
+                    started_at=loop_started_at,
+                    finished_at=finished_at,
+                )
+
+            # stderr JSON output (backward compat for worker.py parsing)
             print(json.dumps(usage_record, ensure_ascii=False), file=sys.stderr)
             logger.info(
                 "Usage: {} calls, {} prompt + {} completion = {} total tokens (model: {})",
