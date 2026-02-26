@@ -43,15 +43,42 @@ class Session:
         self.updated_at = datetime.now()
     
     def get_history(self, max_messages: int = 500) -> list[dict[str, Any]]:
-        """Return unconsolidated messages for LLM input, aligned to a user turn."""
+        """Return unconsolidated messages for LLM input, aligned to a valid boundary.
+
+        The slice is adjusted so it never starts with orphaned ``tool`` result
+        messages (which would cause Anthropic's "unexpected tool_use_id" error).
+        Valid start boundaries are:
+        - A ``user`` message (preferred), or
+        - An ``assistant`` message (start of a tool-call chain when no user
+          message exists in the window).
+        """
         unconsolidated = self.messages[self.last_consolidated:]
         sliced = unconsolidated[-max_messages:]
 
-        # Drop leading non-user messages to avoid orphaned tool_result blocks
+        # Find a valid starting point — prefer ``user``, fall back to ``assistant``.
+        # Never start with a ``tool`` message (orphaned tool_result).
+        start = 0
+        found_user = False
+        first_assistant = -1
         for i, m in enumerate(sliced):
-            if m.get("role") == "user":
-                sliced = sliced[i:]
+            role = m.get("role")
+            if role == "user":
+                start = i
+                found_user = True
                 break
+            if role == "assistant" and first_assistant < 0:
+                first_assistant = i
+
+        if not found_user:
+            # No user message in the slice — fall back to first assistant message
+            # to preserve as much context as possible without orphaned tool results.
+            if first_assistant >= 0:
+                start = first_assistant
+            else:
+                # Entire slice is tool messages (extremely unlikely) — drop all
+                return []
+
+        sliced = sliced[start:]
 
         out: list[dict[str, Any]] = []
         for m in sliced:
