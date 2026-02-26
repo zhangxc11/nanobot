@@ -15,7 +15,7 @@
 | Phase 3: SDK 化改造 | ✅ 已完成 | feat/sdk → local |
 | Phase 4: 实时 Token 用量记录 | ✅ 已完成 | feat/realtime-usage → local |
 | Phase 5: 工具调用间隙用户注入 | ✅ 已完成 | feat/user-inject → local |
-| Phase 6: LLM 调用详情日志 | 🔜 进行中 | feat/llm-detail-log → local |
+| Phase 6: LLM 调用详情日志 | ✅ 已完成 | feat/llm-detail-log → local |
 
 ---
 
@@ -248,7 +248,7 @@
 
 ---
 
-## Phase 6: LLM 调用详情日志 (web-chat Backlog #15) 🔜
+## Phase 6: LLM 调用详情日志 (web-chat Backlog #15) ✅
 
 ### 需求来源
 - web-chat REQUIREMENTS.md Backlog #15
@@ -283,7 +283,10 @@
   - 记录包含: system_prompt_chars=13715, messages_count=2, 完整 response
   - 现有 usage 测试无回归 (11 passed)
 
-- ⏳ **T6.5** Git 提交 + 文档更新
+- ⏳ **T6.5** Git 提交 + 文档更新 → ✅ 完成
+  - commit `5ab4ce8` on feat/llm-detail-log, merged to local
+  - LOCAL_CHANGES.md §12
+  - DEVLOG.md 更新
 
 ---
 
