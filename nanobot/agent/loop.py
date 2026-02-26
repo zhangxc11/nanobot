@@ -253,6 +253,10 @@ class AgentLoop:
                 f"I reached the maximum number of tool call iterations ({self.max_iterations}) "
                 "without completing the task. You can try breaking the task into smaller steps."
             )
+            # Append as assistant message so _save_turn persists it to JSONL
+            messages = self.context.add_assistant_message(
+                messages, final_content, None,
+            )
 
         # Print usage to stdout as a JSON line for external consumers (e.g. worker.py)
         if accumulated_usage.get("llm_calls", 0) > 0:
