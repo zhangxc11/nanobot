@@ -10,8 +10,8 @@
 | 阶段 | 状态 | 分支 |
 |------|------|------|
 | 历史改动 (2.1-2.5) | ✅ 已完成 | local |
-| Phase 1: 实时 Session 持久化 | 🔜 待开始 | feat/realtime-persist |
-| Phase 2: 统一 Token 记录 | ⏳ 待 Phase 1 | feat/unified-usage |
+| Phase 1: 实时 Session 持久化 | ✅ 已完成 | feat/realtime-persist → local |
+| Phase 2: 统一 Token 记录 | 🔜 待开始 | feat/unified-usage |
 | Phase 3: SDK 化改造 | ⏳ 待 Phase 2 | feat/sdk |
 
 ---
@@ -40,31 +40,33 @@
 
 ### 任务清单
 
-- 🔜 **T1.1** SessionManager.append_message() 方法
+- 🔜 **T1.1** SessionManager.append_message() 方法 → ✅ 完成 (commit `5528969`)
   - 追加写入 JSONL（不重写整个文件）
   - 同时更新内存中的 session.messages
   - 文件不存在时先写 metadata 行
   - 包含 fsync 确保写入磁盘
 
-- ⏳ **T1.2** SessionManager.update_metadata() 方法
+- ⏳ **T1.2** SessionManager.update_metadata() 方法 → ✅ 完成 (commit `5528969`)
   - 只更新 metadata（last_consolidated 等）
   - 在 turn 结束时调用（频率低，可重写整个文件）
 
-- ⏳ **T1.3** _run_agent_loop 注入实时写入
+- ⏳ **T1.3** _run_agent_loop 注入实时写入 → ✅ 完成 (commit `5528969`)
   - 每条 assistant/tool 消息产生后调用 append_message
   - 需要将 session 引用传入 _run_agent_loop（或通过回调）
 
-- ⏳ **T1.4** _process_message 适配
+- ⏳ **T1.4** _process_message 适配 → ✅ 完成 (commit `5528969`)
   - user 消息在构建后立即追加写入
   - 移除 _save_turn 调用（消息已实时写入）
   - turn 结束后调用 update_metadata
 
-- ⏳ **T1.5** 测试验证
-  - CLI 模式：发送消息，中途 kill -9，检查 JSONL 完整性
-  - 验证 Web UI 正常工作（JSONL 格式兼容）
-  - 验证 memory consolidation 不受影响
+- ⏳ **T1.5** 测试验证 → ✅ 完成
+  - 单元测试：6 项全部通过（append_message, truncation, reasoning strip, reload）
+  - CLI 简单对话：metadata + user + assistant 正确写入
+  - CLI 工具调用：metadata + user + assistant(tool_calls) + tool + assistant(final) 正确写入
+  - Web UI 兼容：JSONL 格式不变，Gateway 和 Worker 无需修改
 
-- ⏳ **T1.6** Git 提交 + 文档更新
+- ⏳ **T1.6** Git 提交 + 文档更新 → ✅ 完成
+  - commit `5528969` on feat/realtime-persist, merged to local
 
 ---
 

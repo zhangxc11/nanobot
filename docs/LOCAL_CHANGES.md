@@ -27,6 +27,7 @@ local    ← 本地自定义改动（基于 main）
 | `dae3b53` | `agent/loop.py` | fix | Max iterations 消息写入 JSONL（Web UI 可见） |
 | `c14804d` | `session/manager.py` | fix | 防止 history 窗口截断产生孤立 tool_result |
 | `d2a5769` | `agent/tools/shell.py` | fix | exec 工具拒绝含 `&` 后台操作符的命令 |
+| `5528969` | `agent/loop.py`, `session/manager.py` | feat | 实时 Session 持久化 — 每条消息立即追加写入 JSONL |
 
 ---
 
@@ -131,6 +132,29 @@ def _has_background_process(command: str) -> bool:
 4. 去掉 `&` 直接前台运行
 
 **与 Web Chat 的配合**: web-chat 的 `gateway.py` 和 `worker.py` 新增了 `--daemonize` 标志（double-fork daemon），以及 `restart-gateway.sh` 统一管理脚本。exec 工具可安全调用脚本而不会卡死。
+
+---
+
+### 6. 实时 Session 持久化 (`5528969`)
+
+**文件**: `nanobot/agent/loop.py`, `nanobot/session/manager.py`
+
+**问题**: `_save_turn()` + `sessions.save()` 只在 `_process_message()` 末尾调用。`_run_agent_loop()` 运行期间（可能数分钟的多轮工具调用），所有消息只在内存中。进程异常退出（crash/kill/OOM）= 全部丢失。
+
+**改动**:
+
+1. **SessionManager 新增方法**:
+   - `append_message(session, message)`: 追加一条消息到 JSONL 文件（`open("a")` + `flush` + `fsync`），同时更新内存中的 `session.messages`
+   - `update_metadata(session)`: 在 turn 结束时重写整个文件更新 metadata（低频调用）
+   - `_prepare_entry(message)`: 统一的消息预处理（strip reasoning_content, truncate tool results）
+   - `_write_metadata_line(path, session)`: 为新文件写入 metadata 头行
+
+2. **AgentLoop 改动**:
+   - `_run_agent_loop()` 新增 `session` 参数
+   - User 消息在 `_process_message()` 中构建后立即调用 `append_message`
+   - 每条 assistant/tool 消息在 `_run_agent_loop()` 中产生后立即调用 `append_message`
+   - `_process_message()` 末尾调用 `update_metadata()` 替代 `_save_turn()` + `save()`
+   - `_save_turn()` 标记为 deprecated，不再在主流程中调用
 
 ---
 
