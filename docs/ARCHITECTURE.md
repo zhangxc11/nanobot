@@ -573,6 +573,69 @@ local (当前)
 
 ---
 
+## 三-B、实时 Token 用量记录（Phase 4）
+
+### 3B.1 问题
+
+Phase 2 的 UsageRecorder 在 `_run_agent_loop` **末尾**一次性写入 SQLite。如果 agent 执行中途异常退出，`accumulated_usage`（内存字典）全部丢失。
+
+### 3B.2 改造方案
+
+将 usage 写入从"循环结束后批量写入"改为"每次 LLM 调用后立即写入"：
+
+```python
+# _run_agent_loop 改造要点
+
+while iteration < self.max_iterations:
+    response = await self.provider.chat(...)
+
+    # 🆕 每次 LLM 调用后立即写入 SQLite
+    if response.usage and self.usage_recorder is not None:
+        now = datetime.now().isoformat()
+        self.usage_recorder.record(
+            session_key=session_key,
+            model=self.model,
+            prompt_tokens=response.usage.get("prompt_tokens", 0),
+            completion_tokens=response.usage.get("completion_tokens", 0),
+            total_tokens=response.usage.get("total_tokens", 0),
+            llm_calls=1,
+            started_at=now,
+            finished_at=now,
+        )
+
+    # 累加到 accumulated_usage 仍保留（用于 stderr 汇总输出 + callbacks.on_usage）
+    if response.usage:
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            accumulated_usage[key] += response.usage.get(key, 0)
+        accumulated_usage["llm_calls"] += 1
+
+    # ... 后续 tool call 处理不变 ...
+
+# 循环结束后：
+# - 不再调用 usage_recorder.record()（已逐次写入）
+# - stderr JSON 输出保留（汇总，向后兼容）
+# - callbacks.on_usage 保留（汇总，通知调用方）
+```
+
+### 3B.3 时间戳设计
+
+每条 usage 记录的 `started_at` 和 `finished_at` 都取 `datetime.now().isoformat()`，与同一次 LLM 调用产生的 assistant 消息的 `timestamp` 一致。
+
+这意味着可以通过 `session_key + started_at` 将 usage 记录与 session JSONL 中的消息关联。
+
+### 3B.4 对聚合查询的影响
+
+**无影响**。Web-chat 的 UsageIndicator 和 UsagePage 都使用 `SUM()` 聚合查询：
+
+```sql
+SELECT SUM(prompt_tokens), SUM(completion_tokens), SUM(total_tokens), SUM(llm_calls)
+FROM token_usage WHERE session_key = ?
+```
+
+原来一个 turn 写入 1 条记录（`llm_calls=3, total_tokens=15000`），现在写入 3 条记录（每条 `llm_calls=1`），`SUM()` 结果完全相同。
+
+---
+
 ## 四、与 Web Chat 的交互
 
 ### 4.1 当前交互方式

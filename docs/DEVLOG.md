@@ -12,7 +12,8 @@
 | 历史改动 (2.1-2.5) | ✅ 已完成 | local |
 | Phase 1: 实时 Session 持久化 | ✅ 已完成 | feat/realtime-persist → local |
 | Phase 2: 统一 Token 记录 | ✅ 已完成 | feat/unified-usage → local |
-| Phase 3: SDK 化改造 | 🔜 待开始 | feat/sdk |
+| Phase 3: SDK 化改造 | ✅ 已完成 | feat/sdk → local |
+| Phase 4: 实时 Token 用量记录 | 🔜 进行中 | feat/realtime-usage |
 
 ---
 
@@ -166,6 +167,32 @@
 2. **AgentRunner 复用 CLI _make_provider**: 避免重复实现 provider 创建逻辑
 3. **Worker asyncio 线程**: HTTP 仍用 ThreadingMixIn，agent 执行在独立 asyncio loop
 4. **AgentRunner 单例**: Worker 启动时初始化一次，所有请求共享
+
+---
+
+## Phase 4: 实时 Token 用量记录
+
+### 需求来源
+- nanobot REQUIREMENTS.md §七
+
+### 目标
+每次 LLM 调用后立即将 usage 写入 SQLite，中途异常退出不丢失已记录的 usage。
+
+### 任务清单
+
+- 🔜 **T4.1** 修改 `_run_agent_loop` — 每次 LLM 调用后立即写入 SQLite
+  - `provider.chat()` 返回后，如果有 `response.usage`，立即调用 `usage_recorder.record()`
+  - 时间戳取 `datetime.now().isoformat()`（与 assistant 消息 timestamp 一致）
+  - 每条记录 `llm_calls=1`
+  - `accumulated_usage` 内存累加保留（用于 stderr 汇总 + callbacks.on_usage）
+  - 循环结束后不再调用 `usage_recorder.record()`（已逐次写入）
+
+- ⏳ **T4.2** 测试验证
+  - UsageRecorder 单元测试：验证多次调用产生多条记录，SUM 正确
+  - CLI 模式：验证 analytics.db 中每次 LLM 调用产生一条记录
+  - Web UI：验证 UsageIndicator 和 UsagePage 聚合正确
+
+- ⏳ **T4.3** Git 提交 + 文档更新
 
 ---
 

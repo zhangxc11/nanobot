@@ -227,11 +227,27 @@ class AgentLoop:
                 max_tokens=self.max_tokens,
             )
 
-            # Accumulate token usage from this LLM call
+            # Record token usage from this LLM call — immediately to SQLite
+            # so that a crash mid-turn does not lose usage data.
             if response.usage:
                 for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
                     accumulated_usage[key] += response.usage.get(key, 0)
                 accumulated_usage["llm_calls"] += 1
+
+                # Realtime usage persistence: write each LLM call individually
+                if self.usage_recorder is not None:
+                    call_ts = datetime.now().isoformat()
+                    session_key = session.key if session is not None else "unknown"
+                    self.usage_recorder.record(
+                        session_key=session_key,
+                        model=self.model,
+                        prompt_tokens=response.usage.get("prompt_tokens", 0),
+                        completion_tokens=response.usage.get("completion_tokens", 0),
+                        total_tokens=response.usage.get("total_tokens", 0),
+                        llm_calls=1,
+                        started_at=call_ts,
+                        finished_at=call_ts,
+                    )
 
             if response.has_tool_calls:
                 if _progress_fn:
@@ -308,8 +324,11 @@ class AgentLoop:
             if callbacks is not None:
                 await callbacks.on_message(messages[-1])
 
-        # Print usage to stderr as a JSON line for external consumers (e.g. worker.py)
-        # AND record to SQLite via UsageRecorder (unified for all invocation modes).
+        # Print usage summary to stderr as a JSON line for external consumers
+        # (e.g. worker.py) and notify callbacks.
+        # NOTE: Individual LLM call usage is already written to SQLite in
+        # realtime above.  This block only produces the *aggregate* summary
+        # for stderr output and the on_usage callback.
         if accumulated_usage.get("llm_calls", 0) > 0:
             import sys
             finished_at = datetime.now().isoformat()
@@ -325,19 +344,6 @@ class AgentLoop:
                 "started_at": loop_started_at,
                 "finished_at": finished_at,
             }
-
-            # SQLite recording (unified across CLI/IM/Web/Cron)
-            if self.usage_recorder is not None:
-                self.usage_recorder.record(
-                    session_key=session_key,
-                    model=self.model,
-                    prompt_tokens=accumulated_usage.get("prompt_tokens", 0),
-                    completion_tokens=accumulated_usage.get("completion_tokens", 0),
-                    total_tokens=accumulated_usage.get("total_tokens", 0),
-                    llm_calls=accumulated_usage.get("llm_calls", 0),
-                    started_at=loop_started_at,
-                    finished_at=finished_at,
-                )
 
             # stderr JSON output (backward compat for worker.py parsing)
             print(json.dumps(usage_record, ensure_ascii=False), file=sys.stderr)
