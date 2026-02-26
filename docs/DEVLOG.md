@@ -13,7 +13,7 @@
 | Phase 1: 实时 Session 持久化 | ✅ 已完成 | feat/realtime-persist → local |
 | Phase 2: 统一 Token 记录 | ✅ 已完成 | feat/unified-usage → local |
 | Phase 3: SDK 化改造 | ✅ 已完成 | feat/sdk → local |
-| Phase 4: 实时 Token 用量记录 | 🔜 进行中 | feat/realtime-usage |
+| Phase 4: 实时 Token 用量记录 | ✅ 已完成 | feat/realtime-usage → local |
 
 ---
 
@@ -193,7 +193,10 @@
   - CLI 工具调用（2 次 LLM）：analytics.db 新增 2 条独立记录，每条 llm_calls=1，时间戳不同
   - 现有测试无回归（20 failed / 63 passed，与改动前一致）
 
-- ⏳ **T4.3** Git 提交 + 合并 + 文档更新
+- ✅ **T4.3** Git 提交 + 合并 + 文档更新
+  - commit `17cdef8` on feat/realtime-usage, merged to local
+  - LOCAL_CHANGES.md §9 更新
+  - DEVLOG.md 更新
 
 ---
 

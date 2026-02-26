@@ -30,6 +30,7 @@ local    ← 本地自定义改动（基于 main）
 | `5528969` | `agent/loop.py`, `session/manager.py` | feat | 实时 Session 持久化 — 每条消息立即追加写入 JSONL |
 | `863b9f0` | `agent/loop.py`, `cli/commands.py`, `usage/recorder.py` (新) | feat | 统一 Token 记录 — UsageRecorder 直接写入 SQLite |
 | `2315216` | `agent/callbacks.py` (新), `agent/loop.py`, `sdk/__init__.py` (新), `sdk/runner.py` (新) | feat | SDK 层 — AgentCallbacks + AgentRunner + callbacks in AgentLoop |
+| `17cdef8` | `agent/loop.py`, `tests/test_realtime_usage.py` (新) | feat | 实时 Token 用量记录 — 每次 LLM 调用立即写入 SQLite |
 
 ---
 
@@ -260,6 +261,44 @@ def _has_background_process(command: str) -> bool:
    - Kill 机制从 `os.kill(pid)` 改为 `future.cancel()`
 
 **向后兼容**: 所有现有调用方（CLI、gateway、IM）不受影响 — callbacks 默认为 None，所有新代码路径都有 `if callbacks` 守卫。
+
+---
+
+### 9. 实时 Token 用量记录 (`17cdef8`)
+
+**文件**: `nanobot/agent/loop.py`, `tests/test_realtime_usage.py` (新)
+
+**问题**: Phase 2 的 UsageRecorder 在 `_run_agent_loop` 末尾一次性写入 SQLite。如果 agent 执行中途异常退出（crash/kill/OOM），`accumulated_usage`（内存字典）全部丢失。与 Phase 1 解决的 session 持久化问题完全类似。
+
+**改动**:
+
+1. **`_run_agent_loop()` — 逐次写入**:
+   - 每次 `provider.chat()` 返回后，如果有 `response.usage`，立即调用 `usage_recorder.record()`
+   - 每条记录 `llm_calls=1`，时间戳取 `datetime.now().isoformat()`
+   - 时间戳与同一次 LLM 调用产生的 assistant 消息的 `timestamp` 一致
+   - `accumulated_usage` 内存累加保留（用于 stderr 汇总 + `callbacks.on_usage`）
+
+2. **循环结束后**:
+   - 不再调用 `usage_recorder.record()`（已逐次写入）
+   - stderr JSON 汇总输出保留（向后兼容 Worker 解析）
+   - `callbacks.on_usage` 汇总通知保留
+
+**对聚合查询的影响**: 无。Web-chat 的 UsageIndicator 和 UsagePage 使用 `SUM()` 聚合，多条细粒度记录的 SUM 等于原来一条汇总记录。
+
+**数据流对比**:
+```
+Phase 2:
+  LLM call 1 → 累加到内存
+  LLM call 2 → 累加到内存
+  循环结束 → 一次性写入 SQLite（1 条记录）
+  中途崩溃 → 全部丢失 ❌
+
+Phase 4:
+  LLM call 1 → 立即写入 SQLite（1 条记录）
+  LLM call 2 → 立即写入 SQLite（1 条记录）
+  循环结束 → stderr/callback 输出汇总
+  中途崩溃 → 已写入的记录保留 ✅
+```
 
 ---
 
