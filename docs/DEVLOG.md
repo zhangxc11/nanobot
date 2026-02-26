@@ -125,29 +125,47 @@
 
 ### 任务清单
 
-- ⏳ **T3.1** 定义 AgentCallbacks 协议
-  - agent/callbacks.py
-  - on_progress, on_message, on_usage, on_done, on_error
+- ✅ **T3.1** 定义 AgentCallbacks 协议 — `agent/callbacks.py`
+  - AgentCallbacks Protocol: on_progress, on_message, on_usage, on_done, on_error
+  - DefaultCallbacks 基类（no-op 默认实现）
+  - AgentResult dataclass
 
-- ⏳ **T3.2** _run_agent_loop 接受 callbacks
-  - 替换现有的 on_progress 参数
-  - 在每个关键节点调用对应回调
+- ✅ **T3.2** _run_agent_loop 接受 callbacks
+  - 新增 `callbacks: DefaultCallbacks | None` 参数
+  - callbacks.on_progress 替代 on_progress（当提供时）
+  - 每条消息持久化后调用 on_message
+  - Usage 记录后调用 on_usage
+  - process_direct() / _process_message() 透传 callbacks
 
-- ⏳ **T3.3** 创建 AgentRunner
-  - sdk/runner.py
-  - from_config() 工厂方法
-  - run() 异步执行方法
+- ✅ **T3.3** 创建 AgentRunner — `sdk/runner.py`
+  - from_config() 工厂方法（复用 CLI _make_provider）
+  - run() 调用 process_direct(callbacks=...)
+  - close() 释放 MCP 连接
 
-- ⏳ **T3.4** 改造 web-chat Worker
-  - 从 subprocess.Popen 改为 AgentRunner.run()
-  - WorkerCallbacks 实现 SSE 通知
-  - 需要处理异步事件循环（Worker 当前是线程模型）
+- ✅ **T3.4** 改造 web-chat Worker
+  - 从 subprocess.Popen 改为 AgentRunner.run() in-process 调用
+  - asyncio event loop 在专用线程中运行
+  - AgentRunner 作为单例，复用 MCP 连接
+  - WorkerCallbacks 桥接 agent 事件到 SSE 客户端
+  - Kill 机制从 os.kill(pid) 改为 future.cancel()
 
-- ⏳ **T3.5** 集成测试
-  - Web UI 端到端验证
-  - 验证进度、usage、消息持久化全链路
+- ✅ **T3.5** 集成测试
+  - SDK smoke test: 简单回复 + 工具调用场景
+  - Worker health check: `mode: sdk`
+  - SSE 流式端点: progress + done + usage
+  - Blocking 端点: 正常返回
+  - Gateway → Worker 端到端: 正常工作
 
-- ⏳ **T3.6** Git 提交 + 文档更新
+- ✅ **T3.6** Git 提交 + 文档更新
+  - nanobot commit: `2315216` (feat/sdk 分支)
+  - LOCAL_CHANGES.md §8 更新
+  - DEVLOG.md 更新
+
+### 关键设计决策
+1. **callbacks vs on_progress**: 保留 on_progress 向后兼容，callbacks 优先级更高
+2. **AgentRunner 复用 CLI _make_provider**: 避免重复实现 provider 创建逻辑
+3. **Worker asyncio 线程**: HTTP 仍用 ThreadingMixIn，agent 执行在独立 asyncio loop
+4. **AgentRunner 单例**: Worker 启动时初始化一次，所有请求共享
 
 ---
 

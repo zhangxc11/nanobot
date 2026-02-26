@@ -29,6 +29,7 @@ local    ← 本地自定义改动（基于 main）
 | `d2a5769` | `agent/tools/shell.py` | fix | exec 工具拒绝含 `&` 后台操作符的命令 |
 | `5528969` | `agent/loop.py`, `session/manager.py` | feat | 实时 Session 持久化 — 每条消息立即追加写入 JSONL |
 | `863b9f0` | `agent/loop.py`, `cli/commands.py`, `usage/recorder.py` (新) | feat | 统一 Token 记录 — UsageRecorder 直接写入 SQLite |
+| `2315216` | `agent/callbacks.py` (新), `agent/loop.py`, `sdk/__init__.py` (新), `sdk/runner.py` (新) | feat | SDK 层 — AgentCallbacks + AgentRunner + callbacks in AgentLoop |
 
 ---
 
@@ -217,6 +218,48 @@ def _has_background_process(command: str) -> bool:
   所有模式 → UsageRecorder → SQLite（直接写入）
            → stderr（保留，调试/兼容用）
 ```
+
+---
+
+### 8. SDK 层 — AgentCallbacks + AgentRunner (`2315216`)
+
+**文件**: `nanobot/agent/callbacks.py` (新), `nanobot/agent/loop.py`, `nanobot/sdk/__init__.py` (新), `nanobot/sdk/runner.py` (新)
+
+**问题**: Web-chat Worker 通过 subprocess 调用 `nanobot agent` CLI 命令执行 agent。这带来多个问题：
+- 每次调用都要启动新进程（慢，资源浪费）
+- 进度信息通过 stdout 行解析（脆弱）
+- Usage 数据通过 stderr JSON 解析（链路长，容易丢失）
+- 无法在进程内共享 MCP 连接等资源
+
+**改动**:
+
+1. **`agent/callbacks.py`** — 回调协议:
+   - `AgentCallbacks` Protocol: 定义 `on_progress`, `on_message`, `on_usage`, `on_done`, `on_error` 五个异步回调
+   - `DefaultCallbacks` 基类: 所有回调的 no-op 默认实现，消费者只需覆盖关心的事件
+   - `AgentResult` dataclass: 包含 `content`, `tools_used`, `usage`, `messages`
+
+2. **`agent/loop.py`** — 回调集成:
+   - `_run_agent_loop()` 新增 `callbacks: DefaultCallbacks | None` 参数
+   - 当 callbacks 提供时，`callbacks.on_progress` 替代 `on_progress` 参数
+   - 每条消息持久化后调用 `callbacks.on_message`
+   - Usage 记录后调用 `callbacks.on_usage`
+   - `_process_message()` 和 `process_direct()` 透传 callbacks
+   - `process_direct()` 在完成时调用 `callbacks.on_done`
+
+3. **`sdk/runner.py`** — 高层封装:
+   - `AgentRunner.from_config()` 工厂方法: 镜像 CLI commands.py 的 agent 命令初始化逻辑
+   - `AgentRunner.run()`: 调用 `process_direct(callbacks=...)`，返回最终文本
+   - `AgentRunner.close()`: 释放 MCP 连接等资源
+   - 复用 `cli/commands.py` 的 `_make_provider()` 函数，支持所有 provider 类型
+
+4. **Web-chat Worker 改造** (在 web-chat 仓库):
+   - 从 subprocess 改为 SDK in-process 调用
+   - asyncio event loop 在专用线程中运行
+   - AgentRunner 作为单例，复用 MCP 连接
+   - WorkerCallbacks 桥接 agent 事件到 SSE 客户端
+   - Kill 机制从 `os.kill(pid)` 改为 `future.cancel()`
+
+**向后兼容**: 所有现有调用方（CLI、gateway、IM）不受影响 — callbacks 默认为 None，所有新代码路径都有 `if callbacks` 守卫。
 
 ---
 
