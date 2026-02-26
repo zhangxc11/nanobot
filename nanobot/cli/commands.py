@@ -306,6 +306,10 @@ def gateway(
     from nanobot.usage.recorder import UsageRecorder
     usage_recorder = UsageRecorder()
 
+    # LLM call detail logger
+    from nanobot.usage.detail_logger import LLMDetailLogger
+    detail_logger = LLMDetailLogger()
+
     # Create agent with cron service
     agent = AgentLoop(
         bus=bus,
@@ -324,6 +328,7 @@ def gateway(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         usage_recorder=usage_recorder,
+        detail_logger=detail_logger,
     )
     
     # Set cron callback (needs agent)
@@ -468,6 +473,10 @@ def agent(
     # Unified usage recorder (SQLite)
     from nanobot.usage.recorder import UsageRecorder
     usage_recorder = UsageRecorder()
+
+    # LLM call detail logger
+    from nanobot.usage.detail_logger import LLMDetailLogger
+    detail_logger = LLMDetailLogger()
     
     agent_loop = AgentLoop(
         bus=bus,
@@ -485,6 +494,7 @@ def agent(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         usage_recorder=usage_recorder,
+        detail_logger=detail_logger,
     )
     
     # Show spinner when logs are off (no output to miss); skip when logs are on
@@ -965,6 +975,9 @@ def cron_run(
     from nanobot.usage.recorder import UsageRecorder
     usage_recorder = UsageRecorder()
 
+    from nanobot.usage.detail_logger import LLMDetailLogger
+    detail_logger = LLMDetailLogger()
+
     agent_loop = AgentLoop(
         bus=bus,
         provider=provider,
@@ -980,6 +993,7 @@ def cron_run(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         usage_recorder=usage_recorder,
+        detail_logger=detail_logger,
     )
 
     store_path = get_data_dir() / "cron" / "jobs.json"

@@ -63,6 +63,7 @@ class AgentRunner:
         from nanobot.session.manager import SessionManager
         from nanobot.cron.service import CronService
         from nanobot.usage.recorder import UsageRecorder
+        from nanobot.usage.detail_logger import LLMDetailLogger
 
         config = load_config(config_path)
         data_dir = get_data_dir()
@@ -84,6 +85,9 @@ class AgentRunner:
         # Usage recorder
         usage_recorder = UsageRecorder()
 
+        # LLM call detail logger
+        detail_logger = LLMDetailLogger()
+
         agent_loop = AgentLoop(
             bus=bus,
             provider=provider,
@@ -101,6 +105,7 @@ class AgentRunner:
             mcp_servers=config.tools.mcp_servers,
             channels_config=config.channels,
             usage_recorder=usage_recorder,
+            detail_logger=detail_logger,
         )
 
         logger.info("AgentRunner created (model={})", config.agents.defaults.model)

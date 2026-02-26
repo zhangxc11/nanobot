@@ -315,6 +315,98 @@ LLM call 3 → 立即写入 SQLite（1 条记录）
 
 ---
 
+## 八、LLM 调用详情日志（web-chat Backlog #15）
+
+### 8.1 需求背景
+
+当前 `analytics.db` 的 `token_usage` 表只记录了每次 LLM 调用的 **token 数量**（prompt_tokens / completion_tokens），但没有记录**具体发送了什么内容、返回了什么内容**。
+
+统计数据显示 token 消耗巨大（450 次调用累计 5100 万 tokens，平均每次 prompt 约 11.4 万 tokens），但无法判断：
+- 系统 prompt 占比多少？能否精简？
+- 历史消息占比多少？memory_window 是否过大？
+- 工具调用结果占比多少？truncation 阈值是否合理？
+- 哪些 session 的 prompt 增长最快？是否需要更积极的 consolidation？
+
+### 8.2 目标
+
+每次 LLM 调用（`provider.chat()`）时，将完整的 **messages（prompt）** 和 **response** 记录到日志文件，供后续离线分析。
+
+### 8.3 设计方案
+
+#### 存储格式：JSONL 按天分文件
+
+```
+~/.nanobot/workspace/llm-logs/
+├── 2026-02-27.jsonl
+├── 2026-02-28.jsonl
+└── ...
+```
+
+每行一个 JSON 对象：
+
+```json
+{
+  "timestamp": "2026-02-27T01:31:32.606304",
+  "session_key": "webchat:1772126509",
+  "model": "claude-opus-4-6",
+  "iteration": 3,
+  "prompt_tokens": 23380,
+  "completion_tokens": 79,
+  "total_tokens": 23459,
+  "messages_count": 15,
+  "system_prompt_chars": 12500,
+  "messages": [ ... ],
+  "response": {
+    "content": "...",
+    "tool_calls": [ ... ],
+    "finish_reason": "tool_use",
+    "usage": { ... }
+  }
+}
+```
+
+#### 为什么选 JSONL 文件而非 SQLite BLOB
+
+| 方案 | 优点 | 缺点 |
+|------|------|------|
+| JSONL 按天分文件 | 简单、可 grep、可压缩、不影响 analytics.db 性能 | 需要额外脚本做关联查询 |
+| SQLite BLOB | 查询方便 | DB 膨胀严重（预估 ~27MB/天），影响读取性能 |
+| 每次调用一个文件 | 最灵活 | 文件数量爆炸 |
+
+#### 存储量估算
+
+- 平均单次 messages JSON: ~550KB
+- 每天约 50 次调用: ~27MB/天（不压缩）
+- 可选：旧日志自动 gzip 压缩
+
+#### SQLite 关联
+
+`token_usage` 表新增 `detail_file` 和 `detail_line` 字段（可选），指向 JSONL 文件中的具体行号，方便从汇总数据追溯到详情。
+
+### 8.4 设计要求
+
+1. **默认开启**：每次 LLM 调用自动记录，无需手动配置
+2. **不影响性能**：异步/非阻塞写入，不拖慢 agent loop
+3. **按天分文件**：便于管理和清理
+4. **包含完整 messages**：系统 prompt + 历史 + 当前消息 + 工具结果
+5. **包含完整 response**：content + tool_calls + finish_reason + usage
+6. **额外统计字段**：messages_count、system_prompt_chars（方便快速分析不用解析完整 JSON）
+7. **向后兼容**：不修改现有 `token_usage` 表 schema（新增字段用 ALTER TABLE，兼容旧数据）
+
+### 8.5 实现位置
+
+修改 `nanobot/agent/loop.py` 的 `_run_agent_loop` 方法，在每次 `provider.chat()` 返回后、usage 记录之后，将 messages + response 写入 JSONL。
+
+可封装为 `nanobot/usage/detail_logger.py` 独立模块。
+
+### 8.6 非目标
+
+- 不提供 Web UI 查看详情的功能（后续可做）
+- 不自动分析/报告（后续可做分析脚本）
+- 不压缩当天日志（只压缩历史日志，后续可做）
+
+---
+
 ### 手动维护的 backlog
 
 **note** 这个部分手动添加需求 backlog。被激活后，更新前序需求文档章节，推进开发。

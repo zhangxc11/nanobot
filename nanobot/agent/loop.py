@@ -27,6 +27,7 @@ from nanobot.providers.base import LLMProvider
 from nanobot.agent.callbacks import AgentResult, DefaultCallbacks
 from nanobot.session.manager import Session, SessionManager
 from nanobot.usage.recorder import UsageRecorder
+from nanobot.usage.detail_logger import LLMDetailLogger
 
 if TYPE_CHECKING:
     from nanobot.config.schema import ChannelsConfig, ExecToolConfig
@@ -63,6 +64,7 @@ class AgentLoop:
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
         usage_recorder: UsageRecorder | None = None,
+        detail_logger: LLMDetailLogger | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         self.bus = bus
@@ -79,6 +81,7 @@ class AgentLoop:
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
         self.usage_recorder = usage_recorder
+        self.detail_logger = detail_logger
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
@@ -248,6 +251,30 @@ class AgentLoop:
                         started_at=call_ts,
                         finished_at=call_ts,
                     )
+
+            # Log full LLM call details (messages + response) to JSONL
+            if self.detail_logger is not None:
+                _detail_session_key = session.key if session is not None else "unknown"
+                _tc_dicts = None
+                if response.has_tool_calls:
+                    _tc_dicts = [
+                        {
+                            "id": tc.id,
+                            "name": tc.name,
+                            "arguments": tc.arguments,
+                        }
+                        for tc in response.tool_calls
+                    ]
+                self.detail_logger.log_call(
+                    session_key=_detail_session_key,
+                    model=self.model,
+                    iteration=iteration,
+                    messages=messages,
+                    response_content=response.content,
+                    response_tool_calls=_tc_dicts,
+                    response_finish_reason=response.finish_reason,
+                    response_usage=response.usage if response.usage else None,
+                )
 
             if response.has_tool_calls:
                 if _progress_fn:

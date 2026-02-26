@@ -329,4 +329,46 @@ async def check_user_input(self) -> str | None:
 
 ---
 
+## §12 LLM 调用详情日志 (feat/llm-detail-log)
+
+**改动文件**: `usage/detail_logger.py` (新), `usage/__init__.py`, `agent/loop.py`, `sdk/runner.py`, `cli/commands.py`, `tests/test_detail_logger.py` (新)
+
+**问题**: `analytics.db` 只记录 token 数量（prompt_tokens / completion_tokens），无法分析具体的 token 消耗来源（系统 prompt 占比、历史消息占比、工具结果占比等）。
+
+**改动**:
+
+1. **新增 `usage/detail_logger.py`**:
+   - `LLMDetailLogger` 类
+   - 日志目录: `~/.nanobot/workspace/llm-logs/`
+   - 按天分文件: `YYYY-MM-DD.jsonl`
+   - `log_call()` 方法: 写入完整 messages + response + 统计字段
+   - 返回 `(filename, line_number)` 供关联
+   - 支持 `enabled=False` 禁用
+
+2. **`agent/loop.py`** — 集成:
+   - `AgentLoop.__init__` 新增 `detail_logger` 参数
+   - `_run_agent_loop()` 每次 `provider.chat()` 返回后调用 `detail_logger.log_call()`
+
+3. **`sdk/runner.py` + `cli/commands.py`** — 初始化:
+   - 所有入口（agent, gateway, cron-run, SDK）创建 `LLMDetailLogger()` 并传入 `AgentLoop`
+
+**JSONL 记录格式**:
+```json
+{
+  "timestamp": "ISO8601",
+  "session_key": "webchat:xxx",
+  "model": "claude-opus-4-6",
+  "iteration": 1,
+  "prompt_tokens": 7085,
+  "completion_tokens": 8,
+  "total_tokens": 7093,
+  "messages_count": 2,
+  "system_prompt_chars": 13715,
+  "messages": [ ... ],
+  "response": { "content": "...", "tool_calls": [...], "finish_reason": "stop", "usage": {...} }
+}
+```
+
+---
+
 *本文档随 local 分支改动持续更新。*

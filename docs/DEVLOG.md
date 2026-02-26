@@ -15,6 +15,7 @@
 | Phase 3: SDK 化改造 | ✅ 已完成 | feat/sdk → local |
 | Phase 4: 实时 Token 用量记录 | ✅ 已完成 | feat/realtime-usage → local |
 | Phase 5: 工具调用间隙用户注入 | ✅ 已完成 | feat/user-inject → local |
+| Phase 6: LLM 调用详情日志 | 🔜 进行中 | feat/llm-detail-log → local |
 
 ---
 
@@ -244,6 +245,45 @@
 
 ### Git
 - commit `94598cb` on feat/user-inject → merged to local
+
+---
+
+## Phase 6: LLM 调用详情日志 (web-chat Backlog #15) 🔜
+
+### 需求来源
+- web-chat REQUIREMENTS.md Backlog #15
+- nanobot REQUIREMENTS.md §八
+
+### 目标
+每次 LLM 调用时，将完整的 messages（prompt）和 response 记录到 JSONL 日志文件，供后续分析 token 消耗优化。
+
+### 任务清单
+
+- 🔜 **T6.1** 创建 `usage/detail_logger.py` 模块 → ✅ 完成
+  - `LLMDetailLogger` 类
+  - 日志目录: `~/.nanobot/workspace/llm-logs/`
+  - 按天分文件: `YYYY-MM-DD.jsonl`
+  - `log_call()` 方法: 写入 messages + response + 统计字段
+  - 返回 (file_name, line_number) 供 SQLite 关联
+  - 支持 enabled=False 禁用
+
+- ⏳ **T6.2** `agent/loop.py` 集成 → ✅ 完成
+  - `AgentLoop.__init__` 接受 `detail_logger: LLMDetailLogger | None` 参数
+  - `_run_agent_loop` 中每次 `provider.chat()` 返回后调用 `detail_logger.log_call()`
+  - 传入: messages, response (content + tool_calls + finish_reason + usage), session_key, model, iteration
+
+- ⏳ **T6.3** `sdk/runner.py` + `cli/commands.py` 初始化 → ✅ 完成
+  - `AgentRunner.from_config()` 创建 LLMDetailLogger 并传入 AgentLoop
+  - CLI agent/gateway/cron-run 命令同样创建并传入
+  - 默认开启，无需配置
+
+- ⏳ **T6.4** 测试验证 → ✅ 完成
+  - 单元测试: 6 项全部通过 (test_detail_logger.py)
+  - SDK 端到端: 确认 JSONL 文件生成，内容完整
+  - 记录包含: system_prompt_chars=13715, messages_count=2, 完整 response
+  - 现有 usage 测试无回归 (11 passed)
+
+- ⏳ **T6.5** Git 提交 + 文档更新
 
 ---
 
