@@ -292,6 +292,27 @@ class AgentLoop:
                         self.sessions.append_message(session, messages[-1])
                     if callbacks is not None:
                         await callbacks.on_message(messages[-1])
+
+                # ── User injection checkpoint ──
+                # After all tools in this round complete, check if the user
+                # has sent supplementary input to inject before the next LLM call.
+                if callbacks is not None:
+                    injected = await callbacks.check_user_input()
+                    if injected:
+                        logger.info("User injected message: {}", injected[:120])
+                        inject_msg = {
+                            "role": "user",
+                            "content": f"[User interjection during execution]\n{injected}",
+                            "timestamp": datetime.now().isoformat(),
+                        }
+                        messages.append(inject_msg)
+
+                        # Realtime persist: injected user message
+                        if session is not None:
+                            self.sessions.append_message(session, inject_msg)
+                        await callbacks.on_message(inject_msg)
+                        if _progress_fn:
+                            await _progress_fn(f"📝 User: {injected[:80]}")
             else:
                 final_content = self._strip_think(response.content)
                 # Append the final assistant message so it gets persisted

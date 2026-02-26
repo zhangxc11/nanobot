@@ -76,6 +76,20 @@ class AgentCallbacks(Protocol):
         """Called when the agent turn fails with an exception."""
         ...
 
+    async def check_user_input(self) -> str | None:
+        """Check if user has pending input to inject into the agent loop.
+
+        Called between tool execution rounds — after all tools in the
+        current round complete, before the next LLM call.  Must return
+        immediately (non-blocking).
+
+        Returns
+        -------
+        str or None
+            User text to inject, or ``None`` if no input is pending.
+        """
+        ...
+
 
 class DefaultCallbacks:
     """Concrete base class with no-op implementations of all callbacks.
@@ -98,3 +112,6 @@ class DefaultCallbacks:
 
     async def on_error(self, error: Exception) -> None:
         pass
+
+    async def check_user_input(self) -> str | None:
+        return None
