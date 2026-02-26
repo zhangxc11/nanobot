@@ -180,19 +180,20 @@
 
 ### 任务清单
 
-- 🔜 **T4.1** 修改 `_run_agent_loop` — 每次 LLM 调用后立即写入 SQLite
+- ✅ **T4.1** 修改 `_run_agent_loop` — 每次 LLM 调用后立即写入 SQLite (commit `17cdef8`)
   - `provider.chat()` 返回后，如果有 `response.usage`，立即调用 `usage_recorder.record()`
   - 时间戳取 `datetime.now().isoformat()`（与 assistant 消息 timestamp 一致）
   - 每条记录 `llm_calls=1`
   - `accumulated_usage` 内存累加保留（用于 stderr 汇总 + callbacks.on_usage）
   - 循环结束后不再调用 `usage_recorder.record()`（已逐次写入）
 
-- ⏳ **T4.2** 测试验证
-  - UsageRecorder 单元测试：验证多次调用产生多条记录，SUM 正确
-  - CLI 模式：验证 analytics.db 中每次 LLM 调用产生一条记录
-  - Web UI：验证 UsageIndicator 和 UsagePage 聚合正确
+- ✅ **T4.2** 测试验证 (commit `17cdef8`)
+  - UsageRecorder 单元测试：5 项全部通过（单次记录、多次记录聚合、全局聚合、时间戳独立、空 session）
+  - CLI 简单对话：analytics.db 新增 1 条记录（llm_calls=1），正确
+  - CLI 工具调用（2 次 LLM）：analytics.db 新增 2 条独立记录，每条 llm_calls=1，时间戳不同
+  - 现有测试无回归（20 failed / 63 passed，与改动前一致）
 
-- ⏳ **T4.3** Git 提交 + 文档更新
+- ⏳ **T4.3** Git 提交 + 合并 + 文档更新
 
 ---
 
