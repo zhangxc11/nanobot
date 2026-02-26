@@ -74,10 +74,9 @@ class AgentRunner:
         # Bus (unused in direct mode, but required by AgentLoop)
         bus = MessageBus()
 
-        # Session manager
-        sessions_dir = config.workspace_path / "sessions"
-        sessions_dir.mkdir(parents=True, exist_ok=True)
-        session_manager = SessionManager(sessions_dir)
+        # Session manager — pass workspace root, not sessions_dir.
+        # SessionManager internally appends "/sessions" to the workspace path.
+        session_manager = SessionManager(config.workspace_path)
 
         # Cron service
         cron = CronService(data_dir / "cron")
