@@ -61,11 +61,42 @@ class ExecTool(Tool):
             "required": ["command"]
         }
     
+    @staticmethod
+    def _has_background_process(command: str) -> bool:
+        """Detect if a shell command launches background processes.
+        
+        Looks for '&' that is NOT part of '&&', '>&', '&>', or '2>&1' patterns.
+        """
+        # Remove quoted strings to avoid false positives
+        stripped = re.sub(r"'[^']*'|\"[^\"]*\"", "", command)
+        # Remove common non-background & patterns: &&, >&, &>, 2>&1, etc.
+        stripped = re.sub(r"&&|[0-9]*>&[0-9]*|&>", "", stripped)
+        return "&" in stripped
+
     async def execute(self, command: str, working_dir: str | None = None, **kwargs: Any) -> str:
         cwd = working_dir or self.working_dir or os.getcwd()
         guard_error = self._guard_command(command, cwd)
         if guard_error:
             return guard_error
+        
+        # Background process detection: commands with '&' cause the child
+        # to inherit PIPE fds, which makes communicate() block until the
+        # background process exits.  Reject such commands and suggest
+        # alternatives so the caller can restructure.
+        if self._has_background_process(command):
+            return (
+                "Error: Command contains background operator '&' which will cause "
+                "the exec tool to hang (background process inherits PIPE file "
+                "descriptors, blocking output capture).\n\n"
+                "Safe alternatives:\n"
+                "1. Use a daemonize/startup script that handles backgrounding internally "
+                "(e.g. 'restart-gateway.sh' instead of 'python3 server.py &')\n"
+                "2. Use a program's built-in --daemonize/--background flag\n"
+                "3. Use 'nohup ... >/dev/null 2>&1 & disown' with NO other "
+                "commands in the same exec call\n"
+                "4. Run the foreground command only (without '&') if you want "
+                "to see its output"
+            )
         
         try:
             process = await asyncio.create_subprocess_shell(
@@ -82,8 +113,6 @@ class ExecTool(Tool):
                 )
             except asyncio.TimeoutError:
                 process.kill()
-                # Wait for the process to fully terminate so pipes are
-                # drained and file descriptors are released.
                 try:
                     await asyncio.wait_for(process.wait(), timeout=5.0)
                 except asyncio.TimeoutError:
