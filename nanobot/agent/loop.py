@@ -24,6 +24,7 @@ from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider
+from nanobot.agent.callbacks import AgentResult, DefaultCallbacks
 from nanobot.session.manager import Session, SessionManager
 from nanobot.usage.recorder import UsageRecorder
 
@@ -179,12 +180,17 @@ class AgentLoop:
         initial_messages: list[dict],
         on_progress: Callable[..., Awaitable[None]] | None = None,
         session: Session | None = None,
+        callbacks: DefaultCallbacks | None = None,
     ) -> tuple[str | None, list[str], list[dict]]:
         """Run the agent iteration loop. Returns (final_content, tools_used, messages).
 
         When *session* is provided, each assistant / tool message is persisted
         to the session JSONL **immediately** via ``SessionManager.append_message``,
         so that a crash mid-turn does not lose data.
+
+        When *callbacks* is provided, events are dispatched to the callback
+        object (on_progress, on_message, on_usage).  If both *on_progress*
+        and *callbacks* are given, *callbacks.on_progress* takes precedence.
         """
         from datetime import datetime
         loop_started_at = datetime.now().isoformat()
@@ -198,6 +204,13 @@ class AgentLoop:
             "total_tokens": 0,
             "llm_calls": 0,
         }
+
+        # Resolve progress callback: callbacks.on_progress takes precedence
+        _progress_fn = on_progress
+        if callbacks is not None:
+            async def _cb_progress(text: str, *, tool_hint: bool = False) -> None:
+                await callbacks.on_progress(text, tool_hint=tool_hint)
+            _progress_fn = _cb_progress
 
         # How many messages existed before the loop — used to determine
         # which messages are "new" for realtime persistence.
@@ -221,11 +234,11 @@ class AgentLoop:
                 accumulated_usage["llm_calls"] += 1
 
             if response.has_tool_calls:
-                if on_progress:
+                if _progress_fn:
                     clean = self._strip_think(response.content)
                     if clean:
-                        await on_progress(clean)
-                    await on_progress(self._tool_hint(response.tool_calls), tool_hint=True)
+                        await _progress_fn(clean)
+                    await _progress_fn(self._tool_hint(response.tool_calls), tool_hint=True)
 
                 tool_call_dicts = [
                     {
@@ -246,6 +259,8 @@ class AgentLoop:
                 # Realtime persist: assistant message with tool_calls
                 if session is not None:
                     self.sessions.append_message(session, messages[-1])
+                if callbacks is not None:
+                    await callbacks.on_message(messages[-1])
 
                 for tool_call in response.tool_calls:
                     tools_used.append(tool_call.name)
@@ -259,6 +274,8 @@ class AgentLoop:
                     # Realtime persist: tool result
                     if session is not None:
                         self.sessions.append_message(session, messages[-1])
+                    if callbacks is not None:
+                        await callbacks.on_message(messages[-1])
             else:
                 final_content = self._strip_think(response.content)
                 # Append the final assistant message so it gets persisted
@@ -270,6 +287,8 @@ class AgentLoop:
                 # Realtime persist: final assistant message
                 if session is not None:
                     self.sessions.append_message(session, messages[-1])
+                if callbacks is not None:
+                    await callbacks.on_message(messages[-1])
                 break
 
         if final_content is None and iteration >= self.max_iterations:
@@ -286,6 +305,8 @@ class AgentLoop:
             # Realtime persist: max-iterations message
             if session is not None:
                 self.sessions.append_message(session, messages[-1])
+            if callbacks is not None:
+                await callbacks.on_message(messages[-1])
 
         # Print usage to stderr as a JSON line for external consumers (e.g. worker.py)
         # AND record to SQLite via UsageRecorder (unified for all invocation modes).
@@ -328,6 +349,10 @@ class AgentLoop:
                 accumulated_usage["total_tokens"],
                 self.model,
             )
+
+            # Notify callbacks of usage data
+            if callbacks is not None:
+                await callbacks.on_usage(usage_record)
 
         return final_content, tools_used, messages
 
@@ -392,6 +417,7 @@ class AgentLoop:
         msg: InboundMessage,
         session_key: str | None = None,
         on_progress: Callable[[str], Awaitable[None]] | None = None,
+        callbacks: DefaultCallbacks | None = None,
     ) -> OutboundMessage | None:
         """Process a single inbound message and return the response."""
         # System messages: parse origin from chat_id ("channel:chat_id")
@@ -412,7 +438,7 @@ class AgentLoop:
             self.sessions.append_message(session, messages[-1])
 
             final_content, _, all_msgs = await self._run_agent_loop(
-                messages, session=session,
+                messages, session=session, callbacks=callbacks,
             )
             self.sessions.update_metadata(session)
             return OutboundMessage(channel=channel, chat_id=chat_id,
@@ -504,7 +530,7 @@ class AgentLoop:
 
         final_content, _, all_msgs = await self._run_agent_loop(
             initial_messages, on_progress=on_progress or _bus_progress,
-            session=session,
+            session=session, callbacks=callbacks,
         )
 
         if final_content is None:
@@ -559,9 +585,22 @@ class AgentLoop:
         channel: str = "cli",
         chat_id: str = "direct",
         on_progress: Callable[[str], Awaitable[None]] | None = None,
+        callbacks: DefaultCallbacks | None = None,
     ) -> str:
-        """Process a message directly (for CLI or cron usage)."""
+        """Process a message directly (for CLI, cron, or SDK usage).
+
+        When *callbacks* is provided, events are dispatched to the callback
+        object.  The ``on_done`` callback receives an ``AgentResult``.
+        """
         await self._connect_mcp()
         msg = InboundMessage(channel=channel, sender_id="user", chat_id=chat_id, content=content)
-        response = await self._process_message(msg, session_key=session_key, on_progress=on_progress)
-        return response.content if response else ""
+        response = await self._process_message(
+            msg, session_key=session_key, on_progress=on_progress, callbacks=callbacks,
+        )
+        result_content = response.content if response else ""
+
+        # Fire on_done callback
+        if callbacks is not None:
+            await callbacks.on_done(AgentResult(content=result_content))
+
+        return result_content
