@@ -14,6 +14,7 @@
 | Phase 2: 统一 Token 记录 | ✅ 已完成 | feat/unified-usage → local |
 | Phase 3: SDK 化改造 | ✅ 已完成 | feat/sdk → local |
 | Phase 4: 实时 Token 用量记录 | ✅ 已完成 | feat/realtime-usage → local |
+| Phase 5: 工具调用间隙用户注入 | ✅ 已完成 | feat/user-inject → local |
 
 ---
 
@@ -218,6 +219,31 @@
 
 ### Commit
 - `aaaf81d` on local
+
+---
+
+## Phase 5: 工具调用间隙用户消息注入 (2026-02-26)
+
+### 需求来源
+- web-chat REQUIREMENTS.md Backlog #10 / Issue #25
+
+### 目标
+在 agent 执行工具调用循环过程中，用户可在工具调用间隙输入补充信息，作为 user 消息注入到 LLM 消息列表，影响后续决策。
+
+### 任务清单
+
+- ✅ **T5.1** callbacks.py: 新增 `check_user_input() -> str | None`
+  - AgentCallbacks Protocol 定义
+  - DefaultCallbacks 默认返回 None
+  - 非阻塞调用，在工具调用间隙检查
+
+- ✅ **T5.2** loop.py: agent loop 集成注入检查点
+  - 在所有工具执行完毕后、下一轮 LLM 调用前调用 `callbacks.check_user_input()`
+  - 有注入文本时构造 `[User interjection during execution]` user 消息
+  - 消息实时持久化到 JSONL + on_message 回调 + progress 通知
+
+### Git
+- commit `94598cb` on feat/user-inject → merged to local
 
 ---
 

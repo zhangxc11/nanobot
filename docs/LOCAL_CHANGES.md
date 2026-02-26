@@ -310,4 +310,23 @@ Phase 4:
 
 ---
 
+## §11 工具调用间隙用户消息注入 (commit `94598cb`)
+
+**改动文件**: `agent/callbacks.py`, `agent/loop.py`
+
+**AgentCallbacks 新增方法**:
+```python
+async def check_user_input(self) -> str | None:
+    """Non-blocking check for pending user injection messages."""
+```
+
+**Agent Loop 注入检查点**: 在 `_run_agent_loop` 中，所有工具执行完毕后、下一轮 LLM 调用前：
+1. 调用 `callbacks.check_user_input()`
+2. 如返回非 None 文本，构造 user 消息 `[User interjection during execution]\n{text}`
+3. 追加到 messages 列表 + 实时持久化 JSONL + on_message 回调 + progress 通知
+
+**DefaultCallbacks**: `check_user_input()` 默认返回 None（不影响现有调用方）。
+
+---
+
 *本文档随 local 分支改动持续更新。*
