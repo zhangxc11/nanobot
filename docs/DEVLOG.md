@@ -11,8 +11,8 @@
 |------|------|------|
 | 历史改动 (2.1-2.5) | ✅ 已完成 | local |
 | Phase 1: 实时 Session 持久化 | ✅ 已完成 | feat/realtime-persist → local |
-| Phase 2: 统一 Token 记录 | 🔜 待开始 | feat/unified-usage |
-| Phase 3: SDK 化改造 | ⏳ 待 Phase 2 | feat/sdk |
+| Phase 2: 统一 Token 记录 | ✅ 已完成 | feat/unified-usage → local |
+| Phase 3: SDK 化改造 | 🔜 待开始 | feat/sdk |
 
 ---
 
@@ -81,31 +81,36 @@
 
 ### 任务清单
 
-- ⏳ **T2.1** 创建 usage/recorder.py
+- ⏳ **T2.1** 创建 usage/recorder.py → ✅ 完成 (commit `863b9f0`)
   - UsageRecorder 类，封装 SQLite 操作
   - 复用 web-chat analytics.py 的 schema
   - 线程安全（SQLite WAL 模式）
+  - 支持 :memory: 用于测试
 
-- ⏳ **T2.2** AgentLoop 集成 UsageRecorder
+- ⏳ **T2.2** AgentLoop 集成 UsageRecorder → ✅ 完成 (commit `863b9f0`)
   - 构造函数接受 usage_recorder 参数
   - _run_agent_loop 末尾调用 recorder.record()
   - 保留 stderr JSON 输出（向后兼容）
+  - stderr JSON 新增 session_key 字段
 
-- ⏳ **T2.3** CLI commands.py 初始化
+- ⏳ **T2.3** CLI commands.py 初始化 → ✅ 完成 (commit `863b9f0`)
   - agent 命令创建 UsageRecorder 并传入 AgentLoop
   - gateway 命令同样
+  - cron-run 命令同样
 
-- ⏳ **T2.4** web-chat 适配
-  - Gateway 移除 usage 写入逻辑（核心层已写入）
-  - Gateway 的 /api/usage 路由不变（仍查询 SQLite）
-  - Worker 的 stderr 解析可简化（usage 已由核心层记录）
+- ⏳ **T2.4** web-chat 适配 → ✅ 完成
+  - Gateway _try_record_usage() 改为 no-op（核心层已写入）
+  - Gateway /api/usage 读取路由不变（仍查询同一 SQLite）
+  - Worker stderr 解析不变（兼容新增的 session_key 字段）
 
-- ⏳ **T2.5** 测试验证
-  - CLI 单次模式：验证 SQLite 有记录
-  - CLI 交互模式：验证 SQLite 有记录
-  - Web UI：验证 UsageIndicator 正常显示
+- ⏳ **T2.5** 测试验证 → ✅ 完成
+  - UsageRecorder 单元测试：5 项全部通过（record, global_usage, session_usage, empty session）
+  - CLI 简单对话：analytics.db 新增 1 条记录，session_key/model/tokens 正确
+  - CLI 工具调用：llm_calls=2，tokens 累加正确
+  - stderr JSON 输出包含 session_key，Worker 解析兼容
 
-- ⏳ **T2.6** Git 提交 + 文档更新
+- ⏳ **T2.6** Git 提交 + 文档更新 → ✅ 完成
+  - commit `863b9f0` on feat/unified-usage, merged to local
 
 ---
 

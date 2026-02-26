@@ -28,6 +28,7 @@ local    ← 本地自定义改动（基于 main）
 | `c14804d` | `session/manager.py` | fix | 防止 history 窗口截断产生孤立 tool_result |
 | `d2a5769` | `agent/tools/shell.py` | fix | exec 工具拒绝含 `&` 后台操作符的命令 |
 | `5528969` | `agent/loop.py`, `session/manager.py` | feat | 实时 Session 持久化 — 每条消息立即追加写入 JSONL |
+| `863b9f0` | `agent/loop.py`, `cli/commands.py`, `usage/recorder.py` (新) | feat | 统一 Token 记录 — UsageRecorder 直接写入 SQLite |
 
 ---
 
@@ -172,6 +173,50 @@ def _has_background_process(command: str) -> bool:
 - **Web Chat UI**: `~/.nanobot/workspace/web-chat/` — 前端 + gateway + worker
   - 文档: `docs/REQUIREMENTS.md`, `docs/ARCHITECTURE.md`, `docs/DEVLOG.md`
 - **Analytics DB**: `~/.nanobot/workspace/analytics.db` — Token 用量 SQLite 数据库
+
+---
+
+### 7. 统一 Token 记录 (`863b9f0`)
+
+**文件**: `nanobot/usage/__init__.py` (新), `nanobot/usage/recorder.py` (新), `nanobot/agent/loop.py`, `nanobot/cli/commands.py`
+
+**问题**: Token usage 记录分散在各调用方式中：
+- CLI/IM/Cron: agent loop 输出 stderr JSON → 丢弃（无持久化）
+- Web: agent loop → stderr → Worker 解析 → SSE → Gateway → SQLite
+
+只有 Web 模式有持久化，且链路长、容易丢失（SSE 断连、Worker 崩溃等）。
+
+**改动**:
+
+1. **新增 `usage/recorder.py`**:
+   - `UsageRecorder` 类，封装 SQLite 写入
+   - 复用 web-chat `analytics.py` 的 schema（共享 `analytics.db`）
+   - WAL 模式保证线程安全
+   - 支持 `:memory:` 用于单元测试
+
+2. **AgentLoop 集成**:
+   - 构造函数新增 `usage_recorder` 参数
+   - `_run_agent_loop()` 末尾调用 `recorder.record()`
+   - stderr JSON 输出保留（向后兼容 Worker 解析）
+   - stderr JSON 新增 `session_key` 字段
+
+3. **CLI commands.py**:
+   - `agent`, `gateway`, `cron run` 三个命令都创建 `UsageRecorder()` 并传入 `AgentLoop`
+
+4. **Web-chat Gateway 适配**:
+   - `_try_record_usage()` 改为 no-op（核心层已写入，避免重复记录）
+   - `/api/usage` 读取路由不变（仍查询同一 SQLite 文件）
+
+**数据流对比**:
+```
+改造前:
+  CLI/IM/Cron → stderr → 丢弃
+  Web → stderr → Worker → SSE → Gateway → SQLite
+
+改造后:
+  所有模式 → UsageRecorder → SQLite（直接写入）
+           → stderr（保留，调试/兼容用）
+```
 
 ---
 
