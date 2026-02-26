@@ -175,12 +175,8 @@ class AgentLoop:
         self,
         initial_messages: list[dict],
         on_progress: Callable[..., Awaitable[None]] | None = None,
-    ) -> tuple[str | None, list[str], list[dict], dict[str, int]]:
-        """Run the agent iteration loop.
-        
-        Returns (final_content, tools_used, messages, accumulated_usage, loop_started_at).
-        accumulated_usage keys: prompt_tokens, completion_tokens, total_tokens, llm_calls.
-        """
+    ) -> tuple[str | None, list[str], list[dict]]:
+        """Run the agent iteration loop. Returns (final_content, tools_used, messages)."""
         from datetime import datetime
         loop_started_at = datetime.now().isoformat()
         messages = initial_messages
@@ -258,7 +254,31 @@ class AgentLoop:
                 "without completing the task. You can try breaking the task into smaller steps."
             )
 
-        return final_content, tools_used, messages, accumulated_usage, loop_started_at
+        # Print usage to stdout as a JSON line for external consumers (e.g. worker.py)
+        if accumulated_usage.get("llm_calls", 0) > 0:
+            import sys
+            finished_at = datetime.now().isoformat()
+            usage_record = {
+                "__usage__": True,
+                "model": self.model,
+                "prompt_tokens": accumulated_usage.get("prompt_tokens", 0),
+                "completion_tokens": accumulated_usage.get("completion_tokens", 0),
+                "total_tokens": accumulated_usage.get("total_tokens", 0),
+                "llm_calls": accumulated_usage.get("llm_calls", 0),
+                "started_at": loop_started_at,
+                "finished_at": finished_at,
+            }
+            print(json.dumps(usage_record, ensure_ascii=False), file=sys.stderr)
+            logger.info(
+                "Usage: {} calls, {} prompt + {} completion = {} total tokens (model: {})",
+                accumulated_usage["llm_calls"],
+                accumulated_usage["prompt_tokens"],
+                accumulated_usage["completion_tokens"],
+                accumulated_usage["total_tokens"],
+                self.model,
+            )
+
+        return final_content, tools_used, messages
 
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus."""
@@ -336,9 +356,8 @@ class AgentLoop:
                 history=history,
                 current_message=msg.content, channel=channel, chat_id=chat_id,
             )
-            final_content, _, all_msgs, usage, started_at = await self._run_agent_loop(messages)
+            final_content, _, all_msgs = await self._run_agent_loop(messages)
             self._save_turn(session, all_msgs, 1 + len(history))
-            self._save_usage(session, usage, started_at)
             self.sessions.save(session)
             return OutboundMessage(channel=channel, chat_id=chat_id,
                                   content=final_content or "Background task completed.")
@@ -424,7 +443,7 @@ class AgentLoop:
                 channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
             ))
 
-        final_content, _, all_msgs, usage, started_at = await self._run_agent_loop(
+        final_content, _, all_msgs = await self._run_agent_loop(
             initial_messages, on_progress=on_progress or _bus_progress,
         )
 
@@ -435,7 +454,6 @@ class AgentLoop:
         logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
 
         self._save_turn(session, all_msgs, 1 + len(history))
-        self._save_usage(session, usage, started_at)
         self.sessions.save(session)
 
         if message_tool := self.tools.get("message"):
@@ -461,32 +479,6 @@ class AgentLoop:
             entry.setdefault("timestamp", datetime.now().isoformat())
             session.messages.append(entry)
         session.updated_at = datetime.now()
-
-    def _save_usage(self, session: Session, usage: dict[str, int], started_at: str = "") -> None:
-        """Save token usage record into session."""
-        from datetime import datetime
-        if not usage or usage.get("llm_calls", 0) == 0:
-            return
-        finished_at = datetime.now().isoformat()
-        record = {
-            "_type": "usage",
-            "model": self.model,
-            "prompt_tokens": usage.get("prompt_tokens", 0),
-            "completion_tokens": usage.get("completion_tokens", 0),
-            "total_tokens": usage.get("total_tokens", 0),
-            "llm_calls": usage.get("llm_calls", 0),
-            "started_at": started_at or finished_at,
-            "finished_at": finished_at,
-        }
-        session.messages.append(record)
-        logger.info(
-            "Usage: {} calls, {} prompt + {} completion = {} total tokens (model: {})",
-            usage.get("llm_calls", 0),
-            usage.get("prompt_tokens", 0),
-            usage.get("completion_tokens", 0),
-            usage.get("total_tokens", 0),
-            self.model,
-        )
 
     async def _consolidate_memory(self, session, archive_all: bool = False) -> bool:
         """Delegate to MemoryStore.consolidate(). Returns True on success."""
