@@ -186,8 +186,74 @@ class SessionManager:
             logger.warning("Failed to load session {}: {}", key, e)
             return None
     
+    def _prepare_entry(self, message: dict[str, Any]) -> dict[str, Any]:
+        """Prepare a message dict for JSONL persistence.
+
+        - Strips ``reasoning_content`` (internal LLM field, not for storage).
+        - Truncates large tool results to keep JSONL files manageable.
+        - Ensures a ``timestamp`` is present.
+        """
+        from datetime import datetime
+
+        entry = {k: v for k, v in message.items() if k != "reasoning_content"}
+        if entry.get("role") == "tool" and isinstance(entry.get("content"), str):
+            content = entry["content"]
+            if len(content) > self._TOOL_RESULT_MAX_CHARS:
+                entry["content"] = content[:self._TOOL_RESULT_MAX_CHARS] + "\n... (truncated)"
+        entry.setdefault("timestamp", datetime.now().isoformat())
+        return entry
+
+    _TOOL_RESULT_MAX_CHARS = 500
+
+    def append_message(self, session: Session, message: dict[str, Any]) -> None:
+        """Append a single message to the session JSONL file (incremental write).
+
+        This is the core of realtime persistence: each message is flushed to
+        disk immediately so that a crash mid-turn does not lose data.
+
+        Also updates the in-memory ``session.messages`` list.
+        """
+        import os
+        path = self._get_session_path(session.key)
+
+        # If the file doesn't exist yet, write the metadata header first.
+        if not path.exists():
+            self._write_metadata_line(path, session)
+
+        entry = self._prepare_entry(message)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+
+        session.messages.append(entry)
+        session.updated_at = datetime.now()
+
+    def update_metadata(self, session: Session) -> None:
+        """Rewrite the session file to update the metadata header line.
+
+        Called at the end of a turn (low frequency) to persist
+        ``last_consolidated``, ``updated_at``, and other metadata fields.
+        This rewrites the entire file — acceptable because it only happens
+        once per turn, not per message.
+        """
+        self.save(session)
+
+    def _write_metadata_line(self, path: Path, session: Session) -> None:
+        """Write (or overwrite) just the metadata first-line to *path*."""
+        metadata_line = {
+            "_type": "metadata",
+            "key": session.key,
+            "created_at": session.created_at.isoformat(),
+            "updated_at": session.updated_at.isoformat(),
+            "metadata": session.metadata,
+            "last_consolidated": session.last_consolidated,
+        }
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(metadata_line, ensure_ascii=False) + "\n")
+
     def save(self, session: Session) -> None:
-        """Save a session to disk."""
+        """Save a session to disk (full rewrite)."""
         path = self._get_session_path(session.key)
 
         with open(path, "w", encoding="utf-8") as f:

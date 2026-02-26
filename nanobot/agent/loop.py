@@ -175,8 +175,14 @@ class AgentLoop:
         self,
         initial_messages: list[dict],
         on_progress: Callable[..., Awaitable[None]] | None = None,
+        session: Session | None = None,
     ) -> tuple[str | None, list[str], list[dict]]:
-        """Run the agent iteration loop. Returns (final_content, tools_used, messages)."""
+        """Run the agent iteration loop. Returns (final_content, tools_used, messages).
+
+        When *session* is provided, each assistant / tool message is persisted
+        to the session JSONL **immediately** via ``SessionManager.append_message``,
+        so that a crash mid-turn does not lose data.
+        """
         from datetime import datetime
         loop_started_at = datetime.now().isoformat()
         messages = initial_messages
@@ -189,6 +195,10 @@ class AgentLoop:
             "total_tokens": 0,
             "llm_calls": 0,
         }
+
+        # How many messages existed before the loop — used to determine
+        # which messages are "new" for realtime persistence.
+        pre_loop_count = len(messages)
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -230,6 +240,10 @@ class AgentLoop:
                     reasoning_content=response.reasoning_content,
                 )
 
+                # Realtime persist: assistant message with tool_calls
+                if session is not None:
+                    self.sessions.append_message(session, messages[-1])
+
                 for tool_call in response.tool_calls:
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
@@ -238,13 +252,21 @@ class AgentLoop:
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
+
+                    # Realtime persist: tool result
+                    if session is not None:
+                        self.sessions.append_message(session, messages[-1])
             else:
                 final_content = self._strip_think(response.content)
-                # Append the final assistant message so _save_turn persists it
+                # Append the final assistant message so it gets persisted
                 messages = self.context.add_assistant_message(
                     messages, response.content, None,
                     reasoning_content=response.reasoning_content,
                 )
+
+                # Realtime persist: final assistant message
+                if session is not None:
+                    self.sessions.append_message(session, messages[-1])
                 break
 
         if final_content is None and iteration >= self.max_iterations:
@@ -253,10 +275,14 @@ class AgentLoop:
                 f"I reached the maximum number of tool call iterations ({self.max_iterations}) "
                 "without completing the task. You can try breaking the task into smaller steps."
             )
-            # Append as assistant message so _save_turn persists it to JSONL
+            # Append as assistant message so it gets persisted
             messages = self.context.add_assistant_message(
                 messages, final_content, None,
             )
+
+            # Realtime persist: max-iterations message
+            if session is not None:
+                self.sessions.append_message(session, messages[-1])
 
         # Print usage to stdout as a JSON line for external consumers (e.g. worker.py)
         if accumulated_usage.get("llm_calls", 0) > 0:
@@ -360,9 +386,14 @@ class AgentLoop:
                 history=history,
                 current_message=msg.content, channel=channel, chat_id=chat_id,
             )
-            final_content, _, all_msgs = await self._run_agent_loop(messages)
-            self._save_turn(session, all_msgs, 1 + len(history))
-            self.sessions.save(session)
+
+            # Realtime persist: user message (last element of initial_messages)
+            self.sessions.append_message(session, messages[-1])
+
+            final_content, _, all_msgs = await self._run_agent_loop(
+                messages, session=session,
+            )
+            self.sessions.update_metadata(session)
             return OutboundMessage(channel=channel, chat_id=chat_id,
                                   content=final_content or "Background task completed.")
 
@@ -439,6 +470,9 @@ class AgentLoop:
             channel=msg.channel, chat_id=msg.chat_id,
         )
 
+        # Realtime persist: user message (last element of initial_messages)
+        self.sessions.append_message(session, initial_messages[-1])
+
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
             meta = dict(msg.metadata or {})
             meta["_progress"] = True
@@ -449,6 +483,7 @@ class AgentLoop:
 
         final_content, _, all_msgs = await self._run_agent_loop(
             initial_messages, on_progress=on_progress or _bus_progress,
+            session=session,
         )
 
         if final_content is None:
@@ -457,8 +492,8 @@ class AgentLoop:
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
 
-        self._save_turn(session, all_msgs, 1 + len(history))
-        self.sessions.save(session)
+        # Messages already persisted in realtime; just update metadata.
+        self.sessions.update_metadata(session)
 
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
@@ -472,7 +507,12 @@ class AgentLoop:
     _TOOL_RESULT_MAX_CHARS = 500
 
     def _save_turn(self, session: Session, messages: list[dict], skip: int) -> None:
-        """Save new-turn messages into session, truncating large tool results."""
+        """Save new-turn messages into session, truncating large tool results.
+
+        .. deprecated::
+            Replaced by realtime persistence via ``SessionManager.append_message``.
+            Kept for backward compatibility but no longer called in the main flow.
+        """
         from datetime import datetime
         for m in messages[skip:]:
             entry = {k: v for k, v in m.items() if k != "reasoning_content"}
