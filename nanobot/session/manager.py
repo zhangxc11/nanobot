@@ -55,6 +55,9 @@ class Session:
 
         out: list[dict[str, Any]] = []
         for m in sliced:
+            # Skip non-message records (e.g. _type: "usage")
+            if "_type" in m:
+                continue
             entry: dict[str, Any] = {"role": m["role"], "content": m.get("content", "")}
             for k in ("tool_calls", "tool_call_id", "name"):
                 if k in m:

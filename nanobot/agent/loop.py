@@ -175,12 +175,22 @@ class AgentLoop:
         self,
         initial_messages: list[dict],
         on_progress: Callable[..., Awaitable[None]] | None = None,
-    ) -> tuple[str | None, list[str], list[dict]]:
-        """Run the agent iteration loop. Returns (final_content, tools_used, messages)."""
+    ) -> tuple[str | None, list[str], list[dict], dict[str, int]]:
+        """Run the agent iteration loop.
+        
+        Returns (final_content, tools_used, messages, accumulated_usage).
+        accumulated_usage keys: prompt_tokens, completion_tokens, total_tokens, llm_calls.
+        """
         messages = initial_messages
         iteration = 0
         final_content = None
         tools_used: list[str] = []
+        accumulated_usage: dict[str, int] = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "llm_calls": 0,
+        }
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -192,6 +202,12 @@ class AgentLoop:
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
             )
+
+            # Accumulate token usage from this LLM call
+            if response.usage:
+                for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                    accumulated_usage[key] += response.usage.get(key, 0)
+                accumulated_usage["llm_calls"] += 1
 
             if response.has_tool_calls:
                 if on_progress:
@@ -226,6 +242,11 @@ class AgentLoop:
                     )
             else:
                 final_content = self._strip_think(response.content)
+                # Append the final assistant message so _save_turn persists it
+                messages = self.context.add_assistant_message(
+                    messages, response.content, None,
+                    reasoning_content=response.reasoning_content,
+                )
                 break
 
         if final_content is None and iteration >= self.max_iterations:
@@ -235,7 +256,7 @@ class AgentLoop:
                 "without completing the task. You can try breaking the task into smaller steps."
             )
 
-        return final_content, tools_used, messages
+        return final_content, tools_used, messages, accumulated_usage
 
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus."""
@@ -313,8 +334,9 @@ class AgentLoop:
                 history=history,
                 current_message=msg.content, channel=channel, chat_id=chat_id,
             )
-            final_content, _, all_msgs = await self._run_agent_loop(messages)
+            final_content, _, all_msgs, usage = await self._run_agent_loop(messages)
             self._save_turn(session, all_msgs, 1 + len(history))
+            self._save_usage(session, usage)
             self.sessions.save(session)
             return OutboundMessage(channel=channel, chat_id=chat_id,
                                   content=final_content or "Background task completed.")
@@ -400,7 +422,7 @@ class AgentLoop:
                 channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
             ))
 
-        final_content, _, all_msgs = await self._run_agent_loop(
+        final_content, _, all_msgs, usage = await self._run_agent_loop(
             initial_messages, on_progress=on_progress or _bus_progress,
         )
 
@@ -411,6 +433,7 @@ class AgentLoop:
         logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
 
         self._save_turn(session, all_msgs, 1 + len(history))
+        self._save_usage(session, usage)
         self.sessions.save(session)
 
         if message_tool := self.tools.get("message"):
@@ -436,6 +459,30 @@ class AgentLoop:
             entry.setdefault("timestamp", datetime.now().isoformat())
             session.messages.append(entry)
         session.updated_at = datetime.now()
+
+    def _save_usage(self, session: Session, usage: dict[str, int]) -> None:
+        """Save token usage record into session."""
+        from datetime import datetime
+        if not usage or usage.get("llm_calls", 0) == 0:
+            return
+        record = {
+            "_type": "usage",
+            "model": self.model,
+            "prompt_tokens": usage.get("prompt_tokens", 0),
+            "completion_tokens": usage.get("completion_tokens", 0),
+            "total_tokens": usage.get("total_tokens", 0),
+            "llm_calls": usage.get("llm_calls", 0),
+            "timestamp": datetime.now().isoformat(),
+        }
+        session.messages.append(record)
+        logger.info(
+            "Usage: {} calls, {} prompt + {} completion = {} total tokens (model: {})",
+            usage.get("llm_calls", 0),
+            usage.get("prompt_tokens", 0),
+            usage.get("completion_tokens", 0),
+            usage.get("total_tokens", 0),
+            self.model,
+        )
 
     async def _consolidate_memory(self, session, archive_all: bool = False) -> bool:
         """Delegate to MemoryStore.consolidate(). Returns True on success."""
