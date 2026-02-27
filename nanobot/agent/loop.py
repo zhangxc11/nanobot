@@ -109,6 +109,9 @@ class AgentLoop:
         self._consolidating: set[str] = set()  # Session keys with consolidation in progress
         self._consolidation_tasks: set[asyncio.Task] = set()  # Strong refs to in-flight tasks
         self._consolidation_locks: dict[str, asyncio.Lock] = {}
+        self._active_task: asyncio.Task | None = None  # Currently running _process_message task
+        self._active_task_msg: InboundMessage | None = None  # The message being processed
+        self._active_task_session_key: str | None = None  # Session key of the active task
         self._register_default_tools()
         if self.audit_logger is not None:
             self.tools.set_audit_logger(self.audit_logger)
@@ -502,7 +505,11 @@ class AgentLoop:
         return final_content, tools_used, messages
 
     async def run(self) -> None:
-        """Run the agent loop, processing messages from the bus."""
+        """Run the agent loop, processing messages from the bus.
+
+        Messages are processed sequentially, except for ``/stop`` which is
+        handled immediately by cancelling the currently running task.
+        """
         self._running = True
         await self._connect_mcp()
         logger.info("Agent loop started")
@@ -513,23 +520,116 @@ class AgentLoop:
                     self.bus.consume_inbound(),
                     timeout=1.0
                 )
-                try:
-                    response = await self._process_message(msg)
-                    if response is not None:
-                        await self.bus.publish_outbound(response)
-                    elif msg.channel == "cli":
-                        await self.bus.publish_outbound(OutboundMessage(
-                            channel=msg.channel, chat_id=msg.chat_id, content="", metadata=msg.metadata or {},
-                        ))
-                except Exception as e:
-                    logger.error("Error processing message: {}", e)
-                    await self.bus.publish_outbound(OutboundMessage(
-                        channel=msg.channel,
-                        chat_id=msg.chat_id,
-                        content=f"Sorry, I encountered an error: {str(e)}"
-                    ))
+
+                # ── /stop: cancel the active task immediately ──
+                cmd = msg.content.strip().lower()
+                if cmd == "/stop":
+                    await self._handle_stop(msg)
+                    continue
+
+                # ── Normal message: wrap in a Task so /stop can cancel it ──
+                # Resolve session key for tracking
+                session_key = msg.session_key
+                session_key = self.sessions.resolve_session_key(session_key)
+                self._active_task_session_key = session_key
+                self._active_task_msg = msg
+
+                task = asyncio.create_task(self._process_message_safe(msg))
+                self._active_task = task
+
+                # Wait for the task, but also keep consuming /stop commands
+                await self._wait_with_stop_listener(task)
+
+                self._active_task = None
+                self._active_task_msg = None
+                self._active_task_session_key = None
+
             except asyncio.TimeoutError:
                 continue
+
+    async def _handle_stop(self, msg: InboundMessage) -> None:
+        """Handle /stop command by cancelling the active task."""
+        task = self._active_task
+        if task is not None and not task.done():
+            active_msg = self._active_task_msg
+            # Check if the stop is for the same chat (same channel + chat_id)
+            if (active_msg is not None
+                    and active_msg.channel == msg.channel
+                    and active_msg.chat_id == msg.chat_id):
+                logger.info("/stop received from {}:{}, cancelling active task",
+                            msg.channel, msg.chat_id)
+                task.cancel()
+                # Wait briefly for cancellation to take effect
+                try:
+                    await asyncio.wait_for(asyncio.shield(task), timeout=3.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    pass
+                # The _process_message_safe wrapper sends the stop response
+                return
+            else:
+                logger.info("/stop from {}:{} but active task is for {}:{}",
+                            msg.channel, msg.chat_id,
+                            active_msg.channel if active_msg else "?",
+                            active_msg.chat_id if active_msg else "?")
+
+        # No active task to stop
+        await self.bus.publish_outbound(OutboundMessage(
+            channel=msg.channel, chat_id=msg.chat_id,
+            content="No active task to stop.",
+        ))
+
+    async def _wait_with_stop_listener(self, task: asyncio.Task) -> None:
+        """Wait for *task* to finish while still consuming /stop commands.
+
+        Non-stop messages that arrive while the task is running are
+        **put back** into the inbound queue so they are processed next.
+        """
+        while not task.done():
+            try:
+                incoming = await asyncio.wait_for(
+                    self.bus.consume_inbound(),
+                    timeout=0.5,
+                )
+                if incoming.content.strip().lower() == "/stop":
+                    await self._handle_stop(incoming)
+                else:
+                    # Put it back for later processing
+                    await self.bus.publish_inbound(incoming)
+                    # Yield briefly so the running task can make progress
+                    await asyncio.sleep(0.1)
+            except asyncio.TimeoutError:
+                continue
+
+        # Propagate exceptions from the task (if any, not CancelledError)
+        if task.done() and not task.cancelled():
+            exc = task.exception()
+            if exc is not None:
+                logger.error("Task failed with exception: {}", exc)
+
+    async def _process_message_safe(self, msg: InboundMessage) -> None:
+        """Wrapper around _process_message that handles CancelledError gracefully."""
+        try:
+            response = await self._process_message(msg)
+            if response is not None:
+                await self.bus.publish_outbound(response)
+            elif msg.channel == "cli":
+                await self.bus.publish_outbound(OutboundMessage(
+                    channel=msg.channel, chat_id=msg.chat_id, content="",
+                    metadata=msg.metadata or {},
+                ))
+        except asyncio.CancelledError:
+            logger.info("Task cancelled for {}:{}", msg.channel, msg.chat_id)
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content="⏹ Task stopped.",
+            ))
+        except Exception as e:
+            logger.error("Error processing message: {}", e)
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=f"Sorry, I encountered an error: {str(e)}"
+            ))
 
     async def close_mcp(self) -> None:
         """Close MCP connections."""
@@ -637,7 +737,12 @@ class AgentLoop:
                                   content=f"New session started: {new_key}")
         if cmd == "/help":
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
-                                  content="🐈 nanobot commands:\n/new — Start a new conversation (fresh session)\n/flush — Archive memory and clear current session\n/help — Show available commands")
+                                  content="🐈 nanobot commands:\n/new — Start a new conversation (fresh session)\n/flush — Archive memory and clear current session\n/stop — Stop the currently running task\n/help — Show available commands")
+        if cmd == "/stop":
+            # When called via process_direct (not through run()), there's
+            # no concurrent task to cancel. Just return a message.
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
+                                  content="No active task to stop.")
 
         unconsolidated = len(session.messages) - session.last_consolidated
         if (unconsolidated >= self.memory_window and session.key not in self._consolidating):
