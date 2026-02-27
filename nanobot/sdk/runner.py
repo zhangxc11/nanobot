@@ -122,6 +122,7 @@ class AgentRunner:
         session_key: str = "sdk:direct",
         channel: str = "web",
         chat_id: str = "sdk",
+        media: list[str] | None = None,
         callbacks: DefaultCallbacks | None = None,
     ) -> str:
         """Execute one agent turn.
@@ -136,6 +137,8 @@ class AgentRunner:
             Channel name for tool context (default ``"web"``).
         chat_id:
             Chat ID for tool context.
+        media:
+            Optional list of local file paths for images/media attachments.
         callbacks:
             Optional ``DefaultCallbacks`` subclass to receive events.
 
@@ -149,6 +152,7 @@ class AgentRunner:
             session_key=session_key,
             channel=channel,
             chat_id=chat_id,
+            media=media,
             callbacks=callbacks,
         )
 

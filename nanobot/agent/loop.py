@@ -653,6 +653,7 @@ class AgentLoop:
         session_key: str = "cli:direct",
         channel: str = "cli",
         chat_id: str = "direct",
+        media: list[str] | None = None,
         on_progress: Callable[[str], Awaitable[None]] | None = None,
         callbacks: DefaultCallbacks | None = None,
     ) -> str:
@@ -662,7 +663,8 @@ class AgentLoop:
         object.  The ``on_done`` callback receives an ``AgentResult``.
         """
         await self._connect_mcp()
-        msg = InboundMessage(channel=channel, sender_id="user", chat_id=chat_id, content=content)
+        msg = InboundMessage(channel=channel, sender_id="user", chat_id=chat_id, content=content,
+                             media=media or [])
         response = await self._process_message(
             msg, session_key=session_key, on_progress=on_progress, callbacks=callbacks,
         )
