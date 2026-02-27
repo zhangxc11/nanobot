@@ -31,6 +31,7 @@ local    ← 本地自定义改动（基于 main）
 | `863b9f0` | `agent/loop.py`, `cli/commands.py`, `usage/recorder.py` (新) | feat | 统一 Token 记录 — UsageRecorder 直接写入 SQLite |
 | `2315216` | `agent/callbacks.py` (新), `agent/loop.py`, `sdk/__init__.py` (新), `sdk/runner.py` (新) | feat | SDK 层 — AgentCallbacks + AgentRunner + callbacks in AgentLoop |
 | `17cdef8` | `agent/loop.py`, `tests/test_realtime_usage.py` (新) | feat | 实时 Token 用量记录 — 每次 LLM 调用立即写入 SQLite |
+| TBD | `session/manager.py`, `tests/test_session_repair.py` (新) | fix | Session 自修复 — 未完成 tool_call 链移除 + 错误消息清理 |
 
 ---
 
@@ -424,6 +425,40 @@ grep '"action":"write"' audit-logs/2026-02-27.jsonl | jq .
 grep '"session_key":"webchat:123"' audit-logs/2026-02-27.jsonl | jq .
 grep '"success":false' audit-logs/2026-02-27.jsonl | jq .
 ```
+
+---
+
+## §14 Session 自修复 — 未完成 tool_call 链 + 错误消息清理 (feat/session-repair)
+
+**改动文件**: `session/manager.py`, `tests/test_session_repair.py` (新)
+
+**问题**: Agent 在飞书 session 中通过 `exec` 执行 `kill` 杀掉 nanobot gateway 自身进程。由于实时持久化（Phase 1），assistant 的 `tool_calls` 消息已写入 JSONL，但 `tool_result` 永远不会写入（进程已死）。重启后，Anthropic API 严格要求每个 `tool_use` 后面紧跟 `tool_result`，报错 `"tool_use ids were found without tool_result blocks"`。后续用户消息的回复也变成 `"Error calling LLM: ..."` 错误消息，堆积在 session 中，形成恶性循环。
+
+**改动**:
+
+1. **`session/manager.py` — `get_history()` 三阶段清理**:
+   - **Phase 1: 开头对齐**（已有，§4）— 跳过开头的孤立 tool 消息
+   - **Phase 2: 错误消息剥离**（新增）— 移除 `content.startswith("Error calling LLM:")` 的 assistant 消息
+   - **Phase 3: 未完成 tool_call 链移除**（新增）— `_trim_incomplete_tool_tail()` 静态方法
+
+2. **`_trim_incomplete_tool_tail()` 算法**:
+   - 正向扫描所有消息
+   - 遇到 assistant+tool_calls 时，收集其后的 tool_result ids
+   - 如果 expected_ids ≠ actual_ids，移除该 assistant 及其 partial tool results
+   - 保留链前后的有效消息（user、普通 assistant 等）
+   - 关键区别：**精确移除**而非截断，不会丢失后续有效消息
+
+**与 §4 的区别**:
+```
+§4（Phase 0）: 处理开头的孤立 tool_result（窗口截断导致）
+§14（Phase 8）: 处理任意位置的未完成 tool_call 链（崩溃/自杀导致）+ 错误消息清理
+```
+
+**测试**: 9 项测试（test_session_repair.py）:
+- 开头对齐回归: 2 项
+- 末尾修复: 4 项（完整链保留、全缺失、部分缺失、用户消息保留、多链堆叠）
+- 错误剥离: 1 项
+- 真实场景模拟: 1 项
 
 ---
 

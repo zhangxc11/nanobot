@@ -1,6 +1,6 @@
 # nanobot 核心 — 需求文档
 
-> 状态：**活跃** | 最后更新：2026-02-26
+> 状态：**活跃** | 最后更新：2026-02-27
 
 ---
 
@@ -43,6 +43,12 @@ local    ← 本地自定义改动（基于 main）
 - **状态**: ✅ 已完成 (commit `d2a5769`)
 - **描述**: 检测并拒绝含 `&` 后台操作符的 shell 命令
 - **影响文件**: `agent/tools/shell.py`
+
+### 2.6 Session 自修复 — 未完成 tool_call 链 + 错误消息清理（Phase 8）
+- **状态**: ✅ 已完成
+- **描述**: `get_history()` 增强为三阶段清理：(1) 开头对齐（已有）、(2) 错误消息剥离、(3) 未完成 tool_call 链移除。解决 agent 自杀/崩溃后 session 无法恢复的问题。
+- **影响文件**: `session/manager.py`
+- **触发场景**: Agent 通过 exec 执行 `kill` 杀掉自身进程，tool_call 已写入 JSONL 但 tool_result 永远不会写入。重启后 Anthropic API 拒绝不完整的 tool_use/tool_result 配对。
 
 ---
 

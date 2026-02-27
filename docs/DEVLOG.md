@@ -336,4 +336,52 @@
 
 ---
 
+## Phase 8: Session 自修复 — 未完成 tool_call 链 + 错误消息清理 (2026-02-27)
+
+### 需求来源
+- 飞书 session 崩溃事故：agent 在飞书 session 中执行 `kill` 杀掉 nanobot gateway 自身进程
+- tool_call 已写入 JSONL（实时持久化），但 tool_result 永远不会写入
+- 重启后 Anthropic API 报错 "tool_use ids were found without tool_result blocks"
+- 后续用户消息的回复也变成 error 消息，堆积在 session 中
+
+### 问题分析
+`get_history()` 原有的防护只处理了**开头的孤立 tool_result**（§4，Phase 0），没有处理：
+1. **末尾/中间的未完成 tool_call 链**：assistant 有 tool_calls 但缺少对应 tool_result
+2. **错误消息堆积**：`"Error calling LLM: ..."` 类型的 assistant 消息是诊断产物，不应送入 LLM
+
+### 设计要点
+`get_history()` 改为三阶段清理：
+1. **Phase 1: 开头对齐**（已有） — 跳过开头的孤立 tool 消息
+2. **Phase 2: 错误消息剥离**（新增） — 移除 `"Error calling LLM:"` 开头的 assistant 消息
+3. **Phase 3: 未完成 tool_call 链移除**（新增） — 正向扫描，移除 assistant+tool_calls 中缺少完整 tool_result 的链，保留链前后的有效消息
+
+### 关键设计决策
+- **移除而非截断**：不完整的 tool_call 链被精确移除（assistant + partial results），后续的 user 消息被保留
+- **正向扫描**：从头到尾扫描所有 assistant+tool_calls，不仅是末尾的
+- **幂等安全**：多次调用结果一致
+
+### 任务清单
+
+- ✅ **T8.1** `session/manager.py` — get_history() 三阶段清理
+  - Phase 2: 错误消息剥离
+  - Phase 3: _trim_incomplete_tool_tail() 方法
+  - 正向扫描 + 精确移除（保留后续有效消息）
+
+- ✅ **T8.2** 测试验证 — test_session_repair.py
+  - 9 项测试全部通过：
+    - 开头对齐: 2 项（已有行为回归）
+    - 末尾修复: 4 项（完整链保留、全缺失、部分缺失、用户消息保留、多链堆叠）
+    - 错误剥离: 1 项
+    - 真实场景: 1 项（模拟飞书崩溃全流程）
+  - 现有测试无回归（106 passed / 20 failed 与改动前一致）
+
+- ✅ **T8.3** 修复损坏的飞书 session 文件
+  - 备份原文件为 .bak
+  - 移除 3 条问题消息：1 条未完成 tool_call + 2 条 error artefact
+  - 验证修复后文件无问题
+
+- ✅ **T8.4** Git 提交 + 文档更新
+
+---
+
 *本文件随开发进展持续更新。*

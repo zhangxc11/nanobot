@@ -43,18 +43,31 @@ class Session:
         self.updated_at = datetime.now()
     
     def get_history(self, max_messages: int = 500) -> list[dict[str, Any]]:
-        """Return unconsolidated messages for LLM input, aligned to a valid boundary.
+        """Return unconsolidated messages for LLM input, aligned to valid boundaries.
 
-        The slice is adjusted so it never starts with orphaned ``tool`` result
-        messages (which would cause Anthropic's "unexpected tool_use_id" error).
-        Valid start boundaries are:
-        - A ``user`` message (preferred), or
-        - An ``assistant`` message (start of a tool-call chain when no user
-          message exists in the window).
+        The slice is adjusted so that:
+
+        1. **Start boundary** — never starts with orphaned ``tool`` result
+           messages (which would cause Anthropic's "unexpected tool_use_id"
+           error).  Valid start boundaries are a ``user`` or ``assistant``
+           message.
+
+        2. **End boundary** — never ends with an incomplete tool-call chain.
+           If the last ``assistant`` message has ``tool_calls`` but some (or
+           all) corresponding ``tool`` result messages are missing (e.g. due
+           to a mid-turn crash or self-restart), the incomplete tail is
+           trimmed back to the last complete message.  This prevents
+           Anthropic's "tool_use ids were found without tool_result blocks"
+           error.
+
+        3. **Error messages** — assistant messages whose ``content`` starts
+           with ``"Error calling LLM:"`` are stripped, as they are diagnostic
+           artefacts from previous failed turns that would confuse the model.
         """
         unconsolidated = self.messages[self.last_consolidated:]
         sliced = unconsolidated[-max_messages:]
 
+        # ── Phase 1: Align start boundary ──
         # Find a valid starting point — prefer ``user``, fall back to ``assistant``.
         # Never start with a ``tool`` message (orphaned tool_result).
         start = 0
@@ -80,6 +93,24 @@ class Session:
 
         sliced = sliced[start:]
 
+        # ── Phase 2: Strip error artefacts ──
+        # Remove assistant messages that are LLM error diagnostics from
+        # previous failed turns (e.g. "Error calling LLM: ...").
+        sliced = [
+            m for m in sliced
+            if not (
+                m.get("role") == "assistant"
+                and isinstance(m.get("content"), str)
+                and m["content"].startswith("Error calling LLM:")
+            )
+        ]
+
+        # ── Phase 3: Trim incomplete tool-call tail ──
+        # Walk backwards from the end.  If we find an assistant message with
+        # tool_calls whose tool_result messages are missing (partially or
+        # fully), trim everything from that assistant message onwards.
+        sliced = self._trim_incomplete_tool_tail(sliced)
+
         out: list[dict[str, Any]] = []
         for m in sliced:
             entry: dict[str, Any] = {"role": m["role"], "content": m.get("content", "")}
@@ -88,6 +119,59 @@ class Session:
                     entry[k] = m[k]
             out.append(entry)
         return out
+
+    @staticmethod
+    def _trim_incomplete_tool_tail(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Remove incomplete tool-call chains from the message list.
+
+        Scans for ``assistant`` messages with ``tool_calls`` and verifies
+        that all expected ``tool`` result messages exist immediately after.
+        If any are missing (e.g. due to a mid-turn crash), the assistant
+        message and its partial tool results are **removed** while
+        preserving subsequent user messages and other valid content.
+
+        Returns a (possibly shorter) list with all tool-call chains complete.
+        """
+        result: list[dict[str, Any]] = []
+        i = 0
+        while i < len(messages):
+            m = messages[i]
+            if m.get("role") == "assistant" and m.get("tool_calls"):
+                # Collect expected tool_call ids
+                expected_ids = {tc["id"] for tc in m["tool_calls"]}
+
+                # Scan ahead for tool results belonging to this chain
+                chain_end = i + 1
+                actual_ids: set[str] = set()
+                while chain_end < len(messages):
+                    nm = messages[chain_end]
+                    if nm.get("role") == "tool" and nm.get("tool_call_id"):
+                        actual_ids.add(nm["tool_call_id"])
+                        chain_end += 1
+                    else:
+                        break
+
+                if expected_ids == actual_ids:
+                    # Complete chain — keep assistant + all tool results
+                    result.append(m)
+                    for j in range(i + 1, chain_end):
+                        result.append(messages[j])
+                    i = chain_end
+                else:
+                    # Incomplete chain — skip assistant + partial tool results
+                    logger.warning(
+                        "Removing incomplete tool-call chain at index {}: "
+                        "expected {} tool_results, found {}",
+                        i,
+                        len(expected_ids),
+                        len(actual_ids),
+                    )
+                    i = chain_end  # Skip past the partial results
+            else:
+                result.append(m)
+                i += 1
+
+        return result
     
     def clear(self) -> None:
         """Clear all messages and reset session to initial state."""
