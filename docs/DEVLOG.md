@@ -23,6 +23,7 @@
 | Phase 11: LLM API 重试机制 | ✅ 已完成 | feat/llm-retry → local |
 | Phase 12: /new 命令重构 | ✅ 已完成 | feat/new-session → local |
 | Phase 13: /stop 命令 | ✅ 已完成 | feat/stop-command → local |
+| Phase 14: 大图片自动压缩 | ✅ 已完成 | feat/image-compress → local |
 
 ---
 
@@ -604,6 +605,54 @@ run() 主循环:
 - **飞书 channel 无需改动**: 飞书用户发送 `/stop` 文本消息，由 FeishuChannel._on_message → bus → AgentLoop.run() 处理
 - **Web-chat 已有 kill API**: web-chat 的 `/stop` 按钮通过 worker kill API 实现，不受此改动影响
 - **CLI 交互模式**: `/stop` 在 CLI 中也可用（通过 run() 循环），但 CLI 用户更习惯 Ctrl+C
+
+---
+
+## Phase 14: 大图片自动压缩 (2026-02-27) ✅
+
+### 需求来源
+- nanobot REQUIREMENTS.md §十四
+- 用户报告：飞书/Web 端发送大图片（>5MB）时 LLM API 拒绝
+
+### 目标
+图片超过 5MB 时自动压缩（缩小尺寸 + 降低 JPEG 质量），确保不超过 LLM API 限制。
+
+### 设计要点
+- **统一入口**: `ContextBuilder._build_user_content()` 中检查文件大小
+- **压缩策略**: 最长边缩至 2048px + JPEG quality 从 85 递减至 30
+- **格式处理**: RGBA/P/LA → RGB 转换（JPEG 不支持透明通道）
+- **优雅降级**: Pillow 未安装时 log warning，原样发送
+- **新增依赖**: Pillow>=10.0.0,<12.0.0
+
+### 任务清单
+
+- ✅ **T14.1** `agent/context.py` — `_build_user_content()` 增加大小检查
+  - 读取文件后检查 `len(raw) > IMAGE_MAX_BYTES`
+  - 超过阈值调用 `_compress_image()` 压缩
+
+- ✅ **T14.2** `agent/context.py` — 新增 `_compress_image()` 静态方法
+  - Step 1: 缩小尺寸（最长边 > max_dimension 时等比缩放）
+  - Step 2: JPEG quality 递减编码（85 → 75 → ... → 30）
+  - 返回 `(compressed_bytes, "image/jpeg")`
+  - Pillow 未安装时 graceful fallback
+
+- ✅ **T14.3** `pyproject.toml` — 新增 Pillow 依赖
+
+- ✅ **T14.4** 测试验证 — 8 项全部通过
+  - TestCompressImage: 5 项（小图不压缩、大图压缩、RGBA→RGB、大尺寸缩放、自定义 target_bytes）
+  - TestBuildUserContent: 3 项（无 media、小图包含、非图片跳过）
+  - 现有 context 测试无回归
+
+- ✅ **T14.5** Git 提交 + 合并 + 文档更新
+  - commit `2b9c260` on feat/image-compress → merged to local
+
+### 影响范围
+
+| 文件 | 改动 |
+|------|------|
+| `agent/context.py` | `_build_user_content()` 大小检查 + `_compress_image()` 静态方法 + import io/logger |
+| `pyproject.toml` | 新增 `Pillow>=10.0.0,<12.0.0` |
+| `tests/test_image_compress.py` | 8 项新测试 |
 
 ---
 

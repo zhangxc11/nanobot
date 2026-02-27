@@ -462,4 +462,47 @@ grep '"success":false' audit-logs/2026-02-27.jsonl | jq .
 
 ---
 
+## §15 大图片自动压缩 (feat/image-compress, commit `2b9c260`)
+
+**改动文件**: `agent/context.py`, `pyproject.toml`, `tests/test_image_compress.py` (新)
+
+**问题**: LLM API 对图片大小有限制（~5MB），用户通过飞书/Telegram/Web 发送的高清照片经常超过此限制，导致 API 拒绝请求。
+
+**改动**:
+
+1. **`agent/context.py` — `_build_user_content()` 增加大小检查**:
+   - 读取图片文件后检查 `len(raw) > IMAGE_MAX_BYTES`（5MB）
+   - 超过阈值调用 `_compress_image()` 压缩后再 base64 编码
+   - 新增 `IMAGE_MAX_BYTES` 类常量（5 * 1024 * 1024）
+
+2. **`agent/context.py` — 新增 `_compress_image()` 静态方法**:
+   - Step 1: 最长边超过 `max_dimension`（默认 2048px）时等比缩放
+   - Step 2: JPEG quality 从 85 递减至 30（每次 -10），直到文件大小 ≤ target_bytes
+   - 格式转换: RGBA/P/LA/PA → RGB（JPEG 不支持透明通道，白色背景填充）
+   - 优雅降级: Pillow 未安装时 log warning，原样返回
+   - 返回 `(compressed_bytes, "image/jpeg")`
+
+3. **`pyproject.toml` — 新增 Pillow 依赖**:
+   - `Pillow>=10.0.0,<12.0.0`
+
+**压缩策略**:
+```
+原始图片 (>5MB)
+  ↓
+缩放到 2048px（如果更大）
+  ↓
+JPEG quality=85 → 检查大小
+  ↓ (仍然 >5MB)
+quality=75 → 检查大小
+  ↓ (仍然 >5MB)
+...
+quality=30 → 返回（best effort）
+```
+
+**测试**: 8 项测试 (test_image_compress.py):
+- TestCompressImage: 5 项（小图不压缩、大图压缩、RGBA→RGB、大尺寸缩放、自定义 target_bytes）
+- TestBuildUserContent: 3 项（无 media、小图包含、非图片跳过）
+
+---
+
 *本文档随 local 分支改动持续更新。*

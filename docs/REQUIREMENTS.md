@@ -803,6 +803,54 @@ Web UI 已有 createSession API，`/new` 命令在前端拦截：
 
 ---
 
+---
+
+## 十四、大图片自动压缩（Phase 14）
+
+### 14.1 需求背景
+
+LLM API（如 Anthropic Claude）对图片大小有限制，超过 5MB 的图片会被 API 拒绝。用户通过 IM（飞书/Telegram）或 Web UI 发送的高清照片经常超过此限制。
+
+### 14.2 目标
+
+在图片传给 LLM API 之前，自动检测文件大小，超过 5MB 的图片进行压缩（缩小尺寸 + 降低 JPEG 质量），确保不超过 API 限制。
+
+### 14.3 设计方案
+
+在 `ContextBuilder._build_user_content()` 中，读取图片文件后检查大小：
+- **≤ 5MB**: 直接 base64 编码，原样传给 LLM
+- **> 5MB**: 调用 `_compress_image()` 压缩后再 base64 编码
+
+压缩策略（`_compress_image()`）：
+1. **缩小尺寸**: 最长边超过 2048px 时等比缩放到 2048px
+2. **降低质量**: 从 JPEG quality=85 开始，每次 -10，直到文件大小 ≤ 5MB 或 quality=30
+3. **格式转换**: RGBA/P/LA 等模式转为 RGB（JPEG 不支持透明通道）
+4. **优雅降级**: Pillow 未安装时 log warning，原样发送
+
+### 14.4 设计要求
+
+1. **统一入口**: 压缩在 `_build_user_content()` 中处理，所有通道（飞书/Telegram/Web）统一生效
+2. **阈值可配**: `IMAGE_MAX_BYTES` 类常量，默认 5MB
+3. **无损小图**: 小于阈值的图片不做任何处理
+4. **日志记录**: 压缩时记录原始大小、压缩后大小、quality、尺寸变化
+5. **新增依赖**: Pillow>=10.0.0,<12.0.0 加入 pyproject.toml
+
+### 14.5 影响范围
+
+| 文件 | 改动 |
+|------|------|
+| `agent/context.py` | `_build_user_content()` 增加大小检查 + `_compress_image()` 静态方法 |
+| `pyproject.toml` | 新增 Pillow 依赖 |
+| `tests/test_image_compress.py` | 8 项测试（压缩、格式转换、缩放、集成） |
+
+### 14.6 非目标
+
+- 不修改图片上传/下载流程（飞书/Web 端的图片获取逻辑不变）
+- 不做图片格式转换优化（如 WebP 转换）
+- 不做可配置的压缩参数（当前硬编码，后续可扩展）
+
+---
+
 ### 手动维护的 backlog
 
 **note** 这个部分手动添加需求 backlog。被激活后，更新前序需求文档章节，推进开发。
