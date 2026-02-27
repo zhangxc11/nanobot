@@ -24,6 +24,7 @@
 | Phase 12: /new 命令重构 | ✅ 已完成 | feat/new-session → local |
 | Phase 13: /stop 命令 | ✅ 已完成 | feat/stop-command → local |
 | Phase 14: 大图片自动压缩 | ✅ 已完成 | feat/image-compress → local |
+| Phase 15: 图片存储架构改进 | ✅ 已完成 | feat/image-storage → local |
 
 ---
 
@@ -656,7 +657,7 @@ run() 主循环:
 
 ---
 
-## Phase 15: 图片存储架构改进 (2026-02-27) — IN PROGRESS
+## Phase 15: 图片存储架构改进 (2026-02-27) ✅
 
 ### 需求来源
 - nanobot REQUIREMENTS.md §七A
@@ -685,26 +686,43 @@ file:///absolute/path/to/image.jpg?mime=image/jpeg
 
 ### 任务清单
 
-- 🔜 **T15.1** 统一媒体存储路径 — 修改三个通道
+- ✅ **T15.1** 统一媒体存储路径 — 修改三个通道 (commit `11b1298`)
   - `channels/feishu.py` — `_download_and_save_media()` 中 media_dir 改为 workspace/uploads/<date>/
   - `channels/telegram.py` — 媒体下载路径同步修改
   - `channels/discord.py` — 媒体下载路径同步修改
 
-- ⏳ **T15.2** `session/manager.py` — _prepare_entry() 增加 base64 提取与文件保存
-  - 检测 content 为 list 且包含 `type: "image_url"` 的 item
-  - 对 `data:mime;base64,...` URL：解码 → 保存文件 → 替换为 `file:///` 引用
-  - 文件保存到 `workspace/uploads/<date>/<hash>.jpg`
+- ✅ **T15.2** `session/manager.py` — _prepare_entry() 增加 base64 提取与文件保存 (commit `11b1298`)
+  - `_extract_and_save_images()`: 检测 content 为 list 且包含 `type: "image_url"` 的 item
+  - `_save_base64_image()`: 对 `data:mime;base64,...` URL 解码 → 保存文件 → 替换为 `file:///` 引用
+  - 文件保存到 `workspace/uploads/<date>/<hash>.<ext>`
   - 文件名用内容 hash（MD5 前 12 位）避免重复
 
-- ⏳ **T15.3** `session/manager.py` — get_history() 增加文件引用还原
-  - 检测 `file:///` URL → 读取文件 → base64 编码 → 还原为 `data:mime;base64,...`
-  - 文件不存在时 graceful degradation（log warning，移除该图片 item）
+- ✅ **T15.3** `session/manager.py` — get_history() 增加文件引用还原 (commit `11b1298`)
+  - `_restore_image_refs()`: 检测 `file:///` URL → 读取文件 → base64 编码 → 还原为 `data:mime;base64,...`
+  - `_load_file_as_data_url()`: 文件不存在时 graceful degradation（log warning，移除该图片 item）
 
-- ⏳ **T15.4** 测试验证
-  - 单元测试：base64 提取保存、文件引用还原、向后兼容、文件不存在处理
-  - 集成测试：飞书发送图片 → 确认文件保存在 uploads/ + JSONL 无 base64
+- ✅ **T15.4** 测试验证 (commit `11b1298`)
+  - 24 项测试全部通过:
+    - _save_base64_image: 5 项（JPEG/PNG 保存、去重、无效 URL、目录创建）
+    - _extract_and_save_images: 5 项（字符串不变、None 不变、提取 base64、file ref 透传、多图片）
+    - _restore_image_refs: 5 项（字符串不变、还原 file ref、丢弃缺失文件、data URL 透传、混合 ref）
+    - _prepare_entry 集成: 4 项（图片消息、文本消息、assistant 消息、tool 截断）
+    - get_history 集成: 3 项（还原 file ref、向后兼容 data URL、缺失文件优雅处理）
+    - 完整 round-trip: 2 项（保存→加载→还原、JSONL 大小验证）
+  - 现有测试无回归: 184 passed / 20 failed（与改动前一致）
 
-- ⏳ **T15.5** Git 提交 + 合并 + 文档更新
+- ✅ **T15.5** Git 提交 + 合并 + 文档更新
+  - commit `11b1298` on feat/image-storage → merged to local
+
+### 影响范围
+
+| 文件 | 改动 |
+|------|------|
+| `channels/feishu.py` | media_dir 路径改为 workspace/uploads/<date>/ |
+| `channels/telegram.py` | media_dir 路径改为 workspace/uploads/<date>/ |
+| `channels/discord.py` | media_dir 路径改为 workspace/uploads/<date>/ |
+| `session/manager.py` | 新增 4 个模块级函数 + _prepare_entry 集成 + get_history 集成 |
+| `tests/test_image_storage.py` | 24 项新测试 |
 
 ---
 
