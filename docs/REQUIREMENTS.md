@@ -407,6 +407,160 @@ LLM call 3 → 立即写入 SQLite（1 条记录）
 
 ---
 
+## 九、文件访问审计日志（Phase 7）
+
+### 9.1 需求背景
+
+nanobot 作为 AI 助手，拥有对文件系统的完整读写权限。Agent 可以通过多种工具对文件进行操作：
+
+| 工具 | 文件操作类型 | 风险等级 |
+|------|------------|---------|
+| `read_file` | 读取文件内容 | 低（信息泄露） |
+| `write_file` | 创建/覆盖文件 | 高（数据破坏） |
+| `edit_file` | 修改文件内容 | 高（数据篡改） |
+| `list_dir` | 列出目录内容 | 低（信息探测） |
+| `exec` | 间接文件操作（cat/cp/mv/rm/tee/重定向等） | 高（任意操作） |
+| MCP 工具 | 取决于具体 MCP 服务 | 不确定 |
+
+当前缺乏统一的审计机制：
+1. **无法事后追溯**：如果 agent 执行了意外的文件操作（误删、覆盖重要文件），无法快速定位何时、哪个 session 执行了什么操作
+2. **无法安全分析**：无法统计 agent 的文件访问模式，识别异常行为
+3. **无法合规审查**：对于敏感文件（如 SSH 密钥、配置文件、密码文件），无法追踪访问记录
+
+### 9.2 目标
+
+为所有涉及文件读写的工具调用增加审计日志，记录完整的操作上下文，供事后分析和安全审查。
+
+### 9.3 审计范围
+
+#### 9.3.1 直接文件操作工具（必须审计）
+
+| 工具 | 审计内容 |
+|------|---------|
+| `read_file` | 路径、文件大小、成功/失败、错误信息 |
+| `write_file` | 路径、写入字节数、是否新建文件、成功/失败 |
+| `edit_file` | 路径、old_text 摘要（前80字符）、new_text 摘要（前80字符）、成功/失败 |
+| `list_dir` | 路径、条目数、成功/失败 |
+
+#### 9.3.2 间接文件操作（必须审计）
+
+| 工具 | 审计内容 |
+|------|---------|
+| `exec` | 完整命令、工作目录、退出码、是否被安全守卫拦截 |
+
+#### 9.3.3 其他工具（可选审计，为完整性记录）
+
+| 工具 | 审计内容 |
+|------|---------|
+| `web_fetch` | URL、状态码（不涉及本地文件，但记录网络数据获取） |
+| `web_search` | 搜索查询（不涉及文件，但记录信息获取行为） |
+| `spawn` | 任务描述（子 agent 的具体操作由其自身审计） |
+| `cron` | action + 配置（定时任务可能触发文件操作） |
+| `message` | 目标渠道 + chat_id（不涉及文件，但记录信息输出） |
+| MCP 工具 | 工具名 + 参数摘要 |
+
+### 9.4 设计方案
+
+#### 9.4.1 审计日志格式
+
+采用 **JSONL 按天分文件**，与 LLM 详情日志（Phase 6）保持一致的存储策略：
+
+```
+~/.nanobot/workspace/audit-logs/
+├── 2026-02-27.jsonl
+├── 2026-02-28.jsonl
+└── ...
+```
+
+每行一个 JSON 对象：
+
+```json
+{
+  "timestamp": "2026-02-27T12:30:45.123456",
+  "session_key": "webchat:1772126509",
+  "channel": "feishu",
+  "chat_id": "ou_2fba93da1d059fd2520c2f385743f175",
+  "tool": "write_file",
+  "action": "write",
+  "params": {
+    "path": "/Users/zhangxingcheng/.nanobot/workspace/memory/MEMORY.md"
+  },
+  "result": {
+    "success": true,
+    "bytes_written": 1234,
+    "is_new_file": false
+  },
+  "resolved_path": "/Users/zhangxingcheng/.nanobot/workspace/memory/MEMORY.md",
+  "error": null
+}
+```
+
+#### 9.4.2 实现架构 — ToolRegistry 拦截层
+
+在 `ToolRegistry.execute()` 方法中统一拦截所有工具调用，在工具执行前后记录审计日志。这样：
+- **零侵入**：不需要修改任何具体工具的代码
+- **全覆盖**：所有注册的工具（包括 MCP 工具）自动被审计
+- **统一格式**：所有审计记录格式一致
+
+```python
+class ToolRegistry:
+    async def execute(self, name: str, params: dict) -> str:
+        # 1. 工具执行前：记录请求
+        # 2. 执行工具
+        result = await tool.execute(**params)
+        # 3. 工具执行后：记录结果（成功/失败）
+        # 4. 写入审计日志
+        return result
+```
+
+#### 9.4.3 审计日志模块
+
+新增 `nanobot/audit/logger.py`：
+
+```python
+class AuditLogger:
+    """文件访问审计日志记录器。"""
+    
+    def __init__(self, log_dir: Path | None = None, enabled: bool = True):
+        ...
+    
+    def log(self, entry: AuditEntry) -> None:
+        """写入一条审计日志。"""
+        ...
+```
+
+#### 9.4.4 审计上下文传递
+
+ToolRegistry 需要知道当前的 session_key、channel、chat_id 等上下文信息。通过在 `_process_message()` 中设置 ToolRegistry 的审计上下文来实现：
+
+```python
+self.tools.set_audit_context(session_key=key, channel=msg.channel, chat_id=msg.chat_id)
+```
+
+### 9.5 设计要求
+
+1. **全面覆盖**：所有通过 ToolRegistry 执行的工具调用都被审计（包括 MCP 工具）
+2. **零侵入**：不修改具体工具类的代码，在 ToolRegistry 层统一拦截
+3. **低开销**：审计日志写入是同步 append 操作，不阻塞工具执行
+4. **可追溯**：每条记录包含完整上下文（session、channel、时间、路径、结果）
+5. **可分析**：JSONL 格式便于 grep/jq 查询和统计分析
+6. **可配置**：支持 enabled=False 禁用（默认开启）
+7. **按天分文件**：便于管理和清理
+
+### 9.6 非目标
+
+- 不提供实时告警功能（后续可做）
+- 不提供 Web UI 查看审计日志的功能（后续可做）
+- 不对审计日志做加密或签名（个人使用场景，不需要防篡改）
+
+### 9.7 存储量估算
+
+- 平均每条审计记录：~500 字节
+- 每天约 200-500 次工具调用：~100-250KB/天
+- 远小于 LLM 详情日志（~27MB/天），存储压力很小
+
+---
+
 ### 手动维护的 backlog
 
 **note** 这个部分手动添加需求 backlog。被激活后，更新前序需求文档章节，推进开发。

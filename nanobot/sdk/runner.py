@@ -88,6 +88,10 @@ class AgentRunner:
         # LLM call detail logger
         detail_logger = LLMDetailLogger()
 
+        # Audit logger for tool execution tracing
+        from nanobot.audit.logger import AuditLogger
+        audit_logger = AuditLogger()
+
         agent_loop = AgentLoop(
             bus=bus,
             provider=provider,
@@ -106,6 +110,7 @@ class AgentRunner:
             channels_config=config.channels,
             usage_recorder=usage_recorder,
             detail_logger=detail_logger,
+            audit_logger=audit_logger,
         )
 
         logger.info("AgentRunner created (model={})", config.agents.defaults.model)
