@@ -594,11 +594,13 @@ class AgentLoop:
         logger.info("Processing message from {}:{}: {}", msg.channel, msg.sender_id, preview)
 
         key = session_key or msg.session_key
+        # Resolve through routing table (supports /new session switching)
+        key = self.sessions.resolve_session_key(key)
         session = self.sessions.get_or_create(key)
 
         # Slash commands
         cmd = msg.content.strip().lower()
-        if cmd == "/new":
+        if cmd == "/flush":
             lock = self._get_consolidation_lock(session.key)
             self._consolidating.add(session.key)
             try:
@@ -613,7 +615,7 @@ class AgentLoop:
                                 content="Memory archival failed, session not cleared. Please try again.",
                             )
             except Exception:
-                logger.exception("/new archival failed for {}", session.key)
+                logger.exception("/flush archival failed for {}", session.key)
                 return OutboundMessage(
                     channel=msg.channel, chat_id=msg.chat_id,
                     content="Memory archival failed, session not cleared. Please try again.",
@@ -626,10 +628,16 @@ class AgentLoop:
             self.sessions.save(session)
             self.sessions.invalidate(session.key)
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
-                                  content="New session started.")
+                                  content="Session flushed — memory archived, conversation cleared.")
+        if cmd == "/new":
+            new_key = self.sessions.create_new_session(
+                channel=msg.channel, chat_id=msg.chat_id, old_key=key,
+            )
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
+                                  content=f"New session started: {new_key}")
         if cmd == "/help":
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
-                                  content="🐈 nanobot commands:\n/new — Start a new conversation\n/help — Show available commands")
+                                  content="🐈 nanobot commands:\n/new — Start a new conversation (fresh session)\n/flush — Archive memory and clear current session\n/help — Show available commands")
 
         unconsolidated = len(session.messages) - session.last_consolidated
         if (unconsolidated >= self.memory_window and session.key not in self._consolidating):

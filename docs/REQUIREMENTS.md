@@ -735,6 +735,74 @@ rate limit of 400,000 output tokens per minute..."}}
 
 ---
 
+## 十三、/new 命令重构 — 新建 Session（Phase 12）
+
+### 13.1 需求背景
+
+当前 `/new` 命令的行为是：归档当前 session 的记忆到 MEMORY.md/HISTORY.md，然后清空 session 消息。这实际上是一个"刷新/归档"操作，而非"新建"操作。
+
+用户希望 `/new` 的语义更直观——**创建一个全新的 session，后续对话不带之前的记录**。原来的归档行为改名为 `/flush`。
+
+### 13.2 目标
+
+1. **`/flush`**：原 `/new` 的行为——归档当前 session 记忆，清空消息
+2. **`/new`**：创建新 session，后续对话使用新 session，不带之前的历史
+
+### 13.3 各通道行为
+
+| 通道 | `/flush` 行为 | `/new` 行为 |
+|------|-------------|------------|
+| Gateway（飞书/Telegram 等） | 归档当前 session 记忆，清空消息（原 `/new`） | 为当前 chat_id 创建新 session（新 session_key），后续消息路由到新 session |
+| CLI | 归档当前 session 记忆，清空消息 | 将当前 `cli_direct.jsonl` 改名为带时间戳的归档文件，创建新的空 `cli_direct.jsonl` |
+| Web UI | 归档当前 session 记忆，清空消息 | 创建新 session 并切换到新 session（前端调用 createSession API） |
+
+### 13.4 Gateway `/new` 的设计
+
+Gateway 通道（飞书、Telegram 等）的 session_key 由 `channel:chat_id` 决定。`/new` 需要改变 session_key 的映射：
+
+- 当前 session_key: `feishu:ou_abc123`
+- `/new` 后新 session_key: `feishu:ou_abc123_1740000000`（追加时间戳后缀）
+- 需要维护一个 `chat_id → current_session_key` 的映射表
+- 映射关系持久化到 `~/.nanobot/workspace/sessions/_routing.json`
+
+### 13.5 CLI `/new` 的设计
+
+- 当前文件: `sessions/cli_direct.jsonl`
+- `/new` 后: 将 `cli_direct.jsonl` 改名为 `cli_direct_1740000000.jsonl`，创建新的空 `cli_direct.jsonl`
+- 内存中的 session 缓存也需要失效重建
+
+### 13.6 Web UI `/new` 的设计
+
+Web UI 已有 createSession API，`/new` 命令在前端拦截：
+- 调用 `createSession()` API 创建新 session
+- 切换到新 session
+- 不需要后端 agent loop 参与
+
+### 13.7 设计要求
+
+1. **`/flush` 完全等同于原 `/new`**：行为不变，只是命令名改了
+2. **`/new` 是轻量操作**：不做记忆归档，只创建新 session
+3. **Gateway 路由持久化**：重启后仍使用最新的 session_key 映射
+4. **CLI 归档文件保留**：旧 session 文件改名保留，不删除
+5. **`/help` 更新**：显示新的命令列表
+6. **向后兼容**：不影响现有 session 文件格式
+
+### 13.8 影响范围
+
+| 文件 | 改动 |
+|------|------|
+| `agent/loop.py` | `/new` → `/flush` 重命名；新增 `/new` 处理逻辑（gateway + CLI） |
+| `session/manager.py` | 新增 `archive_session()` 方法（CLI 改名文件）；新增 session 路由映射 |
+| web-chat 前端 `messageStore.ts` | `/new` 前端拦截改为创建新 session + 切换 |
+
+### 13.9 非目标
+
+- 不改变 session JSONL 文件格式
+- 不做 session 合并功能
+- 不做 session 列表中的"归档"标记（后续可做）
+
+---
+
 ### 手动维护的 backlog
 
 **note** 这个部分手动添加需求 backlog。被激活后，更新前序需求文档章节，推进开发。

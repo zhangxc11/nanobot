@@ -387,3 +387,86 @@ class SessionManager:
                 continue
         
         return sorted(sessions, key=lambda x: x.get("updated_at", ""), reverse=True)
+
+    # ── Session routing (for /new command) ──────────────────────────
+
+    _ROUTING_FILE = "_routing.json"
+
+    def _routing_path(self) -> Path:
+        return self.sessions_dir / self._ROUTING_FILE
+
+    def _load_routing(self) -> dict[str, str]:
+        """Load the routing table from disk.
+
+        The routing table maps a *natural* session key (``channel:chat_id``)
+        to the *actual* session key currently in use (which may have a
+        timestamp suffix after ``/new``).
+        """
+        path = self._routing_path()
+        if not path.exists():
+            return {}
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            logger.warning("Failed to load routing table, resetting")
+            return {}
+
+    def _save_routing(self, table: dict[str, str]) -> None:
+        """Persist the routing table to disk."""
+        path = self._routing_path()
+        path.write_text(json.dumps(table, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    def resolve_session_key(self, natural_key: str) -> str:
+        """Resolve a natural session key to its routed key.
+
+        If there is a routing entry for *natural_key*, return the mapped key.
+        Otherwise return *natural_key* unchanged.
+        """
+        table = self._load_routing()
+        return table.get(natural_key, natural_key)
+
+    def create_new_session(self, channel: str, chat_id: str, old_key: str) -> str:
+        """Create a new session for a channel/chat_id pair (``/new`` command).
+
+        * Archives the current session file by renaming it with a timestamp
+          suffix so it is preserved but no longer the "active" session.
+        * Creates a fresh empty session with the *natural* key
+          (``channel:chat_id``) so that subsequent messages land in the new
+          session without requiring a routing table entry.
+        * Removes any existing routing entry for this natural key (the new
+          session uses the natural key directly).
+
+        Returns the new session key.
+        """
+        import time
+
+        ts = int(time.time())
+        natural_key = f"{channel}:{chat_id}"
+
+        # The old_key might already be the natural key or a previously routed key.
+        # Archive the file behind old_key (if it exists).
+        old_path = self._get_session_path(old_key)
+        if old_path.exists():
+            archive_key = f"{old_key}_{ts}"
+            archive_path = self._get_session_path(archive_key)
+            try:
+                old_path.rename(archive_path)
+                logger.info("Archived session {} → {}", old_key, archive_path.name)
+            except Exception:
+                logger.exception("Failed to archive session {}", old_key)
+
+        # Invalidate old session from cache
+        self.invalidate(old_key)
+        self.invalidate(natural_key)
+
+        # Remove routing entry — the new session uses the natural key directly
+        table = self._load_routing()
+        if natural_key in table:
+            del table[natural_key]
+            self._save_routing(table)
+
+        # Create fresh session with the natural key
+        new_session = Session(key=natural_key)
+        self.save(new_session)
+
+        return natural_key
