@@ -262,6 +262,9 @@ class FeishuChannel(BaseChannel):
     def __init__(self, config: FeishuConfig, bus: MessageBus):
         super().__init__(config, bus)
         self.config: FeishuConfig = config
+        # Set channel name based on config.name for multi-tenant support
+        if config.name:
+            self.name = f"feishu.{config.name}"
         self._client: Any = None
         self._ws_client: Any = None
         self._ws_thread: threading.Thread | None = None
@@ -317,7 +320,7 @@ class FeishuChannel(BaseChannel):
         self._ws_thread = threading.Thread(target=run_ws, daemon=True)
         self._ws_thread.start()
         
-        logger.info("Feishu bot started with WebSocket long connection")
+        logger.info("Feishu bot [{}] started with WebSocket long connection (app_id={})", self.name, self.config.app_id)
         logger.info("No public IP required - using WebSocket to receive events")
         
         # Keep running until stopped
@@ -332,7 +335,7 @@ class FeishuChannel(BaseChannel):
                 self._ws_client.stop()
             except Exception as e:
                 logger.warning("Error stopping WebSocket client: {}", e)
-        logger.info("Feishu bot stopped")
+        logger.info("Feishu bot [{}] stopped", self.name)
     
     def _add_reaction_sync(self, message_id: str, emoji_type: str) -> None:
         """Sync helper for adding reaction (runs in thread pool)."""

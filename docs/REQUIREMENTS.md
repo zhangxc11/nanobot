@@ -567,6 +567,104 @@ self.tools.set_audit_context(session_key=key, channel=msg.channel, chat_id=msg.c
 
 ---
 
+## 十、多飞书租户支持（Phase 9）
+
+### 10.1 需求背景
+
+用户有多个飞书租户（不同公司/组织），希望 nanobot 的 gateway 能同时接入这些租户，每个租户对应一个独立的飞书机器人。
+
+当前限制：
+- `config.json` 的 `channels.feishu` 只支持**一套** `appId/appSecret`
+- `ChannelManager` 只创建**一个** `FeishuChannel` 实例
+- 无法同时连接多个飞书机器人
+
+### 10.2 目标
+
+支持在 config.json 中配置**多个飞书租户**，每个租户有独立的 appId/appSecret，ChannelManager 为每个租户创建独立的 FeishuChannel 实例，各实例的 session 互不干扰。
+
+### 10.3 Config 格式设计
+
+**向后兼容**：支持旧格式（单个对象）和新格式（数组）。
+
+旧格式（继续支持）：
+```json
+{
+  "channels": {
+    "feishu": {
+      "enabled": true,
+      "appId": "cli_a92bafd6...",
+      "appSecret": "5FqTGicr3X..."
+    }
+  }
+}
+```
+
+新格式（数组，多租户）：
+```json
+{
+  "channels": {
+    "feishu": [
+      {
+        "name": "personal",
+        "enabled": true,
+        "appId": "cli_a92bafd6...",
+        "appSecret": "5FqTGicr3X...",
+        "allowFrom": []
+      },
+      {
+        "name": "company-x",
+        "enabled": true,
+        "appId": "cli_b1234567...",
+        "appSecret": "xxxxxx...",
+        "allowFrom": []
+      }
+    ]
+  }
+}
+```
+
+### 10.4 Session 隔离
+
+- 单租户（旧格式/无 name）：session_key = `feishu:{chat_id}`（不变）
+- 多租户（有 name）：session_key = `feishu.{name}:{chat_id}`
+  - 例如 `feishu.personal:ou_abc123`、`feishu.company-x:ou_def456`
+- 不同租户的 `open_id` 可能重复，通过 name 前缀区分
+
+### 10.5 Outbound 路由
+
+- 每个 FeishuChannel 实例注册到 ChannelManager 时使用唯一 key：
+  - 单租户：`feishu`
+  - 多租户：`feishu.personal`、`feishu.company-x`
+- InboundMessage 的 `channel` 字段设为该实例的 key（如 `feishu.personal`）
+- OutboundMessage 的 `channel` 字段匹配 → 精确路由到正确的 FeishuChannel 实例
+
+### 10.6 设计要求
+
+1. **向后兼容**：单个 FeishuConfig 对象继续工作，行为不变
+2. **独立实例**：每个租户有独立的 FeishuChannel（独立的 lark client、ws 连接、dedup cache）
+3. **Session 隔离**：不同租户的 session 通过 channel name 前缀区分
+4. **Outbound 精确路由**：回复消息路由到正确的租户实例
+5. **日志区分**：每个实例的日志包含租户 name，便于排查
+6. **通用设计**：改动方式对其他 channel 也适用（如未来多 Telegram bot）
+
+### 10.7 影响范围
+
+| 文件 | 改动 |
+|------|------|
+| `config/schema.py` | FeishuConfig 新增 `name` 字段；ChannelsConfig.feishu 类型改为 `FeishuConfig \| list[FeishuConfig]` |
+| `channels/manager.py` | `_init_channels()` 飞书部分支持列表，创建多个实例 |
+| `channels/feishu.py` | FeishuChannel.name 支持自定义（如 `feishu.personal`） |
+| `channels/base.py` | 可能无需改动（name 已是实例属性） |
+| `config.json` | 用户按需改为数组格式 |
+
+### 10.8 非目标
+
+- 不为其他 channel 做多实例支持（本次只做飞书，但设计上不阻碍扩展）
+- 不做跨租户消息转发
+- 不做租户级别的权限隔离（所有租户共享同一 workspace/memory）
+
+---
+
 ### 手动维护的 backlog
 
 **note** 这个部分手动添加需求 backlog。被激活后，更新前序需求文档章节，推进开发。

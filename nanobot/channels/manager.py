@@ -69,16 +69,26 @@ class ChannelManager:
             except ImportError as e:
                 logger.warning("Discord channel not available: {}", e)
         
-        # Feishu channel
-        if self.config.channels.feishu.enabled:
+        # Feishu channel(s) — supports single config or list of configs for multi-tenant
+        feishu_cfg = self.config.channels.feishu
+        feishu_configs: list = feishu_cfg if isinstance(feishu_cfg, list) else [feishu_cfg]
+        feishu_names_seen: set[str] = set()
+        for cfg in feishu_configs:
+            if not cfg.enabled:
+                continue
             try:
                 from nanobot.channels.feishu import FeishuChannel
-                self.channels["feishu"] = FeishuChannel(
-                    self.config.channels.feishu, self.bus
-                )
-                logger.info("Feishu channel enabled")
+                channel = FeishuChannel(cfg, self.bus)
+                channel_key = channel.name  # "feishu" or "feishu.{name}"
+                if channel_key in feishu_names_seen:
+                    logger.error("Duplicate Feishu channel name '{}', skipping", channel_key)
+                    continue
+                feishu_names_seen.add(channel_key)
+                self.channels[channel_key] = channel
+                logger.info("Feishu channel '{}' enabled (app_id={})", channel_key, cfg.app_id)
             except ImportError as e:
                 logger.warning("Feishu channel not available: {}", e)
+                break  # If SDK not installed, no point trying other configs
 
         # Mochat channel
         if self.config.channels.mochat.enabled:

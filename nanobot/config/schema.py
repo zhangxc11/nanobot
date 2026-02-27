@@ -35,6 +35,7 @@ class FeishuConfig(Base):
     """Feishu/Lark channel configuration using WebSocket long connection."""
 
     enabled: bool = False
+    name: str = ""  # Instance name for multi-tenant support (e.g. "personal", "company-x")
     app_id: str = ""  # App ID from Feishu Open Platform
     app_secret: str = ""  # App Secret from Feishu Open Platform
     encrypt_key: str = ""  # Encrypt Key for event subscription (optional)
@@ -173,7 +174,7 @@ class ChannelsConfig(Base):
     whatsapp: WhatsAppConfig = Field(default_factory=WhatsAppConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     discord: DiscordConfig = Field(default_factory=DiscordConfig)
-    feishu: FeishuConfig = Field(default_factory=FeishuConfig)
+    feishu: FeishuConfig | list[FeishuConfig] = Field(default_factory=FeishuConfig)
     mochat: MochatConfig = Field(default_factory=MochatConfig)
     dingtalk: DingTalkConfig = Field(default_factory=DingTalkConfig)
     email: EmailConfig = Field(default_factory=EmailConfig)

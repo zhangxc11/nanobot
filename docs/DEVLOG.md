@@ -17,6 +17,8 @@
 | Phase 5: 工具调用间隙用户注入 | ✅ 已完成 | feat/user-inject → local |
 | Phase 6: LLM 调用详情日志 | ✅ 已完成 | feat/llm-detail-log → local |
 | Phase 7: 文件访问审计日志 | ✅ 已完成 | feat/audit-log → local |
+| Phase 8: Session 自修复 | ✅ 已完成 | feat/session-repair → local |
+| Phase 9: 多飞书租户支持 | 🔜 进行中 | feat/multi-feishu → local |
 
 ---
 
@@ -381,6 +383,51 @@
   - 验证修复后文件无问题
 
 - ✅ **T8.4** Git 提交 + 文档更新
+
+---
+
+## Phase 9: 多飞书租户支持 (2026-02-27)
+
+### 需求来源
+- nanobot REQUIREMENTS.md §十
+- 用户有多个飞书租户，需要 gateway 同时接入多个飞书机器人
+
+### 目标
+config.json 支持飞书多租户配置（数组形式），ChannelManager 为每个租户创建独立的 FeishuChannel 实例，session 互不干扰。
+
+### 设计要点
+- **Config**: `feishu` 字段支持 `FeishuConfig | list[FeishuConfig]`，向后兼容
+- **FeishuConfig 新增 `name` 字段**: 用于区分不同租户
+- **Channel name**: 单租户 `feishu`，多租户 `feishu.{name}`
+- **Session key**: 单租户 `feishu:{chat_id}`，多租户 `feishu.{name}:{chat_id}`
+- **Outbound 路由**: InboundMessage.channel 设为实例 key，精确路由回复
+
+### 任务清单
+
+- 🔜 **T9.1** `config/schema.py` — FeishuConfig 新增 name + ChannelsConfig 类型变更
+  - FeishuConfig 新增 `name: str = ""` 字段
+  - ChannelsConfig.feishu 类型改为 `FeishuConfig | list[FeishuConfig]`
+  - 保持 Pydantic 验证兼容（单对象 / 列表都能解析）
+
+- ⏳ **T9.2** `channels/feishu.py` — FeishuChannel 支持自定义 channel name
+  - `__init__` 根据 config.name 设置 `self.name`
+  - 有 name 时: `self.name = f"feishu.{config.name}"`
+  - 无 name 时: `self.name = "feishu"`（向后兼容）
+  - 日志中包含 channel name 便于排查
+
+- ⏳ **T9.3** `channels/manager.py` — _init_channels() 支持飞书多实例
+  - 检测 `config.channels.feishu` 是单对象还是列表
+  - 单对象: 行为不变（创建一个 `feishu` channel）
+  - 列表: 遍历每个 enabled 的配置，创建独立 FeishuChannel，注册为 `feishu.{name}`
+  - 验证 name 唯一性（重复则报错跳过）
+
+- ⏳ **T9.4** 测试验证
+  - Config 解析测试: 单对象 / 列表 / 空列表 / 混合
+  - ChannelManager 多实例创建测试
+  - Session key 隔离测试
+  - Outbound 路由测试
+
+- ⏳ **T9.5** Git 提交 + 文档更新
 
 ---
 
