@@ -28,6 +28,7 @@ from nanobot.agent.callbacks import AgentResult, DefaultCallbacks
 from nanobot.session.manager import Session, SessionManager
 from nanobot.usage.recorder import UsageRecorder
 from nanobot.usage.detail_logger import LLMDetailLogger
+from nanobot.audit.logger import AuditLogger
 
 if TYPE_CHECKING:
     from nanobot.config.schema import ChannelsConfig, ExecToolConfig
@@ -65,6 +66,7 @@ class AgentLoop:
         channels_config: ChannelsConfig | None = None,
         usage_recorder: UsageRecorder | None = None,
         detail_logger: LLMDetailLogger | None = None,
+        audit_logger: AuditLogger | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         self.bus = bus
@@ -82,6 +84,7 @@ class AgentLoop:
         self.restrict_to_workspace = restrict_to_workspace
         self.usage_recorder = usage_recorder
         self.detail_logger = detail_logger
+        self.audit_logger = audit_logger
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
@@ -107,6 +110,8 @@ class AgentLoop:
         self._consolidation_tasks: set[asyncio.Task] = set()  # Strong refs to in-flight tasks
         self._consolidation_locks: dict[str, asyncio.Lock] = {}
         self._register_default_tools()
+        if self.audit_logger is not None:
+            self.tools.set_audit_logger(self.audit_logger)
 
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
@@ -147,7 +152,8 @@ class AgentLoop:
         finally:
             self._mcp_connecting = False
 
-    def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
+    def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None,
+                          session_key: str = "") -> None:
         """Update context for all tools that need routing info."""
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
@@ -160,6 +166,13 @@ class AgentLoop:
         if cron_tool := self.tools.get("cron"):
             if isinstance(cron_tool, CronTool):
                 cron_tool.set_context(channel, chat_id)
+
+        # Audit context: session_key + channel + chat_id
+        self.tools.set_audit_context(
+            session_key=session_key,
+            channel=channel,
+            chat_id=chat_id,
+        )
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
@@ -481,7 +494,8 @@ class AgentLoop:
             logger.info("Processing system message from {}", msg.sender_id)
             key = f"{channel}:{chat_id}"
             session = self.sessions.get_or_create(key)
-            self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
+            self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"),
+                                   session_key=key)
             history = session.get_history(max_messages=self.memory_window)
             messages = self.context.build_messages(
                 history=history,
@@ -558,7 +572,8 @@ class AgentLoop:
             _task = asyncio.create_task(_consolidate_and_unlock())
             self._consolidation_tasks.add(_task)
 
-        self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
+        self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"),
+                              session_key=key)
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()

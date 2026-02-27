@@ -690,4 +690,179 @@ Worker 不再启动子进程，而是在进程内直接调用 AgentRunner。
 
 ---
 
+## 六、文件访问审计日志架构（Phase 7）
+
+### 6.1 设计原则
+
+1. **ToolRegistry 拦截层**：在工具注册表的 `execute()` 方法中统一拦截，不修改任何具体工具
+2. **结构化提取**：针对不同工具类型，提取有意义的审计字段（路径、字节数、命令等）
+3. **上下文感知**：审计记录包含 session_key、channel、chat_id 等关联信息
+4. **与现有日志体系一致**：存储格式和目录结构与 LLM 详情日志（Phase 6）保持一致
+
+### 6.2 模块结构
+
+```
+nanobot/
+├── audit/
+│   ├── __init__.py        # 导出 AuditLogger
+│   └── logger.py          # AuditLogger — 审计日志记录器
+├── agent/
+│   └── tools/
+│       └── registry.py    # ToolRegistry — 新增审计拦截逻辑
+```
+
+### 6.3 AuditLogger 设计
+
+```python
+# nanobot/audit/logger.py
+
+@dataclass
+class AuditEntry:
+    """一条审计日志记录。"""
+    timestamp: str
+    session_key: str
+    channel: str
+    chat_id: str
+    tool: str              # 工具名
+    action: str            # 操作类型: read/write/edit/list/exec/search/fetch/spawn/cron/message/mcp
+    params: dict           # 工具参数（敏感内容可截断）
+    result: dict           # 结果摘要
+    resolved_path: str | None  # 解析后的绝对路径（文件操作工具）
+    error: str | None      # 错误信息（如果失败）
+    duration_ms: float     # 执行耗时（毫秒）
+
+class AuditLogger:
+    """文件访问审计日志记录器。
+    
+    按天分文件写入 JSONL 格式的审计日志。
+    """
+    
+    def __init__(self, log_dir: Path | None = None, enabled: bool = True):
+        if log_dir is None:
+            log_dir = Path.home() / ".nanobot" / "workspace" / "audit-logs"
+        self.log_dir = log_dir
+        self.enabled = enabled
+    
+    def log(self, entry: AuditEntry) -> None:
+        """写入一条审计日志（同步 append）。"""
+        if not self.enabled:
+            return
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        date_str = entry.timestamp[:10]  # YYYY-MM-DD
+        path = self.log_dir / f"{date_str}.jsonl"
+        line = json.dumps(asdict(entry), ensure_ascii=False)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+```
+
+### 6.4 ToolRegistry 审计拦截
+
+```python
+# registry.py — execute() 改造
+
+class ToolRegistry:
+    def __init__(self):
+        self._tools: dict[str, Tool] = {}
+        self._audit_logger: AuditLogger | None = None
+        self._audit_context: dict = {}  # session_key, channel, chat_id
+    
+    def set_audit_logger(self, logger: AuditLogger) -> None:
+        self._audit_logger = logger
+    
+    def set_audit_context(self, **kwargs) -> None:
+        """设置审计上下文（session_key, channel, chat_id）。"""
+        self._audit_context.update(kwargs)
+    
+    async def execute(self, name: str, params: dict) -> str:
+        # ... 现有的工具查找和参数校验逻辑 ...
+        
+        start_time = time.monotonic()
+        result = await tool.execute(**params)
+        duration_ms = (time.monotonic() - start_time) * 1000
+        
+        # 审计日志
+        if self._audit_logger is not None:
+            entry = self._build_audit_entry(name, params, result, duration_ms)
+            self._audit_logger.log(entry)
+        
+        return result
+    
+    def _build_audit_entry(self, tool_name, params, result, duration_ms) -> AuditEntry:
+        """根据工具类型构建审计条目。"""
+        # 针对不同工具提取有意义的字段
+        ...
+```
+
+### 6.5 各工具的审计字段提取规则
+
+| 工具 | action | params 提取 | result 提取 | resolved_path |
+|------|--------|------------|-------------|---------------|
+| read_file | read | `{"path": ...}` | `{"success": bool, "size": int}` | 解析后的绝对路径 |
+| write_file | write | `{"path": ...}` | `{"success": bool, "bytes_written": int, "is_new_file": bool}` | 解析后的绝对路径 |
+| edit_file | edit | `{"path": ..., "old_text_preview": ..., "new_text_preview": ...}` | `{"success": bool}` | 解析后的绝对路径 |
+| list_dir | list | `{"path": ...}` | `{"success": bool, "entry_count": int}` | 解析后的绝对路径 |
+| exec | exec | `{"command": ..., "working_dir": ...}` | `{"success": bool, "exit_code": int, "blocked": bool}` | null |
+| web_search | search | `{"query": ...}` | `{"success": bool}` | null |
+| web_fetch | fetch | `{"url": ...}` | `{"success": bool, "status_code": int}` | null |
+| spawn | spawn | `{"task_preview": ...}` | `{"success": bool}` | null |
+| cron | cron | `{"action": ..., "message_preview": ...}` | `{"success": bool}` | null |
+| message | message | `{"channel": ..., "chat_id": ...}` | `{"success": bool}` | null |
+| mcp_* | mcp | `{参数摘要}` | `{"success": bool}` | null |
+
+### 6.6 上下文传递流程
+
+```
+_process_message(msg)
+    │
+    ├── self.tools.set_audit_context(
+    │       session_key=key,
+    │       channel=msg.channel,
+    │       chat_id=msg.chat_id
+    │   )
+    │
+    └── _run_agent_loop(messages)
+            │
+            └── self.tools.execute(name, params)
+                    │
+                    ├── tool.execute(**params)  ← 实际执行
+                    │
+                    └── audit_logger.log(entry)  ← 审计记录
+```
+
+### 6.7 初始化集成
+
+```python
+# cli/commands.py + sdk/runner.py
+
+audit_logger = AuditLogger()  # 默认 ~/.nanobot/workspace/audit-logs/
+agent_loop = AgentLoop(..., audit_logger=audit_logger)
+
+# AgentLoop.__init__ 中
+self.tools.set_audit_logger(audit_logger)
+```
+
+### 6.8 存储与查询
+
+**日志目录**: `~/.nanobot/workspace/audit-logs/`
+
+**查询示例**:
+```bash
+# 查看今天所有写操作
+grep '"action":"write"' audit-logs/2026-02-27.jsonl | jq .
+
+# 查看某 session 的所有文件操作
+grep '"session_key":"webchat:123"' audit-logs/2026-02-27.jsonl | jq .
+
+# 查看所有失败的操作
+grep '"success":false' audit-logs/2026-02-27.jsonl | jq .
+
+# 查看对特定路径的访问
+grep 'MEMORY.md' audit-logs/2026-02-27.jsonl | jq .
+
+# 统计每个工具的调用次数
+cat audit-logs/2026-02-27.jsonl | jq -r '.tool' | sort | uniq -c | sort -rn
+```
+
+---
+
 *本文档将随开发进展持续更新。*

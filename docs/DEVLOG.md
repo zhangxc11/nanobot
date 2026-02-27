@@ -290,4 +290,50 @@
 
 ---
 
+## Phase 7: 文件访问审计日志 (2026-02-27)
+
+### 需求来源
+- nanobot REQUIREMENTS.md §九
+- 用户安全需求：对所有文件读写操作进行审计记录
+
+### 目标
+在 ToolRegistry 层统一拦截所有工具调用，记录审计日志到 JSONL 文件，供事后安全分析。
+
+### 设计要点
+- **拦截层**: ToolRegistry.execute() 统一拦截，零侵入（不修改具体工具代码）
+- **存储**: `~/.nanobot/workspace/audit-logs/YYYY-MM-DD.jsonl`
+- **上下文**: 通过 set_audit_context() 传递 session_key/channel/chat_id
+- **字段提取**: 针对不同工具类型提取有意义的审计字段
+
+### 任务清单
+
+- 🔜 **T7.1** 创建 `audit/logger.py` — AuditLogger + AuditEntry
+  - AuditEntry dataclass: timestamp, session_key, channel, chat_id, tool, action, params, result, resolved_path, error, duration_ms
+  - AuditLogger: 按天分文件写入 JSONL
+  - 支持 enabled=False 禁用
+
+- ⏳ **T7.2** 改造 `tools/registry.py` — 审计拦截
+  - set_audit_logger() 方法
+  - set_audit_context() 方法
+  - execute() 中添加审计记录逻辑
+  - _build_audit_entry() — 根据工具类型提取审计字段
+
+- ⏳ **T7.3** `agent/loop.py` — 审计上下文设置
+  - AgentLoop.__init__ 接受 audit_logger 参数，传入 ToolRegistry
+  - _process_message() 中调用 set_audit_context()
+
+- ⏳ **T7.4** `cli/commands.py` + `sdk/runner.py` — 初始化 AuditLogger
+  - agent, gateway, cron-run 命令创建 AuditLogger
+  - AgentRunner.from_config() 创建 AuditLogger
+
+- ⏳ **T7.5** 测试验证
+  - AuditLogger 单元测试
+  - ToolRegistry 审计拦截测试
+  - CLI 端到端测试：验证 audit-logs/ 文件生成
+  - 各工具类型的审计字段正确性
+
+- ⏳ **T7.6** Git 提交 + 文档更新
+
+---
+
 *本文件随开发进展持续更新。*

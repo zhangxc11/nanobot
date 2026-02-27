@@ -310,6 +310,10 @@ def gateway(
     from nanobot.usage.detail_logger import LLMDetailLogger
     detail_logger = LLMDetailLogger()
 
+    # Audit logger for tool execution tracing
+    from nanobot.audit.logger import AuditLogger
+    audit_logger = AuditLogger()
+
     # Create agent with cron service
     agent = AgentLoop(
         bus=bus,
@@ -329,6 +333,7 @@ def gateway(
         channels_config=config.channels,
         usage_recorder=usage_recorder,
         detail_logger=detail_logger,
+        audit_logger=audit_logger,
     )
     
     # Set cron callback (needs agent)
@@ -477,6 +482,10 @@ def agent(
     # LLM call detail logger
     from nanobot.usage.detail_logger import LLMDetailLogger
     detail_logger = LLMDetailLogger()
+
+    # Audit logger for tool execution tracing
+    from nanobot.audit.logger import AuditLogger
+    audit_logger = AuditLogger()
     
     agent_loop = AgentLoop(
         bus=bus,
@@ -495,6 +504,7 @@ def agent(
         channels_config=config.channels,
         usage_recorder=usage_recorder,
         detail_logger=detail_logger,
+        audit_logger=audit_logger,
     )
     
     # Show spinner when logs are off (no output to miss); skip when logs are on
@@ -978,6 +988,9 @@ def cron_run(
     from nanobot.usage.detail_logger import LLMDetailLogger
     detail_logger = LLMDetailLogger()
 
+    from nanobot.audit.logger import AuditLogger
+    audit_logger = AuditLogger()
+
     agent_loop = AgentLoop(
         bus=bus,
         provider=provider,
@@ -994,6 +1007,7 @@ def cron_run(
         channels_config=config.channels,
         usage_recorder=usage_recorder,
         detail_logger=detail_logger,
+        audit_logger=audit_logger,
     )
 
     store_path = get_data_dir() / "cron" / "jobs.json"
