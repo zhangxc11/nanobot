@@ -179,14 +179,17 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
 
         return messages
 
-    # Maximum image size in bytes before compression is applied.
-    IMAGE_MAX_BYTES = 5 * 1024 * 1024  # 5 MB
+    # Maximum raw image size in bytes before compression is applied.
+    # LLM APIs typically limit base64-encoded payloads to 5 MB.  Since base64
+    # inflates data by ~4/3, the raw file threshold is 5 MB × 3/4 ≈ 3.75 MB.
+    IMAGE_MAX_BYTES = 3_750_000  # ~3.75 MB → ≤ 5 MB after base64
 
     def _build_user_content(self, text: str, media: list[str] | None) -> str | list[dict[str, Any]]:
         """Build user message content with optional base64-encoded images.
 
-        Images larger than :pyattr:`IMAGE_MAX_BYTES` (5 MB) are automatically
-        compressed before base64 encoding so they stay within LLM API limits.
+        Images larger than :pyattr:`IMAGE_MAX_BYTES` (~3.75 MB) are
+        automatically compressed so the base64-encoded result stays within
+        the 5 MB LLM API limit.
         """
         if not media:
             return text

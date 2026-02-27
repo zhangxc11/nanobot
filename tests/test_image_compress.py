@@ -43,7 +43,7 @@ class TestCompressImage:
 
     def test_large_image_compressed(self, tmp_path: Path):
         """Images over the threshold should be compressed below the target."""
-        # Create a large image (6000x4000 at high quality → likely > 5MB)
+        # Create a large image (6000x4000 at high quality → likely > 3.75 MB)
         img = Image.new("RGB", (6000, 4000))
         # Fill with random-ish pattern to make it harder to compress
         import random

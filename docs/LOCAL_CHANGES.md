@@ -466,14 +466,14 @@ grep '"success":false' audit-logs/2026-02-27.jsonl | jq .
 
 **改动文件**: `agent/context.py`, `pyproject.toml`, `tests/test_image_compress.py` (新)
 
-**问题**: LLM API 对图片大小有限制（~5MB），用户通过飞书/Telegram/Web 发送的高清照片经常超过此限制，导致 API 拒绝请求。
+**问题**: LLM API 对 base64 编码后的图片大小有限制（~5MB），用户通过飞书/Telegram/Web 发送的高清照片经常超过此限制，导致 API 拒绝请求。
 
 **改动**:
 
 1. **`agent/context.py` — `_build_user_content()` 增加大小检查**:
-   - 读取图片文件后检查 `len(raw) > IMAGE_MAX_BYTES`（5MB）
+   - 读取图片文件后检查 `len(raw) > IMAGE_MAX_BYTES`（~3.75MB）
    - 超过阈值调用 `_compress_image()` 压缩后再 base64 编码
-   - 新增 `IMAGE_MAX_BYTES` 类常量（5 * 1024 * 1024）
+   - `IMAGE_MAX_BYTES = 3_750_000`（由 base64 ≤ 5MB 限制反算：5MB × 3/4 ≈ 3.75MB）
 
 2. **`agent/context.py` — 新增 `_compress_image()` 静态方法**:
    - Step 1: 最长边超过 `max_dimension`（默认 2048px）时等比缩放
@@ -487,14 +487,14 @@ grep '"success":false' audit-logs/2026-02-27.jsonl | jq .
 
 **压缩策略**:
 ```
-原始图片 (>5MB)
+原始图片 (>3.75MB)
   ↓
 缩放到 2048px（如果更大）
   ↓
 JPEG quality=85 → 检查大小
-  ↓ (仍然 >5MB)
+  ↓ (仍然 >3.75MB)
 quality=75 → 检查大小
-  ↓ (仍然 >5MB)
+  ↓ (仍然 >3.75MB)
 ...
 quality=30 → 返回（best effort）
 ```
