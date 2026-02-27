@@ -1,12 +1,15 @@
 """Context builder for assembling agent prompts."""
 
 import base64
+import io
 import mimetypes
 import platform
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from loguru import logger
 
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skills import SkillsLoader
@@ -176,8 +179,15 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
 
         return messages
 
+    # Maximum image size in bytes before compression is applied.
+    IMAGE_MAX_BYTES = 5 * 1024 * 1024  # 5 MB
+
     def _build_user_content(self, text: str, media: list[str] | None) -> str | list[dict[str, Any]]:
-        """Build user message content with optional base64-encoded images."""
+        """Build user message content with optional base64-encoded images.
+
+        Images larger than :pyattr:`IMAGE_MAX_BYTES` (5 MB) are automatically
+        compressed before base64 encoding so they stay within LLM API limits.
+        """
         if not media:
             return text
         
@@ -187,12 +197,106 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
             mime, _ = mimetypes.guess_type(path)
             if not p.is_file() or not mime or not mime.startswith("image/"):
                 continue
-            b64 = base64.b64encode(p.read_bytes()).decode()
+            raw = p.read_bytes()
+            if len(raw) > self.IMAGE_MAX_BYTES:
+                raw, mime = self._compress_image(raw, mime, p.name)
+            b64 = base64.b64encode(raw).decode()
             images.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
         
         if not images:
             return text
         return images + [{"type": "text", "text": text}]
+
+    # ── image compression helpers ──────────────────────────────────
+
+    @staticmethod
+    def _compress_image(
+        data: bytes,
+        mime: str,
+        filename: str = "<unknown>",
+        *,
+        target_bytes: int | None = None,
+        max_dimension: int = 2048,
+        min_quality: int = 30,
+    ) -> tuple[bytes, str]:
+        """Compress an image to fit within *target_bytes*.
+
+        Strategy:
+        1. Resize so the longest side ≤ *max_dimension* (preserving aspect ratio).
+        2. Encode as JPEG with progressively lower quality until the result is
+           small enough or *min_quality* is reached.
+
+        Returns:
+            ``(compressed_bytes, mime_type)`` — mime is always ``image/jpeg``
+            after compression.
+        """
+        if target_bytes is None:
+            target_bytes = ContextBuilder.IMAGE_MAX_BYTES
+
+        try:
+            from PIL import Image
+        except ImportError:
+            logger.warning(
+                "Pillow not installed — cannot compress image {} ({:.1f} MB). "
+                "Install with: pip install Pillow",
+                filename,
+                len(data) / 1024 / 1024,
+            )
+            return data, mime
+
+        original_size = len(data)
+        try:
+            img = Image.open(io.BytesIO(data))
+        except Exception:
+            logger.warning("Failed to open image {} for compression, sending as-is", filename)
+            return data, mime
+
+        # Convert palette / RGBA → RGB for JPEG output
+        if img.mode in ("RGBA", "LA", "P", "PA"):
+            background = Image.new("RGB", img.size, (255, 255, 255))
+            if img.mode == "P":
+                img = img.convert("RGBA")
+            background.paste(img, mask=img.split()[-1] if "A" in img.mode else None)
+            img = background
+        elif img.mode != "RGB":
+            img = img.convert("RGB")
+
+        # Step 1: resize if larger than max_dimension
+        w, h = img.size
+        if max(w, h) > max_dimension:
+            ratio = max_dimension / max(w, h)
+            new_w, new_h = int(w * ratio), int(h * ratio)
+            img = img.resize((new_w, new_h), Image.LANCZOS)
+            logger.debug("Resized {} from {}×{} to {}×{}", filename, w, h, new_w, new_h)
+
+        # Step 2: encode with decreasing quality until target met
+        quality = 85
+        while quality >= min_quality:
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=quality, optimize=True)
+            result = buf.getvalue()
+            if len(result) <= target_bytes:
+                logger.info(
+                    "Compressed image {} from {:.1f} MB to {:.1f} MB (quality={}, {}×{})",
+                    filename,
+                    original_size / 1024 / 1024,
+                    len(result) / 1024 / 1024,
+                    quality,
+                    img.size[0],
+                    img.size[1],
+                )
+                return result, "image/jpeg"
+            quality -= 10
+
+        # Best effort: return the lowest quality result even if still above target
+        logger.warning(
+            "Image {} compressed to {:.1f} MB (quality={}) but still above {:.1f} MB target",
+            filename,
+            len(result) / 1024 / 1024,
+            min_quality,
+            target_bytes / 1024 / 1024,
+        )
+        return result, "image/jpeg"
     
     def add_tool_result(
         self,
