@@ -1,15 +1,171 @@
 """Session management for conversation history."""
 
+import base64
+import hashlib
 import json
+import mimetypes
 import shutil
 from pathlib import Path
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, date
 from typing import Any
 
 from loguru import logger
 
 from nanobot.utils.helpers import ensure_dir, safe_filename
+
+
+# ── Image reference helpers ─────────────────────────────────────────
+# These functions convert between inline base64 images (used by LLM APIs)
+# and file:/// references (used in session JSONL for compact storage).
+
+def _extract_and_save_images(
+    content: Any,
+    workspace: Path,
+) -> Any:
+    """Replace inline base64 image data with file:/// references.
+
+    Scans multimodal content (list of dicts) for ``image_url`` items whose
+    URL starts with ``data:``.  For each, the base64 payload is decoded and
+    saved to ``workspace/uploads/<date>/<hash>.<ext>``, and the URL is
+    replaced with ``file:///<path>?mime=<mime>``.
+
+    Non-list content (plain strings) is returned unchanged.
+    """
+    if not isinstance(content, list):
+        return content
+
+    uploads_dir = workspace / "uploads"
+    today = date.today().isoformat()
+    day_dir = uploads_dir / today
+
+    new_content = []
+    for item in content:
+        if (
+            isinstance(item, dict)
+            and item.get("type") == "image_url"
+            and isinstance(item.get("image_url"), dict)
+        ):
+            url = item["image_url"].get("url", "")
+            if url.startswith("data:"):
+                saved = _save_base64_image(url, day_dir)
+                if saved:
+                    file_path, mime_type = saved
+                    new_item = {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"file://{file_path}?mime={mime_type}"
+                        },
+                    }
+                    new_content.append(new_item)
+                    continue
+        new_content.append(item)
+
+    return new_content
+
+
+def _save_base64_image(data_url: str, day_dir: Path) -> tuple[str, str] | None:
+    """Decode a data: URL, save to disk, return (file_path, mime_type).
+
+    Returns None if decoding or saving fails.
+    """
+    try:
+        # Parse data:image/jpeg;base64,/9j/4AAQ...
+        header, b64_data = data_url.split(",", 1)
+        # header is like "data:image/jpeg;base64"
+        mime_part = header.split(";")[0]  # "data:image/jpeg"
+        mime_type = mime_part.split(":", 1)[1] if ":" in mime_part else "image/jpeg"
+
+        raw = base64.b64decode(b64_data)
+
+        # Determine file extension from MIME type
+        ext = mimetypes.guess_extension(mime_type) or ".jpg"
+        if ext == ".jpe":
+            ext = ".jpg"
+
+        # Use content hash for deduplication
+        content_hash = hashlib.md5(raw).hexdigest()[:12]
+        filename = f"{content_hash}{ext}"
+
+        day_dir.mkdir(parents=True, exist_ok=True)
+        file_path = day_dir / filename
+
+        if not file_path.exists():
+            file_path.write_bytes(raw)
+            logger.debug("Saved base64 image to {} ({:.1f} KB)", file_path, len(raw) / 1024)
+        else:
+            logger.debug("Image already exists: {}", file_path)
+
+        return str(file_path), mime_type
+
+    except Exception as e:
+        logger.warning("Failed to save base64 image: {}", e)
+        return None
+
+
+def _restore_image_refs(content: Any) -> Any:
+    """Restore file:/// references back to inline base64 data: URLs.
+
+    Scans multimodal content for ``image_url`` items whose URL starts with
+    ``file://``.  For each, the file is read from disk and encoded as a
+    ``data:<mime>;base64,...`` URL.
+
+    If the file does not exist, the image item is dropped with a warning.
+    Existing ``data:`` URLs (from old sessions) are passed through unchanged.
+    """
+    if not isinstance(content, list):
+        return content
+
+    new_content = []
+    for item in content:
+        if (
+            isinstance(item, dict)
+            and item.get("type") == "image_url"
+            and isinstance(item.get("image_url"), dict)
+        ):
+            url = item["image_url"].get("url", "")
+            if url.startswith("file://"):
+                restored = _load_file_as_data_url(url)
+                if restored:
+                    new_content.append({
+                        "type": "image_url",
+                        "image_url": {"url": restored},
+                    })
+                else:
+                    logger.warning("Dropping image ref (file not found): {}", url[:100])
+                continue
+        new_content.append(item)
+
+    return new_content
+
+
+def _load_file_as_data_url(file_url: str) -> str | None:
+    """Read a file:// URL and return a data: base64 URL.
+
+    The file_url format is: ``file:///path/to/image.jpg?mime=image/jpeg``
+    """
+    try:
+        from urllib.parse import urlparse, parse_qs
+
+        parsed = urlparse(file_url)
+        file_path = parsed.path  # /absolute/path/to/image.jpg
+        query = parse_qs(parsed.query)
+        mime_type = query.get("mime", ["image/jpeg"])[0]
+
+        p = Path(file_path)
+        if not p.is_file():
+            return None
+
+        raw = p.read_bytes()
+        b64 = base64.b64encode(raw).decode()
+        return f"data:{mime_type};base64,{b64}"
+
+    except Exception as e:
+        logger.warning("Failed to restore image from {}: {}", file_url[:80], e)
+        return None
+
+
+# ── Session & SessionManager ────────────────────────────────────────
 
 
 @dataclass
@@ -117,6 +273,8 @@ class Session:
             for k in ("tool_calls", "tool_call_id", "name"):
                 if k in m:
                     entry[k] = m[k]
+            # Restore file:/// references back to data: base64 for LLM input
+            entry["content"] = _restore_image_refs(entry["content"])
             out.append(entry)
         return out
 
@@ -275,6 +433,8 @@ class SessionManager:
 
         - Strips ``reasoning_content`` (internal LLM field, not for storage).
         - Truncates large tool results to keep JSONL files manageable.
+        - Extracts base64 images and saves them as files, replacing with
+          ``file:///`` references to keep JSONL compact.
         - Ensures a ``timestamp`` is present.
         """
         from datetime import datetime
@@ -284,6 +444,8 @@ class SessionManager:
             content = entry["content"]
             if len(content) > self._TOOL_RESULT_MAX_CHARS:
                 entry["content"] = content[:self._TOOL_RESULT_MAX_CHARS] + "\n... (truncated)"
+        # Extract base64 images from multimodal content and save as files
+        entry["content"] = _extract_and_save_images(entry.get("content"), self.workspace)
         entry.setdefault("timestamp", datetime.now().isoformat())
         return entry
 

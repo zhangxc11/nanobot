@@ -656,4 +656,56 @@ run() 主循环:
 
 ---
 
+## Phase 15: 图片存储架构改进 (2026-02-27) — IN PROGRESS
+
+### 需求来源
+- nanobot REQUIREMENTS.md §七A
+- 用户报告：飞书图片不在 workspace 下载目录中 + session JSONL 因 base64 膨胀
+
+### 目标
+1. 统一所有通道的媒体文件存储路径到 `workspace/uploads/<date>/`
+2. Session JSONL 中用文件路径引用替代 base64，读取时按需还原
+
+### 设计要点
+
+**统一存储路径**：
+- 飞书/Telegram/Discord 的 `media_dir` 从 `~/.nanobot/media/` 改为 `~/.nanobot/workspace/uploads/<date>/`
+- 文件命名保持各通道原有逻辑（image_key、file_id 等）
+
+**Session JSONL 去 base64**：
+- `SessionManager._prepare_entry()` 中检测 `data:` base64 图片 URL
+- 将 base64 解码后保存为文件，URL 替换为 `file:///path`（带 MIME 元数据）
+- `Session.get_history()` 中检测 `file:///` URL，读取文件还原为 base64
+- 向后兼容：旧 session 中已有的 `data:` base64 仍可正常加载和使用
+
+**文件引用格式**：
+```
+file:///absolute/path/to/image.jpg?mime=image/jpeg
+```
+
+### 任务清单
+
+- 🔜 **T15.1** 统一媒体存储路径 — 修改三个通道
+  - `channels/feishu.py` — `_download_and_save_media()` 中 media_dir 改为 workspace/uploads/<date>/
+  - `channels/telegram.py` — 媒体下载路径同步修改
+  - `channels/discord.py` — 媒体下载路径同步修改
+
+- ⏳ **T15.2** `session/manager.py` — _prepare_entry() 增加 base64 提取与文件保存
+  - 检测 content 为 list 且包含 `type: "image_url"` 的 item
+  - 对 `data:mime;base64,...` URL：解码 → 保存文件 → 替换为 `file:///` 引用
+  - 文件保存到 `workspace/uploads/<date>/<hash>.jpg`
+  - 文件名用内容 hash（MD5 前 12 位）避免重复
+
+- ⏳ **T15.3** `session/manager.py` — get_history() 增加文件引用还原
+  - 检测 `file:///` URL → 读取文件 → base64 编码 → 还原为 `data:mime;base64,...`
+  - 文件不存在时 graceful degradation（log warning，移除该图片 item）
+
+- ⏳ **T15.4** 测试验证
+  - 单元测试：base64 提取保存、文件引用还原、向后兼容、文件不存在处理
+  - 集成测试：飞书发送图片 → 确认文件保存在 uploads/ + JSONL 无 base64
+
+- ⏳ **T15.5** Git 提交 + 合并 + 文档更新
+
+---
+
 *本文件随开发进展持续更新。*
