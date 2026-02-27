@@ -245,6 +245,118 @@ def _extract_post_text(content_json: dict) -> str:
     return text
 
 
+def _patch_ws_client_with_own_loop(client) -> None:
+    """Monkey-patch a lark-oapi ws.Client instance to use its own event loop.
+
+    The SDK's ``Client.start()`` and related async methods reference a
+    module-level ``loop`` variable (``lark_oapi.ws.client.loop``).  When
+    multiple Client instances run in separate threads, they all fight over
+    the same loop, causing "This event loop is already running" errors.
+
+    This function replaces the key methods on *this specific instance* so
+    they create and use a private event loop, completely independent of the
+    module-level one.
+    """
+    import types
+
+    try:
+        import lark_oapi.ws.client as _ws_mod
+        import websockets
+    except ImportError:
+        return
+
+    def patched_start(self_client):
+        # Create a brand-new loop for this thread / this client instance.
+        _loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(_loop)
+        # Store on instance so other patched methods can find it.
+        self_client._own_loop = _loop
+        # Recreate the asyncio.Lock on the new loop.
+        self_client._lock = asyncio.Lock()
+
+        try:
+            _loop.run_until_complete(self_client._connect())
+        except _ws_mod.ClientException as e:
+            _ws_mod.logger.error(self_client._fmt_log("connect failed, err: {}", e))
+            raise e
+        except Exception as e:
+            _ws_mod.logger.error(self_client._fmt_log("connect failed, err: {}", e))
+            _loop.run_until_complete(self_client._disconnect())
+            if self_client._auto_reconnect:
+                _loop.run_until_complete(self_client._reconnect())
+            else:
+                raise e
+
+        _loop.create_task(self_client._ping_loop())
+        _loop.run_until_complete(_ws_mod._select())
+
+    async def patched_connect(self_client):
+        _loop = self_client._own_loop
+        await self_client._lock.acquire()
+        if self_client._conn is not None:
+            self_client._lock.release()
+            return
+        try:
+            from urllib.parse import urlparse, parse_qs
+            conn_url = self_client._get_conn_url()
+            u = urlparse(conn_url)
+            q = parse_qs(u.query)
+            conn_id = q[_ws_mod.DEVICE_ID][0]
+            service_id = q[_ws_mod.SERVICE_ID][0]
+            conn = await websockets.connect(conn_url)
+            self_client._conn = conn
+            self_client._conn_url = conn_url
+            self_client._conn_id = conn_id
+            self_client._service_id = service_id
+            _ws_mod.logger.info(self_client._fmt_log("connected to {}", conn_url))
+            _loop.create_task(self_client._receive_message_loop())
+        except websockets.InvalidStatusCode as e:
+            _ws_mod._parse_ws_conn_exception(e)
+        finally:
+            self_client._lock.release()
+
+    async def patched_receive_message_loop(self_client):
+        _loop = self_client._own_loop
+        try:
+            while True:
+                if self_client._conn is None:
+                    raise _ws_mod.ConnectionClosedException("connection is closed")
+                msg = await self_client._conn.recv()
+                _loop.create_task(self_client._handle_message(msg))
+        except Exception as e:
+            _ws_mod.logger.error(self_client._fmt_log("receive message loop exit, err: {}", e))
+            await self_client._disconnect()
+            if self_client._auto_reconnect:
+                await self_client._reconnect()
+            else:
+                raise e
+
+    async def patched_reconnect(self_client):
+        import random as _random
+        if self_client._reconnect_nonce > 0:
+            nonce = _random.random() * self_client._reconnect_nonce
+            await asyncio.sleep(nonce)
+        if self_client._reconnect_count >= 0:
+            for i in range(self_client._reconnect_count):
+                if await self_client._try_connect(i):
+                    return
+                await asyncio.sleep(self_client._reconnect_interval)
+            raise _ws_mod.ServerUnreachableException(
+                f"unable to connect after {self_client._reconnect_count} tries")
+        else:
+            i = 0
+            while True:
+                if await self_client._try_connect(i):
+                    return
+                await asyncio.sleep(self_client._reconnect_interval)
+                i += 1
+
+    client.start = types.MethodType(patched_start, client)
+    client._connect = types.MethodType(patched_connect, client)
+    client._receive_message_loop = types.MethodType(patched_receive_message_loop, client)
+    client._reconnect = types.MethodType(patched_reconnect, client)
+
+
 class FeishuChannel(BaseChannel):
     """
     Feishu/Lark channel using WebSocket long connection.
@@ -307,13 +419,23 @@ class FeishuChannel(BaseChannel):
             log_level=lark.LogLevel.INFO
         )
         
-        # Start WebSocket client in a separate thread with reconnect loop
+        # Start WebSocket client in a separate thread with its own event loop.
+        # The lark-oapi SDK uses a module-level global `loop` variable in
+        # lark_oapi.ws.client.  When multiple FeishuChannel instances each
+        # call `ws_client.start()`, the second call fails with
+        # "This event loop is already running" because the first call is
+        # blocking the shared loop.
+        #
+        # Fix: monkey-patch the SDK Client instance methods to use a
+        # per-instance event loop instead of the shared module-level one.
+        _patch_ws_client_with_own_loop(self._ws_client)
+
         def run_ws():
             while self._running:
                 try:
                     self._ws_client.start()
                 except Exception as e:
-                    logger.warning("Feishu WebSocket error: {}", e)
+                    logger.warning("Feishu WebSocket [{}] error: {}", self.name, e)
                 if self._running:
                     import time; time.sleep(5)
         
