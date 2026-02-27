@@ -371,4 +371,60 @@ async def check_user_input(self) -> str | None:
 
 ---
 
+## §13 文件访问审计日志 (feat/audit-log)
+
+**改动文件**: `audit/__init__.py` (新), `audit/logger.py` (新), `agent/tools/registry.py`, `agent/loop.py`, `cli/commands.py`, `sdk/runner.py`, `tests/test_audit.py` (新)
+
+**问题**: nanobot 拥有文件系统完整读写权限，但缺乏统一的审计机制。无法事后追溯 agent 执行了哪些文件操作，无法进行安全分析。
+
+**改动**:
+
+1. **新增 `audit/logger.py`**:
+   - `AuditEntry` dataclass: timestamp, session_key, channel, chat_id, tool, action, params, result, resolved_path, error, duration_ms
+   - `AuditLogger`: 按天分文件写入 JSONL (`~/.nanobot/workspace/audit-logs/YYYY-MM-DD.jsonl`)
+   - 支持 `enabled=False` 禁用
+
+2. **改造 `agent/tools/registry.py`** — ToolRegistry 拦截层:
+   - `set_audit_logger()` / `set_audit_context()` 方法
+   - `execute()` 中统一拦截所有工具调用（零侵入，不修改具体工具代码）
+   - `_extract_audit_fields()` 针对每种工具类型提取结构化审计字段:
+     - 文件工具: path, size/bytes_written, success
+     - exec: command, working_dir, exit_code, blocked
+     - web: query/url, status_code
+     - 其他: 参数摘要
+   - `_truncate()` 辅助函数: 截断敏感内容用于日志
+
+3. **`agent/loop.py`** — 集成:
+   - `AgentLoop.__init__` 新增 `audit_logger` 参数
+   - `_set_tool_context()` 扩展 `session_key` 参数，同步调用 `tools.set_audit_context()`
+
+4. **`cli/commands.py` + `sdk/runner.py`** — 初始化:
+   - 所有入口（agent, gateway, cron-run, SDK）创建 `AuditLogger()` 并传入 `AgentLoop`
+
+**审计日志格式**:
+```json
+{
+  "timestamp": "2026-02-27T12:30:45.123456",
+  "session_key": "webchat:1772126509",
+  "channel": "feishu",
+  "chat_id": "ou_xxx",
+  "tool": "write_file",
+  "action": "write",
+  "params": {"path": "/path/to/file"},
+  "result": {"success": true, "bytes_written": 1234},
+  "resolved_path": "/absolute/path/to/file",
+  "error": null,
+  "duration_ms": 12.34
+}
+```
+
+**查询示例**:
+```bash
+grep '"action":"write"' audit-logs/2026-02-27.jsonl | jq .
+grep '"session_key":"webchat:123"' audit-logs/2026-02-27.jsonl | jq .
+grep '"success":false' audit-logs/2026-02-27.jsonl | jq .
+```
+
+---
+
 *本文档随 local 分支改动持续更新。*
