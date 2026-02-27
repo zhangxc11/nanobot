@@ -191,6 +191,83 @@ class AgentLoop:
             return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
         return ", ".join(_fmt(tc) for tc in tool_calls)
 
+    @staticmethod
+    def _is_retryable(error: Exception) -> bool:
+        """Check if an LLM error is transient and worth retrying.
+
+        Matches rate-limit, connection, and timeout errors from litellm
+        and upstream providers without importing their exception classes.
+        """
+        error_type = type(error).__name__
+        # litellm wraps provider errors with these class names
+        if error_type in (
+            "RateLimitError",
+            "APIConnectionError",
+            "APITimeoutError",
+            "Timeout",
+            "ServiceUnavailableError",
+            "InternalServerError",
+        ):
+            return True
+        # Check HTTP status code if available (litellm attaches it)
+        status = getattr(error, "status_code", None)
+        if status in (429, 500, 502, 503, 504, 529):
+            return True
+        # Fallback: check error message string
+        error_str = str(error).lower()
+        if "rate limit" in error_str or "rate_limit" in error_str:
+            return True
+        if "overloaded" in error_str or "capacity" in error_str:
+            return True
+        return False
+
+    async def _chat_with_retry(
+        self,
+        *,
+        messages: list[dict],
+        tools: list[dict] | None,
+        model: str,
+        temperature: float,
+        max_tokens: int,
+        progress_fn: Callable[..., Awaitable[None]] | None = None,
+    ):
+        """Call provider.chat() with exponential backoff for transient errors.
+
+        Retries up to 5 times with delays of 10s, 20s, 40s, 80s, 160s.
+        Non-retryable errors are raised immediately.
+        """
+        max_retries = 5
+        base_delay = 10  # seconds
+
+        for attempt in range(max_retries + 1):
+            try:
+                return await self.provider.chat(
+                    messages=messages,
+                    tools=tools,
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+            except Exception as e:
+                if not self._is_retryable(e) or attempt >= max_retries:
+                    raise
+                delay = base_delay * (2 ** attempt)  # 10, 20, 40, 80, 160
+                logger.warning(
+                    "LLM call failed (attempt {}/{}): {}. Retrying in {}s...",
+                    attempt + 1, max_retries, str(e)[:200], delay,
+                )
+                if progress_fn:
+                    try:
+                        await progress_fn(
+                            f"⏳ API 限流，等待 {delay}s 后重试 ({attempt + 1}/{max_retries})"
+                        )
+                    except Exception:
+                        pass  # progress notification is best-effort
+                await asyncio.sleep(delay)
+
+        # Unreachable, but satisfies type checker
+        raise RuntimeError("Exhausted retries")
+
     async def _run_agent_loop(
         self,
         initial_messages: list[dict],
@@ -235,12 +312,13 @@ class AgentLoop:
         while iteration < self.max_iterations:
             iteration += 1
 
-            response = await self.provider.chat(
+            response = await self._chat_with_retry(
                 messages=messages,
                 tools=self.tools.get_definitions(),
                 model=self.model,
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
+                progress_fn=_progress_fn,
             )
 
             # Record token usage from this LLM call — immediately to SQLite

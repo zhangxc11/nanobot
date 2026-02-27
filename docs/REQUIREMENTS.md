@@ -665,11 +665,81 @@ self.tools.set_audit_context(session_key=key, channel=msg.channel, chat_id=msg.c
 
 ---
 
+## 十一、media 参数支持（Phase 10）
+
+### 11.1 需求背景
+
+web-chat 需要支持用户发送图片，利用 Claude 多模态能力理解图片内容。当前 `process_direct()` 和 `AgentRunner.run()` 不支持传入媒体附件。
+
+### 11.2 目标
+
+为 `process_direct()` 和 `AgentRunner.run()` 增加 `media: list[str] | None` 参数，透传给 `_build_user_content()`，使 Agent 能处理带图片的用户消息。
+
+### 11.3 设计要求
+
+1. **透传**: `media` 参数从 SDK 层 → `process_direct()` → `InboundMessage` → `_build_user_content()`
+2. **向后兼容**: 默认 `media=None`，不影响现有调用
+3. **不修改 `_build_user_content`**: 该方法已有 media 处理逻辑（base64 编码图片为 `image_url` content block）
+
+### 11.4 影响文件
+
+| 文件 | 改动 |
+|------|------|
+| `agent/loop.py` | `process_direct()` 新增 `media` 参数，传入 `InboundMessage` |
+| `sdk/runner.py` | `AgentRunner.run()` 新增 `media` 参数，透传给 `process_direct()` |
+
+---
+
+## 十二、LLM API 速率限制重试机制（Phase 11）
+
+### 12.1 需求背景
+
+近期偶尔出现 Anthropic API 速率限制错误，导致 agent 任务直接中断：
+
+```
+Error calling LLM: litellm.RateLimitError: AnthropicException -
+{"error":{"type":"<nil>","message":"This request would exceed your organization's
+rate limit of 400,000 output tokens per minute..."}}
+```
+
+这类错误是暂时性的（等待一段时间后限额恢复即可重试），但当前代码中 `provider.chat()` 调用没有重试机制，一旦触发就直接抛异常导致整个任务失败。
+
+### 12.2 目标
+
+在 `_run_agent_loop` 中为 `provider.chat()` 调用增加指数退避重试机制，自动处理速率限制和暂时性错误，避免任务因偶发限流而中断。
+
+### 12.3 设计要求
+
+1. **可重试错误类型**：
+   - `RateLimitError` / HTTP 429 — API 速率限制
+   - `APIConnectionError` / HTTP 5xx — 暂时性服务端错误
+   - `APITimeoutError` — 请求超时
+2. **指数退避**：初始等待 10 秒，每次翻倍（10s → 20s → 40s → 80s → 160s）
+3. **最大重试次数**：5 次
+4. **进度通知**：重试时通过 `on_progress` 通知用户
+5. **日志记录**：每次重试记录 warning 日志
+6. **最终失败**：超过最大重试次数后仍抛出原始异常
+7. **不影响其他错误**：非暂时性错误（如 AuthenticationError、InvalidRequestError）不重试，立即抛出
+
+### 12.4 影响文件
+
+| 文件 | 改动 |
+|------|------|
+| `agent/loop.py` | 新增 `_chat_with_retry()` 和 `_is_retryable()` 方法 |
+
+### 12.5 非目标
+
+- 不修改 provider 层代码（重试在 agent loop 层处理）
+- 不做全局速率限制器
+- 不做请求队列或并发控制
+
+---
+
 ### 手动维护的 backlog
 
 **note** 这个部分手动添加需求 backlog。被激活后，更新前序需求文档章节，推进开发。
 
-（暂无待处理 backlog）
+（当前无待处理 backlog）
 
 ---
 
