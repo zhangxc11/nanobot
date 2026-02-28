@@ -606,6 +606,53 @@ class AgentLoop:
             if exc is not None:
                 logger.error("Task failed with exception: {}", exc)
 
+    def _handle_provider_command(self, msg: InboundMessage) -> OutboundMessage:
+        """Handle /provider slash command: view or switch active provider.
+
+        Usage:
+            /provider              — show current provider and available list
+            /provider <name>       — switch to provider (use its default model)
+            /provider <name> <model> — switch to provider with specific model
+        """
+        from nanobot.providers.pool import ProviderPool
+
+        pool = self.provider
+        if not isinstance(pool, ProviderPool):
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content="⚠️ Provider switching not available (single provider mode).",
+            )
+
+        parts = msg.content.strip().split()
+        if len(parts) == 1:
+            # /provider — show status
+            lines = [f"🔌 当前: **{pool.active_provider}** / `{pool.active_model}`"]
+            lines.append("\n可用 providers:")
+            for item in pool.available:
+                marker = " ← 当前" if item["name"] == pool.active_provider else ""
+                lines.append(f"  • **{item['name']}** (`{item['model']}`){marker}")
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content="\n".join(lines),
+            )
+        else:
+            # /provider <name> [model] — switch
+            provider_name = parts[1]
+            model = parts[2] if len(parts) > 2 else None
+            try:
+                pool.switch(provider_name, model)
+                # Also update self.model so AgentLoop uses the new model
+                self.model = pool.active_model
+                return OutboundMessage(
+                    channel=msg.channel, chat_id=msg.chat_id,
+                    content=f"✅ 已切换到 **{pool.active_provider}** / `{pool.active_model}`",
+                )
+            except ValueError as e:
+                return OutboundMessage(
+                    channel=msg.channel, chat_id=msg.chat_id,
+                    content=f"❌ {e}",
+                )
+
     async def _process_message_safe(self, msg: InboundMessage) -> None:
         """Wrapper around _process_message that handles CancelledError gracefully."""
         try:
@@ -737,7 +784,9 @@ class AgentLoop:
                                   content=f"New session started: {new_key}")
         if cmd == "/help":
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
-                                  content="🐈 nanobot commands:\n/new — Start a new conversation (fresh session)\n/flush — Archive memory and clear current session\n/stop — Stop the currently running task\n/help — Show available commands")
+                                  content="🐈 nanobot commands:\n/new — Start a new conversation (fresh session)\n/flush — Archive memory and clear current session\n/stop — Stop the currently running task\n/provider — View/switch active LLM provider\n/help — Show available commands")
+        if cmd.startswith("/provider"):
+            return self._handle_provider_command(msg)
         if cmd == "/stop":
             # When called via process_direct (not through run()), there's
             # no concurrent task to cancel. Just return a message.

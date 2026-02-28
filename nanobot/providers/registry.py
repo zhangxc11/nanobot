@@ -180,6 +180,26 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         supports_prompt_caching=True,
     ),
 
+    # Anthropic Proxy: secondary Anthropic-compatible endpoint with separate credentials.
+    # Uses a different api_base/api_key to route through a proxy or alternative service.
+    ProviderSpec(
+        name="anthropic_proxy",
+        keywords=("anthropic_proxy",),
+        env_key="ANTHROPIC_API_KEY",
+        display_name="Anthropic Proxy",
+        litellm_prefix="",
+        skip_prefixes=(),
+        env_extras=(),
+        is_gateway=False,
+        is_local=False,
+        detect_by_key_prefix="",
+        detect_by_base_keyword="",
+        default_api_base="",
+        strip_model_prefix=False,
+        model_overrides=(),
+        supports_prompt_caching=True,
+    ),
+
     # OpenAI: LiteLLM recognizes "gpt-*" natively, no prefix needed.
     ProviderSpec(
         name="openai",

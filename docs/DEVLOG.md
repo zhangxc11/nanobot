@@ -726,4 +726,57 @@ file:///absolute/path/to/image.jpg?mime=image/jpeg
 
 ---
 
+## Phase 16: ProviderPool — 运行时 Provider 动态切换
+
+### 需求来源
+- 用户需求：agent token 消耗量大，需要根据任务难度切换不同 API 源控制成本
+- 不同 channel（webchat、gateway、命令行）独立维护 provider 状态
+- 不修改 config.json 来切换，纯运行时状态
+
+### 目标
+1. 新增 `anthropic_proxy` provider 配置槽位
+2. 引入 ProviderPool 类，实现 LLMProvider 接口，支持运行时切换 active provider + model
+3. 新增 `/provider` 斜杠命令（全 channel 可用）
+4. 任务执行中禁止切换
+
+### 设计文档
+- 详见 `~/.nanobot/workspace/web-chat/docs/PROVIDER_POOL_DESIGN.md`
+
+### 任务清单
+
+- 🔜 **T16.1** `providers/registry.py` — 新增 `anthropic_proxy` ProviderSpec
+  - 复制 anthropic spec，修改 name/keywords/display_name
+  - 复用 ANTHROPIC_API_KEY env_key
+
+- 🔜 **T16.2** `config/schema.py` — `ProvidersConfig` 增加 `anthropic_proxy` 字段
+
+- 🔜 **T16.3** `providers/pool.py` — **新建** ProviderPool 类
+  - 实现 LLMProvider 接口
+  - 持有 dict[str, tuple[LLMProvider, str]]（name → (instance, default_model)）
+  - active_provider / active_model 属性
+  - switch(provider, model?) 方法
+  - available 属性返回可用列表
+  - chat() 路由到 active provider
+
+- 🔜 **T16.4** `providers/__init__.py` — 导出 ProviderPool
+
+- 🔜 **T16.5** `cli/commands.py` — `_make_provider` 改为构建 ProviderPool
+  - 遍历所有 providers，为每个有 apiKey 的构建 LLMProvider
+  - 返回 ProviderPool 实例
+  - 向后兼容：只有一个 provider 时也返回 ProviderPool
+
+- 🔜 **T16.6** `agent/loop.py` — 新增 `/provider` 斜杠命令
+  - `/provider` 显示状态 + 可用列表
+  - `/provider <name> [model]` 切换
+  - 更新 `/help` 输出
+
+- 🔜 **T16.7** 测试验证
+  - ProviderPool 单元测试
+  - /provider 命令测试
+  - 现有测试无回归
+
+- 🔜 **T16.8** Git 提交
+
+---
+
 *本文件随开发进展持续更新。*

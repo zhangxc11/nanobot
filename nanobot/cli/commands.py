@@ -230,41 +230,120 @@ def _create_workspace_templates(workspace: Path):
 
 
 def _make_provider(config: Config):
-    """Create the appropriate LLM provider from config."""
+    """Create a ProviderPool from config with all available providers.
+
+    Builds LLMProvider instances for every configured provider that has
+    credentials, wraps them in a ProviderPool, and sets the active provider
+    based on ``agents.defaults.model``.
+    """
     from nanobot.providers.litellm_provider import LiteLLMProvider
     from nanobot.providers.openai_codex_provider import OpenAICodexProvider
     from nanobot.providers.custom_provider import CustomProvider
+    from nanobot.providers.pool import ProviderPool
+    from nanobot.providers.registry import PROVIDERS, find_by_name
+    from loguru import logger
 
-    model = config.agents.defaults.model
-    provider_name = config.get_provider_name(model)
-    p = config.get_provider(model)
+    default_model = config.agents.defaults.model
+    default_provider_name = config.get_provider_name(default_model)
 
-    # OpenAI Codex (OAuth)
-    if provider_name == "openai_codex" or model.startswith("openai-codex/"):
-        return OpenAICodexProvider(default_model=model)
+    # ── Build individual provider instances ──
+    pool_entries: dict[str, tuple] = {}  # name → (LLMProvider, default_model)
 
-    # Custom: direct OpenAI-compatible endpoint, bypasses LiteLLM
-    if provider_name == "custom":
-        return CustomProvider(
-            api_key=p.api_key if p else "no-key",
-            api_base=config.get_api_base(model) or "http://localhost:8000/v1",
-            default_model=model,
-        )
+    for spec in PROVIDERS:
+        p = getattr(config.providers, spec.name, None)
+        if p is None:
+            continue
 
-    from nanobot.providers.registry import find_by_name
-    spec = find_by_name(provider_name)
-    if not model.startswith("bedrock/") and not (p and p.api_key) and not (spec and spec.is_oauth):
+        # Skip providers without credentials (unless OAuth)
+        if not spec.is_oauth and not p.api_key:
+            continue
+
+        try:
+            if spec.is_oauth and spec.name == "openai_codex":
+                instance = OpenAICodexProvider(default_model=default_model if spec.name == default_provider_name else "openai-codex/codex-mini-latest")
+                model_for_entry = instance.get_default_model()
+            elif spec.is_oauth and spec.name == "github_copilot":
+                instance = OpenAICodexProvider(default_model=default_model if spec.name == default_provider_name else "github_copilot/claude-sonnet-4")
+                model_for_entry = instance.get_default_model()
+            elif spec.name == "custom":
+                instance = CustomProvider(
+                    api_key=p.api_key,
+                    api_base=p.api_base or "http://localhost:8000/v1",
+                    default_model=default_model if spec.name == default_provider_name else "custom-model",
+                )
+                model_for_entry = instance.get_default_model()
+            else:
+                # Determine the model for this provider
+                if spec.name == default_provider_name:
+                    model_for_entry = default_model
+                else:
+                    # Use a sensible default model per provider type
+                    model_for_entry = _default_model_for_provider(spec.name)
+
+                # Resolve api_base: use provider's configured base, or spec default
+                api_base = p.api_base
+                if not api_base and spec.default_api_base:
+                    api_base = spec.default_api_base
+
+                instance = LiteLLMProvider(
+                    api_key=p.api_key,
+                    api_base=api_base,
+                    default_model=model_for_entry,
+                    extra_headers=p.extra_headers,
+                    provider_name=spec.name,
+                )
+
+            pool_entries[spec.name] = (instance, model_for_entry)
+        except Exception as e:
+            logger.warning("Failed to create provider '{}': {}", spec.name, e)
+
+    if not pool_entries:
         console.print("[red]Error: No API key configured.[/red]")
         console.print("Set one in ~/.nanobot/config.json under providers section")
         raise typer.Exit(1)
 
-    return LiteLLMProvider(
-        api_key=p.api_key if p else None,
-        api_base=config.get_api_base(model),
-        default_model=model,
-        extra_headers=p.extra_headers if p else None,
-        provider_name=provider_name,
+    # Ensure the default provider is in the pool
+    if default_provider_name and default_provider_name not in pool_entries:
+        console.print(f"[red]Error: Default provider '{default_provider_name}' has no valid credentials.[/red]")
+        raise typer.Exit(1)
+
+    # If default_provider_name is None (no match), use first available
+    active_name = default_provider_name or next(iter(pool_entries))
+    active_model = default_model
+
+    return ProviderPool(
+        providers=pool_entries,
+        active_provider=active_name,
+        active_model=active_model,
     )
+
+
+# Well-known default models per provider (used when building ProviderPool
+# for non-active providers that need a sensible default).
+_PROVIDER_DEFAULT_MODELS: dict[str, str] = {
+    "anthropic": "claude-opus-4-6",
+    "anthropic_proxy": "claude-opus-4-6",
+    "openai": "gpt-4o",
+    "deepseek": "deepseek-chat",
+    "gemini": "gemini-2.0-flash",
+    "zhipu": "glm-4-plus",
+    "dashscope": "qwen-max",
+    "moonshot": "kimi-k2.5",
+    "minimax": "MiniMax-M1",
+    "groq": "groq/llama-3.3-70b-versatile",
+    "openrouter": "openrouter/anthropic/claude-opus-4",
+    "aihubmix": "claude-opus-4-6",
+    "siliconflow": "deepseek-ai/DeepSeek-V3",
+    "volcengine": "deepseek-v3-250324",
+    "vllm": "local-model",
+    "openai_codex": "openai-codex/codex-mini-latest",
+    "github_copilot": "github_copilot/claude-sonnet-4",
+}
+
+
+def _default_model_for_provider(provider_name: str) -> str:
+    """Return a sensible default model for a provider."""
+    return _PROVIDER_DEFAULT_MODELS.get(provider_name, provider_name + "/default")
 
 
 # ============================================================================
