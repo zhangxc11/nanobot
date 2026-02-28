@@ -739,42 +739,15 @@ file:///absolute/path/to/image.jpg?mime=image/jpeg
 3. 新增 `/provider` 斜杠命令（全 channel 可用）
 4. 任务执行中禁止切换
 
-### 设计文档
-- 详见 `~/.nanobot/workspace/web-chat/docs/PROVIDER_POOL_DESIGN.md`
-
 ### 任务清单
 
-- 🔜 **T16.1** `providers/registry.py` — 新增 `anthropic_proxy` ProviderSpec
-  - 复制 anthropic spec，修改 name/keywords/display_name
-  - 复用 ANTHROPIC_API_KEY env_key
-
-- 🔜 **T16.2** `config/schema.py` — `ProvidersConfig` 增加 `anthropic_proxy` 字段
-
-- 🔜 **T16.3** `providers/pool.py` — **新建** ProviderPool 类
-  - 实现 LLMProvider 接口
-  - 持有 dict[str, tuple[LLMProvider, str]]（name → (instance, default_model)）
-  - active_provider / active_model 属性
-  - switch(provider, model?) 方法
-  - available 属性返回可用列表
-  - chat() 路由到 active provider
-
-- 🔜 **T16.4** `providers/__init__.py` — 导出 ProviderPool
-
-- 🔜 **T16.5** `cli/commands.py` — `_make_provider` 改为构建 ProviderPool
-  - 遍历所有 providers，为每个有 apiKey 的构建 LLMProvider
-  - 返回 ProviderPool 实例
-  - 向后兼容：只有一个 provider 时也返回 ProviderPool
-
-- 🔜 **T16.6** `agent/loop.py` — 新增 `/provider` 斜杠命令
-  - `/provider` 显示状态 + 可用列表
-  - `/provider <name> [model]` 切换
-  - 更新 `/help` 输出
-
-- 🔜 **T16.7** 测试验证
-  - ProviderPool 单元测试
-  - /provider 命令测试
-  - 现有测试无回归
-
+- ✅ **T16.1** `providers/registry.py` — 新增 `anthropic_proxy` ProviderSpec
+- ✅ **T16.2** `config/schema.py` — `ProvidersConfig` 增加 `anthropic_proxy` 字段
+- ✅ **T16.3** `providers/pool.py` — **新建** ProviderPool 类（LLMProvider 接口 + 运行时切换）
+- ✅ **T16.4** `providers/__init__.py` — 导出 ProviderPool
+- ✅ **T16.5** `cli/commands.py` — `_make_provider` 改为构建 ProviderPool
+- ✅ **T16.6** `agent/loop.py` — 新增 `/provider` 斜杠命令 + `/help` 更新
+- ✅ **T16.7** 测试验证 — 22 项 ProviderPool 测试 + 5 项命令测试全部通过，无回归
 - 🔜 **T16.8** Git 提交
 
 ---
