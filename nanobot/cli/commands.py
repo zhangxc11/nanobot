@@ -374,10 +374,14 @@ def gateway(
     from nanobot.cron.service import CronService
     from nanobot.cron.types import CronJob
     from nanobot.heartbeat.service import HeartbeatService
+    from loguru import logger
     
     if verbose:
         import logging
         logging.basicConfig(level=logging.DEBUG)
+        logger.enable("nanobot")
+    else:
+        logger.disable("nanobot")
     
     console.print(f"{__logo__} Starting nanobot gateway on port {port}...")
     
@@ -550,18 +554,18 @@ def agent(
     from loguru import logger
     
     config = load_config()
-    
+
+    if logs:
+        logger.enable("nanobot")
+    else:
+        logger.disable("nanobot")
+
     bus = MessageBus()
     provider = _make_provider(config)
 
     # Create cron service for tool usage (no callback needed for CLI unless running)
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
-
-    if logs:
-        logger.enable("nanobot")
-    else:
-        logger.disable("nanobot")
 
     # Unified usage recorder (SQLite)
     from nanobot.usage.recorder import UsageRecorder
