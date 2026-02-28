@@ -865,4 +865,203 @@ cat audit-logs/2026-02-27.jsonl | jq -r '.tool' | sort | uniq -c | sort -rn
 
 ---
 
+## 七、ProviderPool — 运行时 Provider 动态切换（Phase 16）
+
+### 7.1 设计原则
+
+1. **引入 ProviderPool 代理类**：实现 `LLMProvider` 接口，作为所有已配置 Provider 的统一门面
+2. **AgentLoop 无感知**：AgentLoop 仍调用 `self.provider.chat()`，ProviderPool 内部路由到当前 active provider
+3. **纯运行时状态**：切换 Provider 不修改 `config.json`，仅改变内存中的 active 指针
+4. **向后兼容**：单 Provider 场景下，ProviderPool 退化为只有一个条目的 Pool，行为不变
+
+### 7.2 架构图
+
+```
+config.json (静态声明)
+  └── providers
+        ├── anthropic       = { apiKey, apiBase }
+        ├── anthropic_proxy = { apiKey, apiBase }
+        ├── deepseek        = { apiKey }
+        └── ...
+
+启动时:
+  _make_provider(config)
+    → 遍历所有 providers，为每个有 apiKey 的构建 LLMProvider 实例
+    → ProviderPool(
+        providers={
+          "anthropic": (LiteLLMProvider(...), "claude-opus-4-6"),
+          "deepseek":  (LiteLLMProvider(...), "deepseek-chat"),
+          ...
+        },
+        active_provider="anthropic",
+        active_model="claude-opus-4-6",
+      )
+
+AgentLoop.__init__(provider=pool)
+  → self.provider = pool
+  → self.model = pool.active_model
+```
+
+### 7.3 ProviderPool 类设计
+
+```python
+class ProviderPool(LLMProvider):
+    """运行时 Provider 动态切换池。
+
+    实现 LLMProvider 接口，AgentLoop 将其视为普通 Provider。
+    内部维护多个 Provider 实例，通过 active 指针路由请求。
+    """
+
+    def __init__(
+        self,
+        providers: dict[str, tuple[LLMProvider, str]],  # name → (provider, default_model)
+        active_provider: str,
+        active_model: str,
+    ):
+        self._providers = providers          # 所有已构建的 Provider
+        self._active_provider = active_provider
+        self._active_model = active_model
+
+    # ── Properties ──────────────────────────────────────────
+
+    @property
+    def active_provider(self) -> str:
+        """当前激活的 Provider 名称。"""
+        return self._active_provider
+
+    @property
+    def active_model(self) -> str:
+        """当前激活的模型名称。"""
+        return self._active_model
+
+    @property
+    def available(self) -> dict[str, str]:
+        """所有可用的 Provider 及其默认模型。"""
+        return {name: model for name, (_, model) in self._providers.items()}
+
+    # ── Methods ─────────────────────────────────────────────
+
+    def switch(self, provider: str, model: str | None = None) -> None:
+        """切换到指定 Provider（可选指定模型）。
+
+        Args:
+            provider: Provider 名称，必须在 available 中
+            model: 可选模型名；不传则使用该 Provider 的默认模型
+        """
+        if provider not in self._providers:
+            raise ValueError(f"Unknown provider: {provider}")
+        self._active_provider = provider
+        _, default_model = self._providers[provider]
+        self._active_model = model or default_model
+
+    async def chat(self, messages, **kwargs) -> "LLMResponse":
+        """路由到当前 active Provider 的 chat 方法。
+
+        忽略调用方传入的 model 参数，始终使用 active_model。
+        """
+        provider_instance, _ = self._providers[self._active_provider]
+        kwargs["model"] = self._active_model
+        return await provider_instance.chat(messages, **kwargs)
+```
+
+### 7.4 `/provider` 斜杠命令
+
+在 `AgentLoop._process_message` 中处理，与现有斜杠命令（`/history`、`/compact` 等）同级：
+
+| 命令 | 行为 | 示例 |
+|------|------|------|
+| `/provider` | 显示当前状态：active provider、active model、所有可用 provider | `/provider` |
+| `/provider <name>` | 切换到指定 Provider，使用其默认模型 | `/provider deepseek` |
+| `/provider <name> <model>` | 切换到指定 Provider 和模型 | `/provider anthropic claude-sonnet-4-20250514` |
+
+**实现要点**：
+
+```python
+# agent/loop.py — _process_message 中
+
+if content.startswith("/provider"):
+    parts = content.split()
+    if len(parts) == 1:
+        # 显示状态
+        status = f"Active: {self.provider.active_provider} / {self.provider.active_model}\n"
+        status += "Available:\n"
+        for name, model in self.provider.available.items():
+            marker = " ←" if name == self.provider.active_provider else ""
+            status += f"  {name}: {model}{marker}\n"
+        return status
+    else:
+        name = parts[1]
+        model = parts[2] if len(parts) > 2 else None
+        self.provider.switch(name, model)
+        self.model = self.provider.active_model  # 同步更新 AgentLoop.model
+        return f"Switched to {self.provider.active_provider} / {self.provider.active_model}"
+```
+
+**多端支持**：CLI 交互模式、Gateway（IM 渠道）、Web Chat 均可使用 `/provider` 命令，因为它在 `_process_message` 层处理，所有调用路径都经过此方法。
+
+### 7.5 `_make_provider` 改造
+
+```python
+# cli/commands.py — _make_provider 改造
+
+PROVIDER_DEFAULT_MODELS = {
+    "anthropic": "claude-opus-4-6",
+    "anthropic_proxy": "claude-opus-4-6",
+    "deepseek": "deepseek-chat",
+    "openai": "gpt-4o",
+    "gemini": "gemini-2.5-pro",
+    # ... 其他 well-known providers
+}
+
+def _make_provider(config) -> ProviderPool:
+    """构建 ProviderPool，包含所有已配置的 Provider。"""
+    providers = {}
+
+    for name, spec in config.providers.items():
+        if not spec.get("apiKey"):
+            continue  # 跳过未配置 apiKey 的 provider
+
+        provider_instance = _build_single_provider(name, spec)
+        default_model = PROVIDER_DEFAULT_MODELS.get(name, spec.get("defaultModel", "unknown"))
+        providers[name] = (provider_instance, default_model)
+
+    # 确定初始 active provider：从 config.agents.defaults.model 推断
+    configured_model = config.agents.get("defaults", {}).get("model", "")
+    active_provider, active_model = _resolve_active(providers, configured_model)
+
+    return ProviderPool(
+        providers=providers,
+        active_provider=active_provider,
+        active_model=active_model,
+    )
+```
+
+**向后兼容**：如果只配置了一个 Provider，ProviderPool 只有一个条目，行为与改造前完全一致。
+
+### 7.6 模块结构
+
+```
+nanobot/providers/
+├── __init__.py          # 导出 ProviderPool
+├── pool.py              # ProviderPool 类
+├── base.py              # LLMProvider 基类 + LLMResponse
+├── litellm_provider.py  # LiteLLM 统一 Provider
+├── custom_provider.py   # 自定义 OpenAI 兼容 Provider
+├── registry.py          # Provider 注册表（新增 anthropic_proxy ProviderSpec）
+```
+
+### 7.7 文件变更清单
+
+| 文件 | 改动类型 | Phase | 说明 |
+|------|----------|-------|------|
+| `providers/pool.py` | 新增 | 16 | ProviderPool 类，实现 LLMProvider 接口 |
+| `providers/registry.py` | 修改 | 16 | 新增 `anthropic_proxy` ProviderSpec |
+| `providers/__init__.py` | 修改 | 16 | 导出 ProviderPool |
+| `config/schema.py` | 修改 | 16 | 支持多 Provider 声明的 schema 校验 |
+| `cli/commands.py` | 修改 | 16 | `_make_provider` 改造，构建 ProviderPool；`PROVIDER_DEFAULT_MODELS` 字典 |
+| `agent/loop.py` | 修改 | 16 | `/provider` 斜杠命令处理；`self.model` 同步更新 |
+| `tests/test_provider_pool.py` | 新增 | 16 | ProviderPool 单元测试（switch、chat 路由、边界情况） |
+
+---
+
 *本文档将随开发进展持续更新。*

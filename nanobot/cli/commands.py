@@ -254,9 +254,18 @@ def _make_provider(config: Config):
         if p is None:
             continue
 
-        # Skip providers without credentials (unless OAuth)
+        # Skip providers without credentials
         if not spec.is_oauth and not p.api_key:
             continue
+
+        # For OAuth providers, verify that OAuth credentials actually exist
+        if spec.is_oauth:
+            try:
+                from oauth_cli_kit import get_token as _probe_token
+                _probe_token()
+            except Exception:
+                logger.debug("OAuth provider '{}' skipped — no credentials found", spec.name)
+                continue
 
         try:
             if spec.is_oauth and spec.name == "openai_codex":

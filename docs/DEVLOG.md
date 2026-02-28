@@ -25,6 +25,7 @@
 | Phase 13: /stop 命令 | ✅ 已完成 | feat/stop-command → local |
 | Phase 14: 大图片自动压缩 | ✅ 已完成 | feat/image-compress → local |
 | Phase 15: 图片存储架构改进 | ✅ 已完成 | feat/image-storage → local |
+| Phase 16: ProviderPool 动态切换 | ✅ 已完成 | feat/provider-pool → local |
 
 ---
 
@@ -726,7 +727,7 @@ file:///absolute/path/to/image.jpg?mime=image/jpeg
 
 ---
 
-## Phase 16: ProviderPool — 运行时 Provider 动态切换
+## Phase 16: ProviderPool — 运行时 Provider 动态切换 ✅
 
 ### 需求来源
 - 用户需求：agent token 消耗量大，需要根据任务难度切换不同 API 源控制成本
@@ -748,7 +749,20 @@ file:///absolute/path/to/image.jpg?mime=image/jpeg
 - ✅ **T16.5** `cli/commands.py` — `_make_provider` 改为构建 ProviderPool
 - ✅ **T16.6** `agent/loop.py` — 新增 `/provider` 斜杠命令 + `/help` 更新
 - ✅ **T16.7** 测试验证 — 22 项 ProviderPool 测试 + 5 项命令测试全部通过，无回归
-- 🔜 **T16.8** Git 提交
+- ✅ **T16.8** Git 提交
+  - commit `e31c837` on feat/provider-pool → merged to local
+
+### 影响范围
+
+| 文件 | 改动 |
+|------|------|
+| `providers/registry.py` | 新增 `anthropic_proxy` ProviderSpec |
+| `config/schema.py` | `ProvidersConfig` 增加 `anthropic_proxy` 字段 |
+| `providers/pool.py` | **新建** ProviderPool 类（LLMProvider 接口代理 + 运行时切换） |
+| `providers/__init__.py` | 导出 ProviderPool |
+| `cli/commands.py` | `_make_provider` 改为构建 ProviderPool + PROVIDER_DEFAULT_MODELS |
+| `agent/loop.py` | `/provider` 斜杠命令 + `/help` 更新 |
+| `tests/test_provider_pool.py` | 22 项新测试 |
 
 ---
 

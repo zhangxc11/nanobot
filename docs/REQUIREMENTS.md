@@ -920,6 +920,79 @@ LLM API（如 Anthropic Claude）对图片大小有限制，超过 5MB 的图片
 
 ---
 
+## 十五、ProviderPool — 运行时 Provider 动态切换（Phase 16）
+
+### 15.1 需求背景
+
+Agent 单次任务的 token 消耗量大（平均每次 prompt 约 11.4 万 tokens），需要根据任务难度灵活切换不同 API 源以控制成本。例如：简单问答用低价模型，复杂编码任务用高端模型。
+
+当前只能通过**修改 config.json + 重启**来切换 provider，无法在运行时动态切换。这意味着：
+- 切换成本高（需要停服、编辑配置、重启）
+- 无法按任务粒度选择模型
+- 多 channel 共享同一 provider，无法独立调整
+
+### 15.2 目标
+
+1. **config.json 新增 `anthropic_proxy` provider 配置槽位**：支持通过代理访问 Anthropic API 的备用源
+2. **引入 ProviderPool 运行时管理多个 provider 实例**：支持动态切换 active provider + model，无需修改配置文件或重启
+3. **新增 `/provider` 斜杠命令**：全 channel 可用（webchat 前端、命令行、gateway），用于查看和切换当前 provider
+4. **不修改 config.json 来切换**：config 只声明可用 API 源池，切换是纯运行时状态
+5. **各 channel 独立**：webchat worker、gateway、命令行各自维护独立的 ProviderPool 状态，互不影响
+6. **任务执行中禁止切换**：agent loop 正在运行时，`/provider` 命令拒绝切换并提示用户等待
+
+### 15.3 设计要求
+
+#### 15.3.1 ProviderPool 实现 LLMProvider 接口
+
+ProviderPool 对外暴露与 LLMProvider 相同的接口，AgentLoop 无需感知底层是单个 provider 还是 pool。AgentLoop 调用 `provider.chat()` 时，ProviderPool 自动路由到当前 active provider。
+
+#### 15.3.2 Pool.chat() 忽略调用方传入的 model
+
+`Pool.chat()` 始终使用 active_model，忽略调用方（AgentLoop）传入的 model 参数。这确保切换 provider 后模型也同步切换，不会出现"用 proxy provider 但仍请求原模型"的不一致状态。
+
+#### 15.3.3 Provider Entry 结构
+
+每个 provider entry 是一个 `(provider_instance, default_model)` 二元组：
+- `provider_instance`：实现 LLMProvider 接口的 provider 实例
+- `default_model`：该 provider 的默认模型名称（来自 config）
+
+#### 15.3.4 switch(provider, model?) 方法
+
+- `switch(provider_name)` — 切换到指定 provider，使用该 provider 的 default_model
+- `switch(provider_name, model)` — 切换到指定 provider，并覆盖使用指定 model
+- 切换失败（provider_name 不存在）时抛出 ValueError
+
+#### 15.3.5 available 属性
+
+`available` 属性返回所有可用 provider 及其默认 model，格式为 `dict[str, str]`（`{provider_name: default_model}`）。
+
+#### 15.3.6 `/provider` 斜杠命令
+
+- **无参数**（`/provider`）：显示当前状态，包括 active provider + model、所有可用 provider 列表
+- **有参数**（`/provider anthropic_proxy` 或 `/provider anthropic_proxy claude-3-haiku-20240307`）：切换到指定 provider（+ 可选 model）
+- 切换成功后显示确认信息
+- 切换失败（不存在的 provider / 任务执行中）显示错误信息
+
+### 15.4 影响范围
+
+| 文件 | 改动 |
+|------|------|
+| `providers/registry.py` | 新增 `anthropic_proxy` ProviderSpec，注册代理模式的 Anthropic provider |
+| `config/schema.py` | `ProvidersConfig` 增加 `anthropic_proxy` 可选字段（api_key、base_url、model） |
+| `providers/pool.py` | **新建** ProviderPool 类，实现 LLMProvider 接口，管理多 provider 实例的动态切换 |
+| `providers/__init__.py` | 导出 ProviderPool |
+| `cli/commands.py` | `_make_provider` 构建 ProviderPool（从 config 中读取所有已配置的 provider，组装为 pool） |
+| `agent/loop.py` | 新增 `/provider` 斜杠命令处理逻辑 |
+
+### 15.5 非目标
+
+- 不做自动切换（如根据 token 用量自动降级）— 切换完全由用户手动触发
+- 不做 provider 健康检查或故障转移
+- 不持久化切换状态 — 重启后恢复为 config 中的默认 provider
+- 不修改现有 provider 实现（Anthropic、OpenAI 等）
+
+---
+
 ### 手动维护的 backlog
 
 **note** 这个部分手动添加需求 backlog。被激活后，更新前序需求文档章节，推进开发。
