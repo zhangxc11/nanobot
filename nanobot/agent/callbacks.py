@@ -10,8 +10,13 @@ only need to override the events they care about.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, TYPE_CHECKING, runtime_checkable
+
+if TYPE_CHECKING:
+    from nanobot.bus.events import OutboundMessage
+    from nanobot.bus.queue import MessageBus
 
 
 @dataclass
@@ -115,3 +120,41 @@ class DefaultCallbacks:
 
     async def check_user_input(self) -> str | None:
         return None
+
+
+class GatewayCallbacks(DefaultCallbacks):
+    """Per-session callbacks for gateway mode with user injection support.
+
+    Each concurrent session task gets its own GatewayCallbacks instance.
+    The dispatcher puts new messages into the inject queue; the agent loop
+    checks it between tool rounds via ``check_user_input()``.
+
+    Progress events are forwarded to the bus as OutboundMessages so that
+    the IM channel can display them.
+    """
+
+    def __init__(self, bus: "MessageBus", channel: str, chat_id: str):
+        self._inject_queue: asyncio.Queue[str] = asyncio.Queue()
+        self._bus = bus
+        self._channel = channel
+        self._chat_id = chat_id
+
+    async def check_user_input(self) -> str | None:
+        """Non-blocking check for injected user messages."""
+        try:
+            return self._inject_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return None
+
+    async def inject(self, text: str) -> None:
+        """Called by the dispatcher to inject a user message into this session."""
+        await self._inject_queue.put(text)
+
+    async def on_progress(self, text: str, *, tool_hint: bool = False) -> None:
+        """Forward progress to bus as outbound message."""
+        from nanobot.bus.events import OutboundMessage
+        meta = {"_progress": True, "_tool_hint": tool_hint}
+        await self._bus.publish_outbound(OutboundMessage(
+            channel=self._channel, chat_id=self._chat_id,
+            content=text, metadata=meta,
+        ))
