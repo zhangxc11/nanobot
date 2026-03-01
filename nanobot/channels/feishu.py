@@ -864,7 +864,7 @@ class FeishuChannel(BaseChannel):
         """Resolve a merge_forward message by calling the feishu-parser skill script.
 
         This delegates parsing to an external script, allowing iteration without
-        restarting the gateway. The script also dumps raw data for debugging.
+        restarting the gateway.
 
         Falls back to the internal _resolve_merge_forward() on script failure.
         """
@@ -889,8 +889,7 @@ class FeishuChannel(BaseChannel):
             sys.executable, skill_script,
             "--app", app_name,
             "parse-forward",
-            "--content-json", content_json_str,
-            "--dump",
+            "--message-id", message_id,
             "--download",
         ]
 
@@ -1075,6 +1074,19 @@ class FeishuChannel(BaseChannel):
                 content_parts.append(content_text)
 
             elif msg_type == "merge_forward":
+                # DEBUG: dump raw content to file for analysis
+                _dump_dir = os.path.join(str(Path.home()), ".nanobot", "workspace", "feishu-dumps")
+                os.makedirs(_dump_dir, exist_ok=True)
+                import time as _time
+                _dump_path = os.path.join(_dump_dir, f"merge_forward_raw_{int(_time.time())}.json")
+                with open(_dump_path, 'w') as _df:
+                    json.dump({
+                        "message_id": message_id,
+                        "msg_type": msg_type,
+                        "content_raw": message.content,
+                        "content_json": content_json,
+                    }, _df, ensure_ascii=False, indent=2)
+
                 # Resolve merged forward messages via skill script (allows iteration without gateway restart)
                 text, forward_media = await self._resolve_merge_forward_via_skill(
                     content_json, message_id
