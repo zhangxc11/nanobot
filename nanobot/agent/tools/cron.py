@@ -145,3 +145,13 @@ class CronTool(Tool):
         if self._cron.remove_job(job_id):
             return f"Removed job {job_id}"
         return f"Job {job_id} not found"
+
+    def clone(self) -> "CronTool":
+        """Create a new CronTool instance sharing the same CronService.
+
+        The clone has independent context (channel/chat_id).
+        """
+        tool = CronTool(self._cron)
+        tool._channel = self._channel
+        tool._chat_id = self._chat_id
+        return tool

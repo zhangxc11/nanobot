@@ -101,3 +101,16 @@ class MessageTool(Tool):
             return f"Message sent to {channel}:{chat_id}{media_info}"
         except Exception as e:
             return f"Error sending message: {str(e)}"
+
+    def clone(self) -> "MessageTool":
+        """Create a new MessageTool instance sharing the same send_callback.
+
+        The clone has independent context (channel/chat_id) and turn tracking,
+        so concurrent sessions don't overwrite each other's state.
+        """
+        return MessageTool(
+            send_callback=self._send_callback,
+            default_channel=self._default_channel,
+            default_chat_id=self._default_chat_id,
+            default_message_id=self._default_message_id,
+        )

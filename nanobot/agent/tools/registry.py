@@ -337,6 +337,35 @@ class ToolRegistry:
         )
         self._audit_logger.log(entry)
 
+    # ── Cloning for concurrent sessions ──
+
+    # Tools that hold per-session state (channel/chat_id context) and must
+    # be cloned for each concurrent session task.
+    _STATEFUL_TOOL_NAMES = frozenset({"message", "spawn", "cron"})
+
+    def clone_for_session(self) -> "ToolRegistry":
+        """Create a shallow clone suitable for a concurrent session task.
+
+        Stateless tools (read_file, write_file, exec, etc.) are **shared**
+        by reference.  Stateful tools (MessageTool, SpawnTool, CronTool)
+        are **cloned** so that ``set_context()`` and ``start_turn()`` on
+        one session don't interfere with another.
+
+        The audit logger reference is shared (it's thread-safe), but the
+        audit context dict is independent.
+        """
+        clone = ToolRegistry()
+        for name, tool in self._tools.items():
+            if name in self._STATEFUL_TOOL_NAMES and hasattr(tool, "clone"):
+                clone._tools[name] = tool.clone()
+            else:
+                # Share reference — these tools are stateless / thread-safe
+                clone._tools[name] = tool
+        # Share audit logger (thread-safe), but give independent context
+        clone._audit_logger = self._audit_logger
+        clone._audit_context = dict(self._audit_context)
+        return clone
+
     # ── Introspection ──
     
     @property

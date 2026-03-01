@@ -58,3 +58,13 @@ class SpawnTool(Tool):
             origin_channel=self._origin_channel,
             origin_chat_id=self._origin_chat_id,
         )
+
+    def clone(self) -> "SpawnTool":
+        """Create a new SpawnTool instance sharing the same SubagentManager.
+
+        The clone has independent context (origin channel/chat_id).
+        """
+        tool = SpawnTool(manager=self._manager)
+        tool._origin_channel = self._origin_channel
+        tool._origin_chat_id = self._origin_chat_id
+        return tool
