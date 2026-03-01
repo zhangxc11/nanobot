@@ -609,6 +609,14 @@ class AgentLoop:
                 await self.bus.publish_outbound(response)
                 continue
 
+            # ── /session: show session status ──
+            if cmd == "/session":
+                response = self._handle_session_command(
+                    msg, session_key=session_key, active_sessions=active_sessions,
+                )
+                await self.bus.publish_outbound(response)
+                continue
+
             # ── Active session → inject ──
             if session_key in active_sessions:
                 worker = active_sessions[session_key]
@@ -726,6 +734,69 @@ class AgentLoop:
                     channel=msg.channel, chat_id=msg.chat_id,
                     content=f"❌ {e}",
                 )
+
+    def _handle_session_command(
+        self,
+        msg: InboundMessage,
+        session_key: str | None = None,
+        active_sessions: dict | None = None,
+    ) -> OutboundMessage:
+        """Handle /session slash command: show current session info and status.
+
+        Parameters
+        ----------
+        session_key:
+            Resolved session key.  If None, derived from msg.session_key.
+        active_sessions:
+            Dict of active SessionWorker instances (gateway concurrent mode).
+            If None (CLI/direct mode), status is always "idle".
+        """
+        from nanobot.providers.pool import ProviderPool
+
+        key = session_key or self.sessions.resolve_session_key(msg.session_key)
+        session = self.sessions.get_or_create(key)
+
+        # ── Status ──
+        is_active = False
+        if active_sessions is not None and key in active_sessions:
+            worker = active_sessions[key]
+            if not worker.task.done():
+                is_active = True
+
+        if is_active:
+            status_text = "🔄 执行中（正在处理任务）"
+        else:
+            status_text = "💤 空闲（等待输入）"
+
+        # ── Provider/Model ──
+        pool = self.provider
+        if isinstance(pool, ProviderPool):
+            provider_name = pool.get_session_provider_name(key)
+            model_name = pool.get_session_model(key)
+        else:
+            provider_name = type(self.provider).__name__
+            model_name = self.model
+
+        # ── Message stats ──
+        total_msgs = len(session.messages)
+        unconsolidated = total_msgs - session.last_consolidated
+
+        # ── Build output ──
+        lines = [
+            f"📋 **Session 信息**",
+            f"",
+            f"**Session Key**: `{key}`",
+            f"**状态**: {status_text}",
+            f"**Provider**: {provider_name} / `{model_name}`",
+            f"**消息数**: {total_msgs} 条（未归档: {unconsolidated}）",
+            f"**创建时间**: {session.created_at.strftime('%Y-%m-%d %H:%M:%S')}",
+            f"**最后更新**: {session.updated_at.strftime('%Y-%m-%d %H:%M:%S')}",
+        ]
+
+        return OutboundMessage(
+            channel=msg.channel, chat_id=msg.chat_id,
+            content="\n".join(lines),
+        )
 
     async def _process_message_safe(
         self,
@@ -896,9 +967,11 @@ class AgentLoop:
                                   content=f"New session started: {new_key}")
         if cmd == "/help":
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
-                                  content="🐈 nanobot commands:\n/new — Start a new conversation (fresh session)\n/flush — Archive memory and clear current session\n/stop — Stop the currently running task\n/provider — View/switch active LLM provider\n/help — Show available commands")
+                                  content="🐈 nanobot commands:\n/new — Start a new conversation (fresh session)\n/flush — Archive memory and clear current session\n/stop — Stop the currently running task\n/provider — View/switch active LLM provider\n/session — Show current session info and status\n/help — Show available commands")
         if cmd.startswith("/provider"):
             return self._handle_provider_command(msg)
+        if cmd == "/session":
+            return self._handle_session_command(msg, session_key=key)
         if cmd == "/stop":
             # When called via process_direct (not through run()), there's
             # no concurrent task to cancel. Just return a message.
