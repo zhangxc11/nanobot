@@ -858,4 +858,76 @@ LLM 调用 `message` 工具时传入 `channel: "feishu"` 覆盖了默认的 `"fe
 
 ---
 
+## Phase 19: Gateway 并发执行 + User Injection + Per-Session Provider
+
+> 需求：REQUIREMENTS.md §十八 | 架构：ARCHITECTURE.md §八
+> 分支：`feat/concurrent-gateway`
+> 开始时间：2026-03-01
+
+### 目标
+
+1. 不同 session 的消息并行处理，互不阻塞
+2. 同 session 执行中追加消息通过 inject 机制插入对话流
+3. Provider/Model per-session 独立
+
+### 任务清单
+
+- ✅ **T19.1** `providers/pool.py` — Per-session provider override (commit `62ce01d`)
+  - 新增 `_session_overrides: dict[str, tuple[str, str]]`
+  - 新增 `get_for_session(session_key)` → `(LLMProvider, str)`
+  - 新增 `switch_for_session(session_key, provider_name, model?)`
+  - 新增 `clear_session_override(session_key)`
+  - 单元测试
+
+- ✅ **T19.2** Tool clone 机制 (commit `a5f4118`)
+  - `agent/tools/message.py` — 新增 `clone()` 方法
+  - `agent/tools/spawn.py` — 新增 `clone()` 方法
+  - `agent/tools/cron.py` — 新增 `clone()` 方法
+  - `agent/tools/registry.py` — 新增 `clone_for_session()` 方法
+    - 共享无状态 tool 引用
+    - 克隆有状态 tool（Message、Spawn、Cron）
+    - 独立 audit context
+  - 单元测试
+
+- ✅ **T19.3** `agent/callbacks.py` — GatewayCallbacks (commit `fa26148`)
+  - 新增 `GatewayCallbacks(DefaultCallbacks)` 类
+    - `_inject_queue: asyncio.Queue[str]`
+    - `check_user_input()` — 非阻塞检查 inject queue
+    - `inject(text)` — 放入 inject queue
+    - `on_progress()` — 转发到 bus outbound
+  - 单元测试
+
+- ✅ **T19.4** `agent/loop.py` — `_process_message()` 参数化 (commit `607bd6d`)
+  - 新增 `provider`, `model`, `tools` 可选参数
+  - 内部使用传入参数而非 `self.provider`/`self.model`/`self.tools`
+  - `_run_agent_loop()` 同步改为使用传入的 provider/model
+  - `_chat_with_retry()` 接收 provider 参数
+  - `_consolidate_memory()` 使用传入的 provider/model
+  - `_set_tool_context()` 操作传入的 tools 而非 `self.tools`
+  - 确保 `process_direct()` 路径不受影响（fallback 到 self.*）
+  - 回归测试
+
+- ✅ **T19.5** `agent/loop.py` — 并发 Dispatcher `run()` 重构 (commit `346659e`)
+  - `active_sessions: dict[str, SessionWorker]` 管理
+  - 消息路由：new session → create task; active session → inject; /stop → cancel
+  - `/provider` 改为 per-session switch
+  - task done callback 清理 active_sessions
+  - 删除 `_wait_with_stop_listener()` 和 `_active_task*` 全局指针
+  - 集成测试
+
+- ✅ **T19.6** 集成测试 + 回归测试 (commit `14b0221`)
+  - 并发执行：两个 session 同时处理
+  - User injection：执行中追加消息
+  - Per-session provider：不同 session 不同 model
+  - /stop 精确取消
+  - CLI/SDK 模式回归
+  - 现有测试全部通过
+
+- 🔜 **T19.7** Git 提交 + 文档更新
+  - commit to `feat/concurrent-gateway`
+  - merge to `local`
+  - 更新 MEMORY.md
+
+---
+
 *本文件随开发进展持续更新。*

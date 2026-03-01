@@ -892,11 +892,15 @@ class FeishuChannel(BaseChannel):
             receive_id_type = "chat_id" if msg.chat_id.startswith("oc_") else "open_id"
             loop = asyncio.get_running_loop()
 
+            logger.info("[{}] send() called: chat_id={}, media={}, content_len={}",
+                        self.name, msg.chat_id, msg.media, len(msg.content) if msg.content else 0)
+
             for file_path in msg.media:
                 if not os.path.isfile(file_path):
                     logger.warning("Media file not found: {}", file_path)
                     continue
                 ext = os.path.splitext(file_path)[1].lower()
+                logger.info("[{}] Processing media: path={}, ext={}", self.name, file_path, ext)
                 if ext in self._IMAGE_EXTS:
                     key = await loop.run_in_executor(None, self._upload_image_sync, file_path)
                     if key:
