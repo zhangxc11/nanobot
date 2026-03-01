@@ -111,6 +111,103 @@ class TestCompressImage:
         assert len(result) <= target
 
 
+class TestDetectMimeFromBytes:
+    """Unit tests for ContextBuilder._detect_mime_from_bytes."""
+
+    def test_detect_png(self):
+        """PNG magic bytes should be detected."""
+        png_header = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
+        assert ContextBuilder._detect_mime_from_bytes(png_header) == "image/png"
+
+    def test_detect_jpeg(self):
+        """JPEG magic bytes should be detected."""
+        jpeg_header = b"\xff\xd8\xff\xe0" + b"\x00" * 100
+        assert ContextBuilder._detect_mime_from_bytes(jpeg_header) == "image/jpeg"
+
+    def test_detect_gif87a(self):
+        """GIF87a magic bytes should be detected."""
+        gif_header = b"GIF87a" + b"\x00" * 100
+        assert ContextBuilder._detect_mime_from_bytes(gif_header) == "image/gif"
+
+    def test_detect_gif89a(self):
+        """GIF89a magic bytes should be detected."""
+        gif_header = b"GIF89a" + b"\x00" * 100
+        assert ContextBuilder._detect_mime_from_bytes(gif_header) == "image/gif"
+
+    def test_detect_webp(self):
+        """WebP magic bytes should be detected."""
+        webp_header = b"RIFF\x00\x00\x00\x00WEBP" + b"\x00" * 100
+        assert ContextBuilder._detect_mime_from_bytes(webp_header) == "image/webp"
+
+    def test_detect_bmp(self):
+        """BMP magic bytes should be detected."""
+        bmp_header = b"BM" + b"\x00" * 100
+        assert ContextBuilder._detect_mime_from_bytes(bmp_header) == "image/bmp"
+
+    def test_unknown_returns_none(self):
+        """Unknown content should return None."""
+        assert ContextBuilder._detect_mime_from_bytes(b"\x00\x01\x02\x03") is None
+
+    def test_riff_non_webp_returns_none(self):
+        """RIFF container that is not WebP should return None."""
+        riff_avi = b"RIFF\x00\x00\x00\x00AVI " + b"\x00" * 100
+        assert ContextBuilder._detect_mime_from_bytes(riff_avi) is None
+
+    def test_real_png_file(self, tmp_path: Path):
+        """A real PNG file should be detected as image/png."""
+        img = Image.new("RGB", (10, 10), color=(255, 0, 0))
+        path = tmp_path / "test.png"
+        img.save(path, format="PNG")
+        data = path.read_bytes()
+        assert ContextBuilder._detect_mime_from_bytes(data) == "image/png"
+
+    def test_real_jpeg_file(self, tmp_path: Path):
+        """A real JPEG file should be detected as image/jpeg."""
+        img = Image.new("RGB", (10, 10), color=(0, 255, 0))
+        path = tmp_path / "test.jpg"
+        img.save(path, format="JPEG")
+        data = path.read_bytes()
+        assert ContextBuilder._detect_mime_from_bytes(data) == "image/jpeg"
+
+
+class TestMimeCorrectionInBuildUserContent:
+    """Test that _build_user_content corrects MIME type mismatches."""
+
+    def _make_builder(self, tmp_path: Path) -> ContextBuilder:
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+        (ws / "AGENTS.md").write_text("test")
+        return ContextBuilder(ws)
+
+    def test_png_saved_as_jpg_corrected(self, tmp_path: Path):
+        """A PNG file saved with .jpg extension should be sent with image/png MIME."""
+        builder = self._make_builder(tmp_path)
+        # Create a PNG image but save with .jpg extension (simulates Feishu behavior)
+        img = Image.new("RGB", (50, 50), color=(0, 0, 255))
+        path = tmp_path / "feishu_image.jpg"
+        img.save(path, format="PNG")  # Save as PNG but with .jpg extension!
+
+        result = builder._build_user_content("describe this", [str(path)])
+        assert isinstance(result, list)
+        # The image_url should have the correct PNG MIME type
+        image_item = result[0]
+        assert image_item["type"] == "image_url"
+        url = image_item["image_url"]["url"]
+        assert url.startswith("data:image/png;base64,")  # NOT image/jpeg!
+
+    def test_jpeg_with_correct_extension_unchanged(self, tmp_path: Path):
+        """A JPEG file with .jpg extension should keep image/jpeg MIME."""
+        builder = self._make_builder(tmp_path)
+        img = Image.new("RGB", (50, 50), color=(255, 0, 0))
+        path = tmp_path / "photo.jpg"
+        img.save(path, format="JPEG")
+
+        result = builder._build_user_content("describe this", [str(path)])
+        assert isinstance(result, list)
+        url = result[0]["image_url"]["url"]
+        assert url.startswith("data:image/jpeg;base64,")
+
+
 class TestBuildUserContent:
     """Integration tests for _build_user_content with image compression."""
 

@@ -201,6 +201,13 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
             if not p.is_file() or not mime or not mime.startswith("image/"):
                 continue
             raw = p.read_bytes()
+            # Detect actual MIME type from file content (magic bytes) to avoid
+            # mismatch when file extension is wrong (e.g. Feishu saves PNG as .jpg).
+            detected_mime = self._detect_mime_from_bytes(raw)
+            if detected_mime:
+                if detected_mime != mime:
+                    logger.debug("MIME correction for {}: {} → {}", p.name, mime, detected_mime)
+                mime = detected_mime
             if len(raw) > self.IMAGE_MAX_BYTES:
                 raw, mime = self._compress_image(raw, mime, p.name)
             b64 = base64.b64encode(raw).decode()
@@ -209,6 +216,32 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         if not images:
             return text
         return images + [{"type": "text", "text": text}]
+
+    # ── image MIME detection helpers ──────────────────────────────
+
+    # Magic-byte signatures for common image formats.
+    _MAGIC_SIGS: list[tuple[bytes, str]] = [
+        (b"\x89PNG\r\n\x1a\n", "image/png"),
+        (b"\xff\xd8\xff", "image/jpeg"),
+        (b"GIF87a", "image/gif"),
+        (b"GIF89a", "image/gif"),
+        (b"RIFF", "image/webp"),  # WebP starts with RIFF....WEBP
+        (b"BM", "image/bmp"),
+    ]
+
+    @staticmethod
+    def _detect_mime_from_bytes(data: bytes) -> str | None:
+        """Detect image MIME type from file content magic bytes.
+
+        Returns the detected MIME string, or ``None`` if unrecognized.
+        """
+        for sig, mime in ContextBuilder._MAGIC_SIGS:
+            if data[:len(sig)] == sig:
+                # Extra check for WebP: bytes 8-12 must be "WEBP"
+                if sig == b"RIFF" and data[8:12] != b"WEBP":
+                    continue
+                return mime
+        return None
 
     # ── image compression helpers ──────────────────────────────────
 
