@@ -971,21 +971,20 @@ LLM 调用 `message` 工具时传入 `channel: "feishu"` 覆盖了默认的 `"fe
 
 ### 任务清单
 
-- [ ] **T21.1** `session/manager.py` — 重构 `create_new_session()` 方法
+- ✅ **T21.1** `session/manager.py` — 重构 `create_new_session()` 方法 (commit `a2cd91a`)
   - 旧文件不动（保持原 key 和文件名）
   - 新文件使用 `{channel}.{timestamp}` 格式的新 key
   - routing 表更新：`natural_key → new_key`
   - invalidate 旧 key 和 natural_key 的缓存
-- [ ] **T21.2** `agent/loop.py` — 适配新的 `create_new_session()` 返回值
-  - `/flush` 路径：使用返回的新 key 更新后续逻辑
+- ✅ **T21.2** `agent/loop.py` — 适配新的 `create_new_session()` 返回值 (commit `a2cd91a`)
+  - `/flush` 路径：注释更新
   - `/new` 路径：返回新 key 给用户
-  - 确保 `run()` 并发 dispatcher 中 `resolve_session_key()` 正确路由
-- [ ] **T21.3** 测试验证
-  - `/new` 后旧文件不变、新文件创建、routing 正确
-  - `/flush` 同上
-  - 多次 `/new` 后 routing 正确更新
-  - Usage 统计与新 session 正确隔离
-- [ ] **T21.4** Git 提交 + 文档更新
+  - `run()` 并发 dispatcher 中 `resolve_session_key()` 无需改动（已完备）
+- ✅ **T21.3** 测试验证 (commit `a2cd91a`)
+  - 11 项测试全部通过（`test_new_session.py`）
+  - 新增测试：旧文件保持原样、routing 更新、多次 /new、从 routed key 再 /new
+- ✅ **T21.4** Git 提交 + 文档更新
+- [ ] **T21.5** 重启 gateway 使改动生效
 
 ---
 
