@@ -109,9 +109,6 @@ class AgentLoop:
         self._consolidating: set[str] = set()  # Session keys with consolidation in progress
         self._consolidation_tasks: set[asyncio.Task] = set()  # Strong refs to in-flight tasks
         self._consolidation_locks: dict[str, asyncio.Lock] = {}
-        self._active_task: asyncio.Task | None = None  # Currently running _process_message task
-        self._active_task_msg: InboundMessage | None = None  # The message being processed
-        self._active_task_session_key: str | None = None  # Session key of the active task
         self._register_default_tools()
         if self.audit_logger is not None:
             self.tools.set_audit_logger(self.audit_logger)
@@ -542,109 +539,137 @@ class AgentLoop:
         return final_content, tools_used, messages
 
     async def run(self) -> None:
-        """Run the agent loop, processing messages from the bus.
+        """Run the agent loop as a concurrent dispatcher.
 
-        Messages are processed sequentially, except for ``/stop`` which is
-        handled immediately by cancelling the currently running task.
+        Different sessions are processed **in parallel** as independent
+        ``asyncio.Task`` instances.  When a new message arrives for an
+        already-active session, it is **injected** into the running task
+        via ``GatewayCallbacks.inject()`` rather than queued.
+
+        ``/stop`` cancels the task for the matching session.
+        ``/provider`` switches the provider for the matching session.
         """
+        from dataclasses import dataclass, field
+        from nanobot.agent.callbacks import GatewayCallbacks
+        from nanobot.providers.pool import ProviderPool
+
+        @dataclass
+        class SessionWorker:
+            task: asyncio.Task
+            callbacks: GatewayCallbacks
+            session_key: str
+
         self._running = True
         await self._connect_mcp()
-        logger.info("Agent loop started")
+        logger.info("Agent loop started (concurrent dispatcher)")
+
+        active_sessions: dict[str, SessionWorker] = {}
+
+        def _on_task_done(session_key: str, task: asyncio.Task) -> None:
+            """Callback when a session task finishes."""
+            active_sessions.pop(session_key, None)
+            if not task.cancelled():
+                exc = task.exception()
+                if exc is not None:
+                    logger.error("Session {} task failed: {}", session_key, exc)
 
         while self._running:
             try:
                 msg = await asyncio.wait_for(
                     self.bus.consume_inbound(),
-                    timeout=1.0
+                    timeout=1.0,
                 )
-
-                # ── /stop: cancel the active task immediately ──
-                cmd = msg.content.strip().lower()
-                if cmd == "/stop":
-                    await self._handle_stop(msg)
-                    continue
-
-                # ── Normal message: wrap in a Task so /stop can cancel it ──
-                # Resolve session key for tracking
-                session_key = msg.session_key
-                session_key = self.sessions.resolve_session_key(session_key)
-                self._active_task_session_key = session_key
-                self._active_task_msg = msg
-
-                task = asyncio.create_task(self._process_message_safe(msg))
-                self._active_task = task
-
-                # Wait for the task, but also keep consuming /stop commands
-                await self._wait_with_stop_listener(task)
-
-                self._active_task = None
-                self._active_task_msg = None
-                self._active_task_session_key = None
-
             except asyncio.TimeoutError:
                 continue
 
-    async def _handle_stop(self, msg: InboundMessage) -> None:
-        """Handle /stop command by cancelling the active task."""
-        task = self._active_task
-        if task is not None and not task.done():
-            active_msg = self._active_task_msg
-            # Check if the stop is for the same chat (same channel + chat_id)
-            if (active_msg is not None
-                    and active_msg.channel == msg.channel
-                    and active_msg.chat_id == msg.chat_id):
-                logger.info("/stop received from {}:{}, cancelling active task",
-                            msg.channel, msg.chat_id)
-                task.cancel()
-                # Wait briefly for cancellation to take effect
-                try:
-                    await asyncio.wait_for(asyncio.shield(task), timeout=3.0)
-                except (asyncio.TimeoutError, asyncio.CancelledError):
-                    pass
-                # The _process_message_safe wrapper sends the stop response
-                return
-            else:
-                logger.info("/stop from {}:{} but active task is for {}:{}",
-                            msg.channel, msg.chat_id,
-                            active_msg.channel if active_msg else "?",
-                            active_msg.chat_id if active_msg else "?")
+            # Resolve session key
+            session_key = self.sessions.resolve_session_key(msg.session_key)
+            cmd = msg.content.strip().lower()
 
-        # No active task to stop
+            # ── /stop: cancel the active task for this session ──
+            if cmd == "/stop":
+                worker = active_sessions.get(session_key)
+                if worker and not worker.task.done():
+                    logger.info("/stop received for session {}", session_key)
+                    worker.task.cancel()
+                    try:
+                        await asyncio.wait_for(asyncio.shield(worker.task), timeout=3.0)
+                    except (asyncio.TimeoutError, asyncio.CancelledError):
+                        pass
+                else:
+                    await self.bus.publish_outbound(OutboundMessage(
+                        channel=msg.channel, chat_id=msg.chat_id,
+                        content="No active task to stop.",
+                    ))
+                continue
+
+            # ── /provider: per-session switch ──
+            if cmd.startswith("/provider"):
+                response = self._handle_provider_command(msg, session_key=session_key)
+                await self.bus.publish_outbound(response)
+                continue
+
+            # ── Active session → inject ──
+            if session_key in active_sessions:
+                worker = active_sessions[session_key]
+                if not worker.task.done():
+                    logger.info("Injecting message into active session {}", session_key)
+                    await worker.callbacks.inject(msg.content)
+                    continue
+                else:
+                    # Task already done, remove stale entry
+                    active_sessions.pop(session_key, None)
+
+            # ── New/idle session → start task ──
+            # Resolve per-session provider/model
+            pool = self.provider
+            if isinstance(pool, ProviderPool):
+                _provider_inst, _model = pool.get_for_session(session_key)
+            else:
+                _provider_inst = self.provider
+                _model = self.model
+
+            # Clone tools for this session
+            tools_clone = self.tools.clone_for_session()
+
+            # Create per-session callbacks
+            gw_callbacks = GatewayCallbacks(
+                bus=self.bus, channel=msg.channel, chat_id=msg.chat_id,
+            )
+
+            task = asyncio.create_task(
+                self._process_message_safe(
+                    msg,
+                    provider=_provider_inst,
+                    model=_model,
+                    tools=tools_clone,
+                    callbacks=gw_callbacks,
+                )
+            )
+            active_sessions[session_key] = SessionWorker(
+                task=task, callbacks=gw_callbacks, session_key=session_key,
+            )
+            task.add_done_callback(lambda t, k=session_key: _on_task_done(k, t))
+
+    async def _handle_stop(self, msg: InboundMessage) -> None:
+        """Handle /stop command — legacy path for process_direct().
+
+        In the concurrent dispatcher (run()), /stop is handled inline.
+        This method is kept for backward compatibility with tests that
+        call it directly.
+        """
         await self.bus.publish_outbound(OutboundMessage(
             channel=msg.channel, chat_id=msg.chat_id,
             content="No active task to stop.",
         ))
 
-    async def _wait_with_stop_listener(self, task: asyncio.Task) -> None:
-        """Wait for *task* to finish while still consuming /stop commands.
+    def _handle_provider_command(self, msg: InboundMessage,
+                                 session_key: str | None = None) -> OutboundMessage:
+        """Handle /provider slash command: view or switch provider.
 
-        Non-stop messages that arrive while the task is running are
-        **put back** into the inbound queue so they are processed next.
-        """
-        while not task.done():
-            try:
-                incoming = await asyncio.wait_for(
-                    self.bus.consume_inbound(),
-                    timeout=0.5,
-                )
-                if incoming.content.strip().lower() == "/stop":
-                    await self._handle_stop(incoming)
-                else:
-                    # Put it back for later processing
-                    await self.bus.publish_inbound(incoming)
-                    # Yield briefly so the running task can make progress
-                    await asyncio.sleep(0.1)
-            except asyncio.TimeoutError:
-                continue
-
-        # Propagate exceptions from the task (if any, not CancelledError)
-        if task.done() and not task.cancelled():
-            exc = task.exception()
-            if exc is not None:
-                logger.error("Task failed with exception: {}", exc)
-
-    def _handle_provider_command(self, msg: InboundMessage) -> OutboundMessage:
-        """Handle /provider slash command: view or switch active provider.
+        When *session_key* is provided (gateway concurrent mode), the switch
+        is per-session via ``ProviderPool.switch_for_session()``.
+        When *session_key* is None (CLI/SDK mode), the switch is global.
 
         Usage:
             /provider              — show current provider and available list
@@ -663,10 +688,16 @@ class AgentLoop:
         parts = msg.content.strip().split()
         if len(parts) == 1:
             # /provider — show status
-            lines = [f"🔌 当前: **{pool.active_provider}** / `{pool.active_model}`"]
+            if session_key:
+                current_name = pool.get_session_provider_name(session_key)
+                current_model = pool.get_session_model(session_key)
+            else:
+                current_name = pool.active_provider
+                current_model = pool.active_model
+            lines = [f"🔌 当前: **{current_name}** / `{current_model}`"]
             lines.append("\n可用 providers:")
             for item in pool.available:
-                marker = " ← 当前" if item["name"] == pool.active_provider else ""
+                marker = " ← 当前" if item["name"] == current_name else ""
                 lines.append(f"  • **{item['name']}** (`{item['model']}`){marker}")
             return OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id,
@@ -675,14 +706,20 @@ class AgentLoop:
         else:
             # /provider <name> [model] — switch
             provider_name = parts[1]
-            model = parts[2] if len(parts) > 2 else None
+            model_arg = parts[2] if len(parts) > 2 else None
             try:
-                pool.switch(provider_name, model)
-                # Also update self.model so AgentLoop uses the new model
-                self.model = pool.active_model
+                if session_key:
+                    pool.switch_for_session(session_key, provider_name, model_arg)
+                    new_model = pool.get_session_model(session_key)
+                    new_name = pool.get_session_provider_name(session_key)
+                else:
+                    pool.switch(provider_name, model_arg)
+                    self.model = pool.active_model
+                    new_name = pool.active_provider
+                    new_model = pool.active_model
                 return OutboundMessage(
                     channel=msg.channel, chat_id=msg.chat_id,
-                    content=f"✅ 已切换到 **{pool.active_provider}** / `{pool.active_model}`",
+                    content=f"✅ 已切换到 **{new_name}** / `{new_model}`",
                 )
             except ValueError as e:
                 return OutboundMessage(
@@ -690,10 +727,25 @@ class AgentLoop:
                     content=f"❌ {e}",
                 )
 
-    async def _process_message_safe(self, msg: InboundMessage) -> None:
-        """Wrapper around _process_message that handles CancelledError gracefully."""
+    async def _process_message_safe(
+        self,
+        msg: InboundMessage,
+        *,
+        provider: LLMProvider | None = None,
+        model: str | None = None,
+        tools: ToolRegistry | None = None,
+        callbacks: DefaultCallbacks | None = None,
+    ) -> None:
+        """Wrapper around _process_message that handles CancelledError gracefully.
+
+        For the concurrent dispatcher, provider/model/tools/callbacks are
+        passed through.  For the legacy serial path, they default to None
+        (falling back to self.*).
+        """
         try:
-            response = await self._process_message(msg)
+            response = await self._process_message(
+                msg, provider=provider, model=model, tools=tools, callbacks=callbacks,
+            )
             if response is not None:
                 await self.bus.publish_outbound(response)
             elif msg.channel == "cli":

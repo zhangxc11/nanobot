@@ -1,4 +1,7 @@
-"""Tests for /stop command — cancel running tasks in the agent loop."""
+"""Tests for /stop command — cancel running tasks in the agent loop.
+
+Updated for Phase 19 concurrent dispatcher architecture.
+"""
 
 import asyncio
 from pathlib import Path
@@ -97,11 +100,11 @@ class TestHelpIncludesStop:
 
 
 # ---------------------------------------------------------------------------
-# Tests: /stop cancels running task (via run() loop)
+# Tests: /stop cancels running task (via run() concurrent dispatcher)
 # ---------------------------------------------------------------------------
 
 class TestStopCancelsTask:
-    """Test /stop cancelling a running task in the run() loop."""
+    """Test /stop cancelling a running task in the concurrent dispatcher."""
 
     def test_handle_stop_no_active_task(self, tmp_path):
         """_handle_stop with no active task sends 'no active task' message."""
@@ -114,67 +117,6 @@ class TestStopCancelsTask:
             await agent._handle_stop(msg)
             out = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
             assert "No active task" in out.content
-
-        asyncio.run(_run())
-
-    def test_handle_stop_cancels_matching_task(self, tmp_path):
-        """_handle_stop cancels a running task for the same channel+chat_id."""
-        bus = MessageBus()
-        agent = _make_agent_loop(bus, tmp_path)
-
-        cancelled = asyncio.Event()
-
-        async def slow_task():
-            try:
-                await asyncio.sleep(60)
-            except asyncio.CancelledError:
-                cancelled.set()
-                raise
-
-        async def _run():
-            task = asyncio.create_task(slow_task())
-            agent._active_task = task
-            agent._active_task_msg = _make_msg("do something", channel="feishu", chat_id="chat1")
-            agent._active_task_session_key = "feishu:chat1"
-
-            stop_msg = _make_msg("/stop", channel="feishu", chat_id="chat1")
-            await agent._handle_stop(stop_msg)
-
-            # Task should be cancelled
-            assert cancelled.is_set() or task.cancelled()
-
-        asyncio.run(_run())
-
-    def test_handle_stop_ignores_different_chat(self, tmp_path):
-        """_handle_stop does not cancel task for a different chat_id."""
-        bus = MessageBus()
-        agent = _make_agent_loop(bus, tmp_path)
-
-        async def slow_task():
-            await asyncio.sleep(60)
-
-        async def _run():
-            task = asyncio.create_task(slow_task())
-            agent._active_task = task
-            agent._active_task_msg = _make_msg("do something", channel="feishu", chat_id="chat1")
-            agent._active_task_session_key = "feishu:chat1"
-
-            # /stop from a different chat
-            stop_msg = _make_msg("/stop", channel="feishu", chat_id="chat2")
-            await agent._handle_stop(stop_msg)
-
-            # Task should NOT be cancelled
-            assert not task.cancelled()
-
-            # Should get "no active task" response
-            out = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
-            assert "No active task" in out.content
-
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
 
         asyncio.run(_run())
 
@@ -210,58 +152,7 @@ class TestStopCancelsTask:
 
 
 # ---------------------------------------------------------------------------
-# Tests: _active_task tracking in run()
-# ---------------------------------------------------------------------------
-
-class TestActiveTaskTracking:
-    """Test that run() properly tracks active tasks."""
-
-    def test_active_task_set_during_processing(self, tmp_path):
-        """During processing, _active_task should be set."""
-        bus = MessageBus()
-        agent = _make_agent_loop(bus, tmp_path)
-
-        processing_started = asyncio.Event()
-
-        original_process = agent._process_message
-
-        async def mock_process(msg, **kwargs):
-            if msg.content == "/help":
-                return await original_process(msg, **kwargs)
-            processing_started.set()
-            await asyncio.sleep(60)  # Simulate long processing
-            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="done")
-
-        agent._process_message = mock_process
-
-        async def _run():
-            # Send a long-running message
-            await bus.publish_inbound(_make_msg("do something long"))
-
-            # Start run() in background
-            run_task = asyncio.create_task(agent.run())
-
-            # Wait for processing to start
-            await asyncio.wait_for(processing_started.wait(), timeout=2.0)
-
-            # Active task should be set
-            assert agent._active_task is not None
-            assert not agent._active_task.done()
-
-            # Clean up
-            agent.stop()
-            agent._active_task.cancel()
-            run_task.cancel()
-            try:
-                await run_task
-            except asyncio.CancelledError:
-                pass
-
-        asyncio.run(_run())
-
-
-# ---------------------------------------------------------------------------
-# Tests: End-to-end /stop via run() loop
+# Tests: End-to-end /stop via run() concurrent dispatcher
 # ---------------------------------------------------------------------------
 
 class TestStopEndToEnd:
@@ -309,6 +200,56 @@ class TestStopEndToEnd:
             # Should get the "Task stopped" message
             out = await asyncio.wait_for(bus.consume_outbound(), timeout=3.0)
             assert "stop" in out.content.lower() or "stopped" in out.content.lower()
+
+            # Clean up
+            agent.stop()
+            run_task.cancel()
+            try:
+                await run_task
+            except asyncio.CancelledError:
+                pass
+
+        asyncio.run(_run())
+
+    def test_stop_different_session_not_affected(self, tmp_path):
+        """Send /stop for one session while another is running — no effect."""
+        bus = MessageBus()
+        agent = _make_agent_loop(bus, tmp_path)
+
+        processing_started = asyncio.Event()
+
+        async def mock_process(msg, **kwargs):
+            cmd = msg.content.strip().lower()
+            if cmd in ("/help", "/stop"):
+                return OutboundMessage(
+                    channel=msg.channel, chat_id=msg.chat_id,
+                    content=f"Handled {cmd}",
+                )
+            processing_started.set()
+            await asyncio.sleep(60)  # Simulate long task
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id, content="done",
+            )
+
+        agent._process_message = mock_process
+
+        async def _run():
+            # Start a long task on session feishu:chat1
+            await bus.publish_inbound(
+                _make_msg("long task", channel="feishu", chat_id="chat1")
+            )
+
+            run_task = asyncio.create_task(agent.run())
+            await asyncio.wait_for(processing_started.wait(), timeout=2.0)
+
+            # Send /stop from a DIFFERENT session (chat2)
+            await bus.publish_inbound(
+                _make_msg("/stop", channel="feishu", chat_id="chat2")
+            )
+
+            # Should get "No active task" for chat2
+            out = await asyncio.wait_for(bus.consume_outbound(), timeout=3.0)
+            assert "No active task" in out.content
 
             # Clean up
             agent.stop()
