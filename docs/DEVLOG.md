@@ -820,7 +820,7 @@ file:///absolute/path/to/image.jpg?mime=image/jpeg
 
 ---
 
-## Phase 18: 飞书通道文件附件发送修复 🔜
+## Phase 18: 飞书通道文件附件发送修复 ✅
 
 ### 需求来源
 - nanobot REQUIREMENTS.md §十七：飞书通道文件附件发送修复
@@ -831,22 +831,30 @@ LLM 调用 `message` 工具时传入 `channel: "feishu"` 覆盖了默认的 `"fe
 
 ### 任务清单
 
-- 🔜 **T18.1** `channels/manager.py` — `_dispatch_outbound` channel 名称容错
-  - 精确匹配失败时尝试前缀匹配
+- ✅ **T18.1** `channels/manager.py` — `_resolve_channel()` channel 名称容错
+  - 精确匹配失败时尝试前缀匹配（`name + "."` 前缀）
   - 唯一匹配 → 使用；多个匹配 → 丢弃并 warning
   - 添加 debug 日志
 
-- 🔜 **T18.2** `agent/tools/message.py` — 移除 `channel`/`chat_id` 参数暴露
+- ✅ **T18.2** `agent/tools/message.py` — 移除 `channel`/`chat_id` 参数暴露
   - 从 parameters schema 中移除 `channel` 和 `chat_id`
   - `execute()` 始终使用 `_default_channel` 和 `_default_chat_id`
-  - 保留内部 `set_context()` 机制
+  - 保留内部 `set_context()` 机制和 `**kwargs` 兼容
 
-- 🔜 **T18.3** 测试验证
-  - 单元测试：_dispatch_outbound 前缀匹配
-  - 单元测试：MessageTool 忽略 LLM 传入的 channel/chat_id
-  - 回归测试：现有测试不受影响
+- ✅ **T18.3** 测试验证 — 13 项全部通过
+  - _resolve_channel: 7 项（精确匹配、前缀单匹配、前缀歧义、无匹配、无点分隔符、精确优先）
+  - MessageTool routing: 6 项（忽略 LLM channel、使用默认、media 传递、无 context 报错、sent_in_turn 追踪、schema 检查）
+  - 回归测试：249 passed / 20 failed（与改动前一致）
 
-- 🔜 **T18.4** Git 提交 + 验证
+- ✅ **T18.4** Git 提交 — commit `d650c10` on local
+
+### 影响范围
+
+| 文件 | 改动 |
+|------|------|
+| `channels/manager.py` | 新增 `_resolve_channel()` + `_dispatch_outbound` 使用它 |
+| `agent/tools/message.py` | parameters schema 移除 channel/chat_id；execute() 忽略 LLM 传入值 |
+| `tests/test_message_routing.py` | 13 项新测试 |
 
 ---
 
