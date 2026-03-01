@@ -285,3 +285,75 @@ class TestProviderCommand:
         msg = InboundMessage(channel="cli", chat_id="direct", sender_id="user", content="/provider")
         result = loop._handle_provider_command(msg)
         assert "not available" in result.content
+
+
+# ── Per-session override tests ──
+
+class TestProviderPoolPerSession:
+    """Tests for per-session provider/model overrides."""
+
+    def test_get_for_session_no_override(self):
+        """Without override, returns global active provider."""
+        pool = _make_pool()
+        provider, model = pool.get_for_session("feishu.lab:ou_123")
+        assert model == "claude-opus-4-6"
+        assert pool.get_session_provider_name("feishu.lab:ou_123") == "anthropic"
+        assert pool.get_session_model("feishu.lab:ou_123") == "claude-opus-4-6"
+
+    def test_switch_for_session_default_model(self):
+        """switch_for_session uses provider's default model when model=None."""
+        pool = _make_pool()
+        pool.switch_for_session("feishu.lab:ou_123", "deepseek")
+        provider, model = pool.get_for_session("feishu.lab:ou_123")
+        assert model == "deepseek-chat"
+        assert pool.get_session_provider_name("feishu.lab:ou_123") == "deepseek"
+
+    def test_switch_for_session_explicit_model(self):
+        """switch_for_session with explicit model."""
+        pool = _make_pool()
+        pool.switch_for_session("feishu.lab:ou_123", "deepseek", "deepseek-reasoner")
+        provider, model = pool.get_for_session("feishu.lab:ou_123")
+        assert model == "deepseek-reasoner"
+
+    def test_switch_for_session_unknown_provider_raises(self):
+        pool = _make_pool()
+        with pytest.raises(ValueError, match="Unknown provider"):
+            pool.switch_for_session("feishu.lab:ou_123", "nonexistent")
+
+    def test_per_session_does_not_affect_global(self):
+        """Per-session override doesn't change the global active provider."""
+        pool = _make_pool()
+        pool.switch_for_session("feishu.lab:ou_123", "deepseek")
+        assert pool.active_provider == "anthropic"
+        assert pool.active_model == "claude-opus-4-6"
+
+    def test_per_session_does_not_affect_other_sessions(self):
+        """Per-session override is isolated to that session."""
+        pool = _make_pool()
+        pool.switch_for_session("feishu.lab:ou_123", "deepseek")
+        # Another session should still get global
+        _, model2 = pool.get_for_session("feishu.ST:ou_456")
+        assert model2 == "claude-opus-4-6"
+
+    def test_clear_session_override(self):
+        """clear_session_override reverts to global."""
+        pool = _make_pool()
+        pool.switch_for_session("feishu.lab:ou_123", "deepseek")
+        pool.clear_session_override("feishu.lab:ou_123")
+        _, model = pool.get_for_session("feishu.lab:ou_123")
+        assert model == "claude-opus-4-6"
+
+    def test_clear_nonexistent_override_is_noop(self):
+        """clear_session_override on non-overridden session is safe."""
+        pool = _make_pool()
+        pool.clear_session_override("nonexistent:key")  # no error
+
+    def test_multiple_sessions_independent(self):
+        """Multiple sessions can have different overrides."""
+        pool = _make_pool()
+        pool.switch_for_session("session_a", "deepseek")
+        pool.switch_for_session("session_b", "anthropic", "claude-sonnet-4-20250514")
+        _, model_a = pool.get_for_session("session_a")
+        _, model_b = pool.get_for_session("session_b")
+        assert model_a == "deepseek-chat"
+        assert model_b == "claude-sonnet-4-20250514"

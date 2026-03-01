@@ -60,6 +60,8 @@ class ProviderPool(LLMProvider):
         self._providers = providers
         self._active_provider = active_provider
         self._active_model = active_model
+        # Per-session overrides: session_key → (provider_name, model)
+        self._session_overrides: dict[str, tuple[str, str]] = {}
 
     # ── State queries ──
 
@@ -106,6 +108,65 @@ class ProviderPool(LLMProvider):
         self._active_provider = provider
         _, default_model = self._providers[provider]
         self._active_model = model or default_model
+
+    # ── Per-session overrides ──
+
+    def get_for_session(self, session_key: str) -> tuple[LLMProvider, str]:
+        """Return the (provider_instance, model) for a given session.
+
+        If the session has a per-session override, return that; otherwise
+        return the global active provider and model.
+        """
+        if session_key in self._session_overrides:
+            provider_name, model = self._session_overrides[session_key]
+            provider_instance, _ = self._providers[provider_name]
+            return provider_instance, model
+        # Fallback to global active
+        provider_instance, _ = self._providers[self._active_provider]
+        return provider_instance, self._active_model
+
+    def get_session_provider_name(self, session_key: str) -> str:
+        """Return the provider name for a given session (override or global)."""
+        if session_key in self._session_overrides:
+            return self._session_overrides[session_key][0]
+        return self._active_provider
+
+    def get_session_model(self, session_key: str) -> str:
+        """Return the model name for a given session (override or global)."""
+        if session_key in self._session_overrides:
+            return self._session_overrides[session_key][1]
+        return self._active_model
+
+    def switch_for_session(
+        self, session_key: str, provider: str, model: str | None = None
+    ) -> None:
+        """Set a per-session provider/model override.
+
+        Parameters
+        ----------
+        session_key:
+            The session to override.
+        provider:
+            Provider name (must exist in the pool).
+        model:
+            Model name. If ``None``, uses the provider's default model.
+
+        Raises
+        ------
+        ValueError:
+            If the provider name is not in the pool.
+        """
+        if provider not in self._providers:
+            raise ValueError(
+                f"Unknown provider: '{provider}'. "
+                f"Available: {list(self._providers.keys())}"
+            )
+        _, default_model = self._providers[provider]
+        self._session_overrides[session_key] = (provider, model or default_model)
+
+    def clear_session_override(self, session_key: str) -> None:
+        """Remove the per-session override, reverting to global active."""
+        self._session_overrides.pop(session_key, None)
 
     # ── LLMProvider interface ──
 
