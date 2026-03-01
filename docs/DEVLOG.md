@@ -923,7 +923,7 @@ LLM 调用 `message` 工具时传入 `channel: "feishu"` 覆盖了默认的 `"fe
   - CLI/SDK 模式回归
   - 现有测试全部通过
 
-- 🔜 **T19.7** Git 提交 + 文档更新
+- ✅ **T19.7** Git 提交 + 文档更新 (merged to `local`)
   - commit to `feat/concurrent-gateway`
   - merge to `local`
   - 更新 MEMORY.md
