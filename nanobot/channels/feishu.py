@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import sys
 import threading
 from collections import OrderedDict
 from pathlib import Path
@@ -857,6 +858,82 @@ class FeishuChannel(BaseChannel):
         body = "\n".join(text_parts)
         return f"{header}\n{body}\n{footer}", media_paths
 
+    async def _resolve_merge_forward_via_skill(
+        self, content_json: dict, message_id: str
+    ) -> tuple[str, list[str]]:
+        """Resolve a merge_forward message by calling the feishu-parser skill script.
+
+        This delegates parsing to an external script, allowing iteration without
+        restarting the gateway. The script also dumps raw data for debugging.
+
+        Falls back to the internal _resolve_merge_forward() on script failure.
+        """
+        import subprocess
+
+        skill_script = os.path.join(
+            str(Path.home()), ".nanobot", "workspace", "skills",
+            "feishu-parser", "scripts", "feishu_parser.py"
+        )
+
+        if not os.path.exists(skill_script):
+            logger.warning("feishu-parser skill script not found, falling back to internal method")
+            return await self._resolve_merge_forward(content_json)
+
+        # Determine which app to use based on channel name
+        app_name = "lab"
+        if hasattr(self, 'name') and "." in self.name:
+            app_name = self.name.split(".", 1)[1]  # e.g. "feishu.lab" -> "lab"
+
+        content_json_str = json.dumps(content_json, ensure_ascii=False)
+        cmd = [
+            sys.executable, skill_script,
+            "--app", app_name,
+            "parse-forward",
+            "--content-json", content_json_str,
+            "--dump",
+            "--download",
+        ]
+
+        try:
+            logger.info("[{}] Calling feishu-parser skill for merge_forward (msg={})",
+                        self.name, message_id)
+
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(None, lambda: subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            ))
+
+            if result.stderr:
+                for line in result.stderr.strip().split("\n"):
+                    if line:
+                        logger.info("[feishu-parser] {}", line)
+
+            if result.returncode != 0:
+                logger.warning(
+                    "[{}] feishu-parser script failed (rc={}), falling back to internal method",
+                    self.name, result.returncode,
+                )
+                return await self._resolve_merge_forward(content_json)
+
+            output = json.loads(result.stdout)
+            text = output.get("text", "")
+            media_paths = output.get("media_paths", [])
+
+            logger.info("[{}] feishu-parser resolved merge_forward: text_len={}, media={}",
+                        self.name, len(text), len(media_paths))
+
+            return text, media_paths
+
+        except subprocess.TimeoutExpired:
+            logger.warning("[{}] feishu-parser script timed out, falling back", self.name)
+            return await self._resolve_merge_forward(content_json)
+        except (json.JSONDecodeError, Exception) as e:
+            logger.warning("[{}] feishu-parser script error: {}, falling back", self.name, e)
+            return await self._resolve_merge_forward(content_json)
+
     def _send_message_sync(self, receive_id_type: str, receive_id: str, msg_type: str, content: str) -> bool:
         """Send a single message (text/image/file/interactive) synchronously."""
         try:
@@ -998,8 +1075,10 @@ class FeishuChannel(BaseChannel):
                 content_parts.append(content_text)
 
             elif msg_type == "merge_forward":
-                # Resolve merged forward messages by fetching sub-message details
-                text, forward_media = await self._resolve_merge_forward(content_json)
+                # Resolve merged forward messages via skill script (allows iteration without gateway restart)
+                text, forward_media = await self._resolve_merge_forward_via_skill(
+                    content_json, message_id
+                )
                 if text:
                     content_parts.append(text)
                 media_paths.extend(forward_media)
