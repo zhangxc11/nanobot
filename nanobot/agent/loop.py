@@ -970,9 +970,11 @@ class AgentLoop:
                 self._consolidating.discard(session.key)
                 self._prune_consolidation_lock(session.key, lock)
 
-            session.clear()
-            self.sessions.save(session)
-            self.sessions.invalidate(session.key)
+            # Archive the old session file (rename with timestamp suffix)
+            # and create a fresh empty session, same as /new.
+            self.sessions.create_new_session(
+                channel=msg.channel, chat_id=msg.chat_id, old_key=session.key,
+            )
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="Session flushed — memory archived, conversation cleared.")
         if cmd == "/new":
