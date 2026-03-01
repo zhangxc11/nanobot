@@ -766,4 +766,47 @@ file:///absolute/path/to/image.jpg?mime=image/jpeg
 
 ---
 
+## Phase 17: 飞书合并转发消息（merge_forward）解析 🔜
+
+### 需求来源
+- nanobot REQUIREMENTS.md Backlog: 飞书合并转发消息解析
+- 用户在飞书中将聊天记录通过「合并转发」发送给 nanobot 时，当前只显示 `[merged forward messages]` 占位文本
+
+### 目标
+解析 `merge_forward` 消息的子消息 ID 列表，调用飞书 API 逐条获取原始消息内容，拼接为可读文本格式传给 Agent。
+
+### 技术方案
+1. **merge_forward content 结构**: content JSON 包含 `message_id_list`（子消息 ID 数组）
+2. **API 调用**: 使用 `lark_oapi` SDK 的 `GetMessageRequest` 获取单条消息详情
+3. **子消息解析**: 支持 text / post / image / file / interactive / system 等多种类型
+4. **格式化输出**: 将子消息拼接为 `[发送者] 内容` 格式
+5. **错误处理**: 权限不足/消息不存在时 graceful degradation
+6. **异步处理**: `_extract_text_content` 改为异步（或新增异步方法），因需要 API 调用
+
+### 任务清单
+
+- 🔜 **T17.1** `channels/feishu.py` — 新增 `_get_message_detail()` 方法
+  - 使用 `GetMessageRequest` 获取单条消息详情
+  - 返回 `(msg_type, content_json, sender_id, create_time)` 或 `None`
+  - 同步方法（在 executor 中调用）
+
+- 🔜 **T17.2** `channels/feishu.py` — 新增 `_resolve_merge_forward()` 异步方法
+  - 解析 merge_forward 的 content JSON，提取 `message_id_list`
+  - 逐条调用 `_get_message_detail()` 获取子消息
+  - 根据子消息 msg_type 提取文本内容（复用已有的 `_extract_share_card_content` 等函数）
+  - 拼接为可读格式返回
+  - 错误处理：权限不足/消息不存在时跳过并记录 warning
+
+- 🔜 **T17.3** `channels/feishu.py` — `_on_message()` 中 merge_forward 分支改为调用 `_resolve_merge_forward()`
+  - 将 `_extract_share_card_content` 中的 merge_forward 分支移除
+  - 在 `_on_message()` 中单独处理 merge_forward 类型
+
+- 🔜 **T17.4** 测试验证
+  - 单元测试：mock GetMessageRequest 测试 _get_message_detail 和 _resolve_merge_forward
+  - 覆盖：正常解析、空列表、API 失败、混合类型子消息、权限不足
+
+- 🔜 **T17.5** Git 提交 + 合并 + 文档更新
+
+---
+
 *本文件随开发进展持续更新。*

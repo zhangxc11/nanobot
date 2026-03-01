@@ -29,6 +29,7 @@ try:
         CreateMessageReactionRequestBody,
         Emoji,
         GetFileRequest,
+        GetMessageRequest,
         GetMessageResourceRequest,
         P2ImMessageReceiveV1,
     )
@@ -671,6 +672,53 @@ class FeishuChannel(BaseChannel):
             logger.exception("Error downloading {} {}", resource_type, file_key)
             return None, None
 
+    def _get_message_detail_sync(self, message_id: str) -> dict | None:
+        """Fetch a single message's detail via GET /im/v1/messages/{message_id}.
+
+        Returns a dict with keys: msg_type, content (parsed JSON), sender_id, create_time.
+        Returns None on failure.
+        """
+        try:
+            request = (
+                GetMessageRequest.builder()
+                .message_id(message_id)
+                .build()
+            )
+            response = self._client.im.v1.message.get(request)
+            if not response.success():
+                logger.warning(
+                    "Failed to get message {}: code={}, msg={}",
+                    message_id, response.code, response.msg,
+                )
+                return None
+
+            items = response.data.items if response.data else None
+            if not items:
+                logger.warning("No items returned for message {}", message_id)
+                return None
+
+            msg = items[0]
+            content_str = msg.body.content if msg.body else ""
+            try:
+                content_json = json.loads(content_str) if content_str else {}
+            except json.JSONDecodeError:
+                content_json = {}
+
+            sender_id = ""
+            if msg.sender:
+                sender_id = msg.sender.id or ""
+
+            return {
+                "msg_type": msg.msg_type or "text",
+                "content": content_json,
+                "sender_id": sender_id,
+                "create_time": msg.create_time,
+                "message_id": msg.message_id or message_id,
+            }
+        except Exception:
+            logger.exception("Error fetching message detail for {}", message_id)
+            return None
+
     async def _download_and_save_media(
         self,
         msg_type: str,
@@ -717,6 +765,97 @@ class FeishuChannel(BaseChannel):
             return str(file_path), f"[{msg_type}: {filename}]"
 
         return None, f"[{msg_type}: download failed]"
+
+    async def _resolve_merge_forward(self, content_json: dict) -> tuple[str, list[str]]:
+        """Resolve a merge_forward message by fetching each sub-message's content.
+
+        Args:
+            content_json: The parsed content JSON of the merge_forward message.
+
+        Returns:
+            (text, media_paths) — formatted text of all sub-messages and any media file paths.
+        """
+        # Extract message_id_list from content
+        message_ids = content_json.get("message_id_list", [])
+        if not message_ids:
+            # Fallback: try other possible field names
+            message_ids = content_json.get("messages", [])
+            if isinstance(message_ids, list) and message_ids and isinstance(message_ids[0], dict):
+                # If messages is a list of dicts, extract message_id from each
+                message_ids = [m.get("message_id", "") for m in message_ids if m.get("message_id")]
+
+        if not message_ids:
+            logger.warning("merge_forward content has no message_id_list: {}", content_json)
+            return "[merged forward messages (no message IDs found)]", []
+
+        loop = asyncio.get_running_loop()
+        text_parts = []
+        media_paths = []
+
+        # Fetch each sub-message
+        for msg_id in message_ids:
+            if not msg_id:
+                continue
+
+            detail = await loop.run_in_executor(
+                None, self._get_message_detail_sync, msg_id
+            )
+
+            if detail is None:
+                text_parts.append(f"[message {msg_id}: failed to fetch]")
+                continue
+
+            sub_type = detail["msg_type"]
+            sub_content = detail["content"]
+            sub_msg_id = detail["message_id"]
+
+            # Extract text based on sub-message type
+            if sub_type == "text":
+                text = sub_content.get("text", "")
+                if text:
+                    text_parts.append(text)
+
+            elif sub_type == "post":
+                text, image_keys = _extract_post_content(sub_content)
+                if text:
+                    text_parts.append(text)
+                # Download images embedded in post
+                for img_key in image_keys:
+                    file_path, content_text = await self._download_and_save_media(
+                        "image", {"image_key": img_key}, sub_msg_id
+                    )
+                    if file_path:
+                        media_paths.append(file_path)
+
+            elif sub_type in ("image", "audio", "file", "media"):
+                file_path, content_text = await self._download_and_save_media(
+                    sub_type, sub_content, sub_msg_id
+                )
+                if file_path:
+                    media_paths.append(file_path)
+                text_parts.append(content_text)
+
+            elif sub_type in ("share_chat", "share_user", "interactive",
+                              "share_calendar_event", "system"):
+                text = _extract_share_card_content(sub_content, sub_type)
+                if text:
+                    text_parts.append(text)
+
+            elif sub_type == "merge_forward":
+                # Nested merge_forward — don't recurse deeply, just note it
+                text_parts.append("[nested merged forward messages]")
+
+            else:
+                display = MSG_TYPE_MAP.get(sub_type, f"[{sub_type}]")
+                text_parts.append(display)
+
+        if not text_parts and not media_paths:
+            return "[merged forward messages (empty)]", []
+
+        header = "--- forwarded messages ---"
+        footer = "--- end forwarded messages ---"
+        body = "\n".join(text_parts)
+        return f"{header}\n{body}\n{footer}", media_paths
 
     def _send_message_sync(self, receive_id_type: str, receive_id: str, msg_type: str, content: str) -> bool:
         """Send a single message (text/image/file/interactive) synchronously."""
@@ -854,7 +993,14 @@ class FeishuChannel(BaseChannel):
                     media_paths.append(file_path)
                 content_parts.append(content_text)
 
-            elif msg_type in ("share_chat", "share_user", "interactive", "share_calendar_event", "system", "merge_forward"):
+            elif msg_type == "merge_forward":
+                # Resolve merged forward messages by fetching sub-message details
+                text, forward_media = await self._resolve_merge_forward(content_json)
+                if text:
+                    content_parts.append(text)
+                media_paths.extend(forward_media)
+
+            elif msg_type in ("share_chat", "share_user", "interactive", "share_calendar_event", "system"):
                 # Handle share cards and interactive messages
                 text = _extract_share_card_content(content_json, msg_type)
                 if text:
