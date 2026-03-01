@@ -26,6 +26,7 @@
 | Phase 14: 大图片自动压缩 | ✅ 已完成 | feat/image-compress → local |
 | Phase 15: 图片存储架构改进 | ✅ 已完成 | feat/image-storage → local |
 | Phase 16: ProviderPool 动态切换 | ✅ 已完成 | feat/provider-pool → local |
+| Phase 17: 飞书合并转发消息解析 | ✅ 已完成 | feat/merge-forward → local |
 
 ---
 
@@ -766,7 +767,7 @@ file:///absolute/path/to/image.jpg?mime=image/jpeg
 
 ---
 
-## Phase 17: 飞书合并转发消息（merge_forward）解析 🔜
+## Phase 17: 飞书合并转发消息（merge_forward）解析 ✅
 
 ### 需求来源
 - nanobot REQUIREMENTS.md Backlog: 飞书合并转发消息解析
@@ -779,33 +780,43 @@ file:///absolute/path/to/image.jpg?mime=image/jpeg
 1. **merge_forward content 结构**: content JSON 包含 `message_id_list`（子消息 ID 数组）
 2. **API 调用**: 使用 `lark_oapi` SDK 的 `GetMessageRequest` 获取单条消息详情
 3. **子消息解析**: 支持 text / post / image / file / interactive / system 等多种类型
-4. **格式化输出**: 将子消息拼接为 `[发送者] 内容` 格式
+4. **格式化输出**: 将子消息拼接为 `--- forwarded messages ---` 包裹的格式
 5. **错误处理**: 权限不足/消息不存在时 graceful degradation
-6. **异步处理**: `_extract_text_content` 改为异步（或新增异步方法），因需要 API 调用
+6. **嵌套处理**: 嵌套 merge_forward 不递归，标记为 `[nested merged forward messages]`
 
 ### 任务清单
 
-- 🔜 **T17.1** `channels/feishu.py` — 新增 `_get_message_detail()` 方法
+- ✅ **T17.1** `channels/feishu.py` — 新增 `_get_message_detail_sync()` 方法
   - 使用 `GetMessageRequest` 获取单条消息详情
-  - 返回 `(msg_type, content_json, sender_id, create_time)` 或 `None`
+  - 返回 dict(msg_type, content, sender_id, create_time, message_id) 或 None
   - 同步方法（在 executor 中调用）
 
-- 🔜 **T17.2** `channels/feishu.py` — 新增 `_resolve_merge_forward()` 异步方法
+- ✅ **T17.2** `channels/feishu.py` — 新增 `_resolve_merge_forward()` 异步方法
   - 解析 merge_forward 的 content JSON，提取 `message_id_list`
-  - 逐条调用 `_get_message_detail()` 获取子消息
-  - 根据子消息 msg_type 提取文本内容（复用已有的 `_extract_share_card_content` 等函数）
-  - 拼接为可读格式返回
-  - 错误处理：权限不足/消息不存在时跳过并记录 warning
+  - 逐条调用 `_get_message_detail_sync()` 获取子消息
+  - 根据子消息 msg_type 提取文本内容（复用已有的 `_extract_post_content`, `_extract_share_card_content` 等）
+  - 图片/文件类型调用 `_download_and_save_media()` 下载
+  - 拼接为 `--- forwarded messages ---` 包裹格式返回
 
-- 🔜 **T17.3** `channels/feishu.py` — `_on_message()` 中 merge_forward 分支改为调用 `_resolve_merge_forward()`
-  - 将 `_extract_share_card_content` 中的 merge_forward 分支移除
-  - 在 `_on_message()` 中单独处理 merge_forward 类型
+- ✅ **T17.3** `channels/feishu.py` — `_on_message()` 中 merge_forward 分支改为调用 `_resolve_merge_forward()`
+  - 从 `share_chat/share_user/interactive/...` 联合分支中拆出 merge_forward
+  - 单独处理，支持返回 media_paths
 
-- 🔜 **T17.4** 测试验证
-  - 单元测试：mock GetMessageRequest 测试 _get_message_detail 和 _resolve_merge_forward
-  - 覆盖：正常解析、空列表、API 失败、混合类型子消息、权限不足
+- ✅ **T17.4** 测试验证 — 18 项全部通过
+  - _get_message_detail_sync: 7 项（成功、API失败、空items、None items、异常、无效JSON、无sender）
+  - _resolve_merge_forward: 10 项（文本消息、空列表、无列表、API失败优雅降级、混合类型、图片子消息、嵌套转发、富文本、全部失败、跳过空ID）
+  - _extract_share_card_content fallback: 1 项
+  - 现有测试无回归: 236 passed / 20 failed（与改动前一致）
 
-- 🔜 **T17.5** Git 提交 + 合并 + 文档更新
+- ✅ **T17.5** Git 提交 + 合并
+  - commit `67845aa` on feat/merge-forward → merged to local
+
+### 影响范围
+
+| 文件 | 改动 |
+|------|------|
+| `channels/feishu.py` | import `GetMessageRequest` + `_get_message_detail_sync()` + `_resolve_merge_forward()` + `_on_message()` merge_forward 分支 |
+| `tests/test_merge_forward.py` | 18 项新测试 |
 
 ---
 
