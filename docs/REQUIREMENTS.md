@@ -1243,6 +1243,7 @@ class GatewayCallbacks(DefaultCallbacks):
 | Session Key | 当前 session 的唯一标识 |
 | 状态 | 🔄 执行中（正在处理任务） / 💤 空闲（等待输入） |
 | Provider/Model | 当前 session 使用的 LLM provider 和 model |
+| Token 用量 | 累计 prompt / completion / total tokens + LLM 调用次数 |
 | 消息数 | 总消息数 + 未归档消息数 |
 | 创建时间 | session 首次创建的时间 |
 | 最后更新 | session 最近一次更新的时间 |
@@ -1254,6 +1255,7 @@ class GatewayCallbacks(DefaultCallbacks):
 - CLI/直接调用模式（`_process_message()`）：始终显示空闲（无 active_sessions 上下文）
 - Provider 信息通过 `ProviderPool.get_session_provider_name()` / `get_session_model()` 获取
 - 消息统计从 `Session` 对象的 `messages` 和 `last_consolidated` 字段获取
+- Token 用量通过 `UsageRecorder.get_session_usage(session_key)` 从 `analytics.db` 聚合查询
 
 ### 19.4 影响范围
 

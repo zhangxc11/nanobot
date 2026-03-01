@@ -1251,7 +1251,7 @@ async def _process_message(
 
 ### 9.1 概述
 
-`/session` 斜杠命令提供当前 session 的只读状态查询，包括 session key、执行状态、provider/model、消息统计、时间信息。
+`/session` 斜杠命令提供当前 session 的只读状态查询，包括 session key、执行状态、provider/model、Token 累计用量、消息统计、时间信息。
 
 ### 9.2 实现
 
@@ -1273,6 +1273,11 @@ def _handle_session_command(
 **Provider 信息获取**：
 - `ProviderPool` 实例 → `get_session_provider_name(key)` + `get_session_model(key)`
 - 非 ProviderPool → `type(self.provider).__name__` + `self.model`
+
+**Token 用量获取**：
+- 通过 `self.usage_recorder.get_session_usage(key)` 从 `analytics.db` 聚合
+- 返回 `prompt_tokens`, `completion_tokens`, `total_tokens`, `llm_calls`
+- 若 `usage_recorder` 为 None（未配置），显示 "N/A"
 
 ### 9.3 命令路由
 

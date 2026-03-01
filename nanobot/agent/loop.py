@@ -781,6 +781,21 @@ class AgentLoop:
         total_msgs = len(session.messages)
         unconsolidated = total_msgs - session.last_consolidated
 
+        # ── Token usage ──
+        if self.usage_recorder is not None:
+            try:
+                usage = self.usage_recorder.get_session_usage(key)
+                token_line = (
+                    f"{usage['prompt_tokens']:,} prompt + "
+                    f"{usage['completion_tokens']:,} completion = "
+                    f"**{usage['total_tokens']:,}** total "
+                    f"({usage['llm_calls']} 次调用)"
+                )
+            except Exception:
+                token_line = "查询失败"
+        else:
+            token_line = "N/A（未配置 UsageRecorder）"
+
         # ── Build output ──
         lines = [
             f"📋 **Session 信息**",
@@ -788,6 +803,7 @@ class AgentLoop:
             f"**Session Key**: `{key}`",
             f"**状态**: {status_text}",
             f"**Provider**: {provider_name} / `{model_name}`",
+            f"**Token 用量**: {token_line}",
             f"**消息数**: {total_msgs} 条（未归档: {unconsolidated}）",
             f"**创建时间**: {session.created_at.strftime('%Y-%m-%d %H:%M:%S')}",
             f"**最后更新**: {session.updated_at.strftime('%Y-%m-%d %H:%M:%S')}",

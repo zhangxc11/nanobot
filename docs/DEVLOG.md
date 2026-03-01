@@ -954,6 +954,9 @@ LLM 调用 `message` 工具时传入 `channel: "feishu"` 覆盖了默认的 `"fe
   - Gateway 并发模式：检查 `active_sessions` 中的 task 状态
   - CLI/直接调用模式：始终显示空闲（无 active_sessions）
   - 更新 `/help` 文本包含 `/session`
+- 🔜 **T20.2** `agent/loop.py` — `/session` 输出增加累计 Token 用量
+  - 通过 `UsageRecorder.get_session_usage()` 查询 analytics.db
+  - 显示 prompt / completion / total tokens + LLM 调用次数
 
 ---
 
