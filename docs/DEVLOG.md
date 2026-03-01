@@ -27,6 +27,9 @@
 | Phase 15: 图片存储架构改进 | ✅ 已完成 | feat/image-storage → local |
 | Phase 16: ProviderPool 动态切换 | ✅ 已完成 | feat/provider-pool → local |
 | Phase 17: 飞书合并转发消息解析 | ✅ 已完成 | feat/merge-forward → local |
+| Phase 18: 飞书通道文件附件发送修复 | ✅ 已完成 | local |
+| Phase 19: Gateway 并发执行 + Per-Session Provider | ✅ 已完成 | feat/concurrent-gateway → local |
+| Phase 20: /session 状态查询命令 | ✅ 已完成 | local |
 
 ---
 
@@ -927,6 +930,30 @@ LLM 调用 `message` 工具时传入 `channel: "feishu"` 覆盖了默认的 `"fe
   - commit to `feat/concurrent-gateway`
   - merge to `local`
   - 更新 MEMORY.md
+
+---
+
+## Phase 20: /session 状态查询命令 ✅
+
+> 需求：REQUIREMENTS.md §十九 | 架构：ARCHITECTURE.md §九
+> 分支：直接在 `local` 上开发（小功能）
+> 完成时间：2026-03-01
+
+### 目标
+
+提供 `/session` 斜杠命令，让用户快速查看当前 session 的名称、执行状态、Provider/Model、消息统计等信息。
+
+### 任务清单
+
+- ✅ **T20.1** `agent/loop.py` — 新增 `_handle_session_command()` 方法 (commit `14e7738`)
+  - 显示 session key
+  - 显示执行状态：🔄 执行中 / 💤 空闲（基于 `active_sessions` 字典）
+  - 显示当前 provider / model
+  - 显示消息数（总数 + 未归档数）
+  - 显示创建时间 / 最后更新时间
+  - Gateway 并发模式：检查 `active_sessions` 中的 task 状态
+  - CLI/直接调用模式：始终显示空闲（无 active_sessions）
+  - 更新 `/help` 文本包含 `/session`
 
 ---
 

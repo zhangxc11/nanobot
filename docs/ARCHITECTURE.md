@@ -1245,4 +1245,42 @@ async def _process_message(
 
 ---
 
+## 九、/session 状态查询命令（Phase 20）
+
+> 需求：REQUIREMENTS.md §十九
+
+### 9.1 概述
+
+`/session` 斜杠命令提供当前 session 的只读状态查询，包括 session key、执行状态、provider/model、消息统计、时间信息。
+
+### 9.2 实现
+
+```python
+def _handle_session_command(
+    self,
+    msg: InboundMessage,
+    session_key: str | None = None,
+    active_sessions: dict | None = None,  # Gateway 并发模式传入
+) -> OutboundMessage:
+```
+
+**状态判断逻辑**：
+- `active_sessions` 不为 None 且包含当前 session key → 检查 `worker.task.done()`
+  - `not done` → 🔄 执行中
+  - `done` → 💤 空闲
+- `active_sessions` 为 None（CLI/直接调用模式） → 💤 空闲
+
+**Provider 信息获取**：
+- `ProviderPool` 实例 → `get_session_provider_name(key)` + `get_session_model(key)`
+- 非 ProviderPool → `type(self.provider).__name__` + `self.model`
+
+### 9.3 命令路由
+
+在两个入口点添加 `/session` 路由：
+
+1. **`run()` 并发 dispatcher**：在 `/provider` 之后、inject 逻辑之前，传入 `active_sessions`
+2. **`_process_message()` 直接模式**：在 `/provider` 之后、`/stop` 之前，不传 `active_sessions`
+
+---
+
 *本文档将随开发进展持续更新。*

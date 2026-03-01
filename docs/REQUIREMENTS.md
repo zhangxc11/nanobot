@@ -1224,4 +1224,49 @@ class GatewayCallbacks(DefaultCallbacks):
 
 ---
 
+## 十九、/session 状态查询命令（Phase 20）
+
+### 19.1 需求背景
+
+用户在使用 nanobot 时，尤其是 Gateway 并发模式下多个 session 同时运行，需要一种快速方式查看当前 session 的基本信息和运行状态，以了解：
+- 当前对话所在的 session key 是什么
+- session 当前是在执行任务还是在等待输入
+- 正在使用哪个 Provider/Model
+- 对话历史的消息量和归档状态
+
+### 19.2 功能描述
+
+新增 `/session` 斜杠命令，输出当前 session 的状态信息：
+
+| 字段 | 说明 |
+|------|------|
+| Session Key | 当前 session 的唯一标识 |
+| 状态 | 🔄 执行中（正在处理任务） / 💤 空闲（等待输入） |
+| Provider/Model | 当前 session 使用的 LLM provider 和 model |
+| 消息数 | 总消息数 + 未归档消息数 |
+| 创建时间 | session 首次创建的时间 |
+| 最后更新 | session 最近一次更新的时间 |
+
+### 19.3 技术设计
+
+- 在 `AgentLoop` 中新增 `_handle_session_command()` 方法
+- Gateway 并发模式（`run()`）：检查 `active_sessions` 字典中是否有该 session 的活跃 task
+- CLI/直接调用模式（`_process_message()`）：始终显示空闲（无 active_sessions 上下文）
+- Provider 信息通过 `ProviderPool.get_session_provider_name()` / `get_session_model()` 获取
+- 消息统计从 `Session` 对象的 `messages` 和 `last_consolidated` 字段获取
+
+### 19.4 影响范围
+
+| 文件 | 改动 |
+|------|------|
+| `agent/loop.py` | 新增 `_handle_session_command()`；`run()` 和 `_process_message()` 中添加命令路由；更新 `/help` 文本 |
+
+### 19.5 不做什么
+
+- 不支持查看其他 session 的状态（只查看当前 session）
+- 不支持列出所有活跃 session
+- 不修改 session 的任何状态（纯只读查询）
+
+---
+
 *本文档将随需求迭代持续更新。*
