@@ -590,13 +590,11 @@ class SessionManager:
     def create_new_session(self, channel: str, chat_id: str, old_key: str) -> str:
         """Create a new session for a channel/chat_id pair (``/new`` command).
 
-        * Archives the current session file by renaming it with a timestamp
-          suffix so it is preserved but no longer the "active" session.
-        * Creates a fresh empty session with the *natural* key
-          (``channel:chat_id``) so that subsequent messages land in the new
-          session without requiring a routing table entry.
-        * Removes any existing routing entry for this natural key (the new
-          session uses the natural key directly).
+        The **old** session file is left untouched (its session_key still
+        matches the ``analytics.db`` usage records).  A **new** session is
+        created with a short, timestamped key (``{channel}.{timestamp}``)
+        and the routing table is updated so that the natural key
+        (``channel:chat_id``) resolves to the new key.
 
         Returns the new session key.
         """
@@ -604,31 +602,21 @@ class SessionManager:
 
         ts = int(time.time())
         natural_key = f"{channel}:{chat_id}"
+        new_key = f"{channel}.{ts}"
 
-        # The old_key might already be the natural key or a previously routed key.
-        # Archive the file behind old_key (if it exists).
-        old_path = self._get_session_path(old_key)
-        if old_path.exists():
-            archive_key = f"{old_key}_{ts}"
-            archive_path = self._get_session_path(archive_key)
-            try:
-                old_path.rename(archive_path)
-                logger.info("Archived session {} → {}", old_key, archive_path.name)
-            except Exception:
-                logger.exception("Failed to archive session {}", old_key)
-
-        # Invalidate old session from cache
+        # Old session file stays in place — do NOT rename or delete it.
+        # Just invalidate the in-memory cache so it won't be reused.
         self.invalidate(old_key)
         self.invalidate(natural_key)
 
-        # Remove routing entry — the new session uses the natural key directly
+        # Update routing: natural_key → new_key
         table = self._load_routing()
-        if natural_key in table:
-            del table[natural_key]
-            self._save_routing(table)
+        table[natural_key] = new_key
+        self._save_routing(table)
+        logger.info("Routing {} → {} (old session: {})", natural_key, new_key, old_key)
 
-        # Create fresh session with the natural key
-        new_session = Session(key=natural_key)
+        # Create fresh session with the new key
+        new_session = Session(key=new_key)
         self.save(new_session)
 
-        return natural_key
+        return new_key

@@ -1224,6 +1224,78 @@ class GatewayCallbacks(DefaultCallbacks):
 
 ---
 
+## 二十、/new 归档方向反转 + Session 命名简化（Phase 21）
+
+### 20.1 需求背景
+
+当前 `/new` 命令的归档方向有问题：
+
+**现状**：
+```
+/new 执行时:
+1. 旧文件 rename: feishu.lab_ou_xxx.jsonl → feishu.lab_ou_xxx_1772366290.jsonl
+2. 新文件创建: feishu.lab_ou_xxx.jsonl (空)
+3. 新 session.key = "feishu.lab:ou_xxx" (不变!)
+```
+
+**问题**：
+- `analytics.db` 的 `token_usage` 按 `session_key` 记录，`/new` 后 session_key 不变
+- 导致 Usage 统计是**所有历史 session 的累加**，而非当前 session 的用量
+- `/session` 命令显示的 Token 用量与当前 session 实际消息数不匹配
+
+同时，当前飞书通道的 session 文件名过长（包含完整的 `ou_xxx` open_id），不够简洁。
+
+### 20.2 目标
+
+1. **反转归档方向**：`/new` 时旧文件保持原名不动，新文件使用带时间戳的新 key，这样旧文件的 session_key 与数据库记录天然对应
+2. **Session 命名简化**：新 session 使用 `{channel}.{timestamp}` 格式（如 `feishu.lab.1709312640`），去掉冗长的 `chat_id`
+
+### 20.3 设计方案
+
+#### 20.3.1 反转归档方向
+
+```
+/new 执行时（新行为）:
+1. 旧文件不动: feishu.lab_ou_xxx.jsonl 保持原样（key 和 usage 对应）
+2. 新文件创建: feishu.lab.1709312640.jsonl（新 key）
+3. 新 session.key = "feishu.lab.1709312640"
+4. routing 表更新: "feishu.lab:ou_xxx" → "feishu.lab.1709312640"
+```
+
+#### 20.3.2 Session 命名简化
+
+新 session key 格式：`{channel}.{unix_timestamp}`
+- 飞书: `feishu.lab.1709312640`、`feishu.ST.1709312640`
+- CLI: `cli.1709312640`
+- Webchat: 不受影响（已经是 `webchat:timestamp` 格式）
+
+#### 20.3.3 多次 /new 的行为
+
+```
+初始:   key = "feishu.lab:ou_xxx"  →  file: feishu.lab_ou_xxx.jsonl
+/new 1: key = "feishu.lab.1709312640"  →  file: feishu.lab.1709312640.jsonl
+        routing: "feishu.lab:ou_xxx" → "feishu.lab.1709312640"
+/new 2: key = "feishu.lab.1709400000"  →  file: feishu.lab.1709400000.jsonl
+        routing: "feishu.lab:ou_xxx" → "feishu.lab.1709400000"
+        旧的 feishu.lab.1709312640.jsonl 不动
+```
+
+### 20.4 影响范围
+
+| 文件 | 改动 |
+|------|------|
+| `session/manager.py` | `create_new_session()` 反转归档方向 + 新 key 命名 |
+| `agent/loop.py` | `/flush` 路径中 `create_new_session()` 返回值处理；`/new` 返回值更新 |
+
+### 20.5 不做什么
+
+- 不修改 `analytics.db` 的 schema 或数据
+- 不修改 webchat 的 session 创建逻辑（已经是独立 key）
+- 不迁移历史归档文件（旧格式的归档文件保留原样）
+- 不修改 `resolve_session_key()` 和 routing 表机制（已完备）
+
+---
+
 ## 十九、/session 状态查询命令（Phase 20）
 
 ### 19.1 需求背景

@@ -960,4 +960,33 @@ LLM 调用 `message` 工具时传入 `channel: "feishu"` 覆盖了默认的 `"fe
 
 ---
 
+## Phase 21: /new 归档方向反转 + Session 命名简化 🔜
+
+> 需求：REQUIREMENTS.md §二十 | 分支：直接在 `local` 上开发
+> 开始时间：2026-03-01
+
+### 背景
+
+`/new` 命令归档旧 session 文件并创建新 session，但新旧 session 共用同一个 session_key，导致 `analytics.db` 中的 usage 统计是所有历史 session 的累加。同时飞书 session 文件名包含完整 open_id，过于冗长。
+
+### 任务清单
+
+- [ ] **T21.1** `session/manager.py` — 重构 `create_new_session()` 方法
+  - 旧文件不动（保持原 key 和文件名）
+  - 新文件使用 `{channel}.{timestamp}` 格式的新 key
+  - routing 表更新：`natural_key → new_key`
+  - invalidate 旧 key 和 natural_key 的缓存
+- [ ] **T21.2** `agent/loop.py` — 适配新的 `create_new_session()` 返回值
+  - `/flush` 路径：使用返回的新 key 更新后续逻辑
+  - `/new` 路径：返回新 key 给用户
+  - 确保 `run()` 并发 dispatcher 中 `resolve_session_key()` 正确路由
+- [ ] **T21.3** 测试验证
+  - `/new` 后旧文件不变、新文件创建、routing 正确
+  - `/flush` 同上
+  - 多次 `/new` 后 routing 正确更新
+  - Usage 统计与新 session 正确隔离
+- [ ] **T21.4** Git 提交 + 文档更新
+
+---
+
 *本文件随开发进展持续更新。*

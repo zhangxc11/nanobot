@@ -1,4 +1,4 @@
-"""Tests for /new and /flush session commands (Phase 12)."""
+"""Tests for /new and /flush session commands (Phase 12, updated Phase 21)."""
 
 import json
 import os
@@ -32,12 +32,12 @@ class TestResolveSessionKey:
 
     def test_with_routing_returns_mapped_key(self, manager):
         # Write a routing table
-        table = {"feishu:ou_abc": "feishu:ou_abc_1700000000"}
+        table = {"feishu:ou_abc": "feishu.1700000000"}
         manager._save_routing(table)
-        assert manager.resolve_session_key("feishu:ou_abc") == "feishu:ou_abc_1700000000"
+        assert manager.resolve_session_key("feishu:ou_abc") == "feishu.1700000000"
 
     def test_unrelated_key_not_affected(self, manager):
-        table = {"feishu:ou_abc": "feishu:ou_abc_1700000000"}
+        table = {"feishu:ou_abc": "feishu.1700000000"}
         manager._save_routing(table)
         assert manager.resolve_session_key("cli:direct") == "cli:direct"
 
@@ -47,96 +47,129 @@ class TestResolveSessionKey:
 
 class TestCreateNewSession:
     def test_creates_new_session_file(self, manager):
-        """After /new, a new empty session file should exist."""
+        """After /new, a new session file with timestamped key should exist."""
         # Create an existing session with messages
         session = manager.get_or_create("cli:direct")
         session.add_message("user", "hello")
         manager.save(session)
 
-        old_path = manager._get_session_path("cli:direct")
-        assert old_path.exists()
-
         new_key = manager.create_new_session("cli", "direct", "cli:direct")
-        assert new_key == "cli:direct"
+
+        # New key should be cli.<timestamp>
+        assert new_key.startswith("cli.")
+        assert new_key != "cli:direct"
 
         # New session file should exist and be empty (just metadata)
-        new_path = manager._get_session_path("cli:direct")
+        new_path = manager._get_session_path(new_key)
         assert new_path.exists()
-        new_session = manager.get_or_create("cli:direct")
+        new_session = manager.get_or_create(new_key)
         assert len(new_session.messages) == 0
 
-    def test_archives_old_session(self, manager):
-        """Old session file should be renamed with timestamp suffix."""
-        session = manager.get_or_create("feishu:ou_abc")
+    def test_old_session_stays_in_place(self, manager):
+        """Old session file should NOT be renamed — it stays untouched."""
+        session = manager.get_or_create("feishu.lab:ou_abc")
         session.add_message("user", "hello")
         manager.save(session)
 
-        manager.create_new_session("feishu", "ou_abc", "feishu:ou_abc")
+        old_path = manager._get_session_path("feishu.lab:ou_abc")
+        assert old_path.exists()
 
-        # Check that an archive file exists
-        archive_files = [
-            f for f in manager.sessions_dir.glob("feishu_ou_abc_*.jsonl")
-        ]
-        assert len(archive_files) == 1
+        manager.create_new_session("feishu.lab", "ou_abc", "feishu.lab:ou_abc")
 
-        # The archive should have the old message
-        with open(archive_files[0], encoding="utf-8") as f:
+        # Old file should still be there with original name
+        assert old_path.exists()
+
+        # Old file should still have the message
+        with open(old_path, encoding="utf-8") as f:
             lines = [l.strip() for l in f if l.strip()]
-        # First line is metadata, second is the message
         assert len(lines) >= 2
         msg = json.loads(lines[1])
         assert msg["content"] == "hello"
 
     def test_invalidates_cache(self, manager):
-        """After /new, the old session should not be in cache."""
+        """After /new, resolving the natural key should go to the new session."""
         session = manager.get_or_create("cli:direct")
         session.add_message("user", "cached message")
         manager.save(session)
 
-        manager.create_new_session("cli", "direct", "cli:direct")
+        new_key = manager.create_new_session("cli", "direct", "cli:direct")
 
-        # Getting session again should return a fresh one
-        new_session = manager.get_or_create("cli:direct")
+        # Routing should point to the new key
+        resolved = manager.resolve_session_key("cli:direct")
+        assert resolved == new_key
+
+        # Getting the new session should return a fresh one
+        new_session = manager.get_or_create(new_key)
         assert len(new_session.messages) == 0
 
-    def test_removes_routing_entry(self, manager):
-        """If there was a routing entry, /new should remove it."""
-        # Set up a routing entry
-        table = {"feishu:ou_abc": "feishu:ou_abc_1700000000"}
-        manager._save_routing(table)
-
-        # Create a session for the routed key
-        session = manager.get_or_create("feishu:ou_abc_1700000000")
+    def test_updates_routing_entry(self, manager):
+        """After /new, routing table should map natural_key → new_key."""
+        session = manager.get_or_create("feishu.lab:ou_abc")
         session.add_message("user", "old message")
         manager.save(session)
 
-        manager.create_new_session("feishu", "ou_abc", "feishu:ou_abc_1700000000")
+        new_key = manager.create_new_session("feishu.lab", "ou_abc", "feishu.lab:ou_abc")
 
-        # Routing should be cleared — natural key resolves to itself
-        assert manager.resolve_session_key("feishu:ou_abc") == "feishu:ou_abc"
+        # Routing should map natural key to new key
+        assert manager.resolve_session_key("feishu.lab:ou_abc") == new_key
+        assert new_key.startswith("feishu.lab.")
 
     def test_multiple_new_sessions(self, manager):
-        """Multiple /new commands should create multiple archive files."""
+        """Multiple /new commands should create separate session files."""
         import time
 
         # Create initial session
         session = manager.get_or_create("cli:direct")
         session.add_message("user", "msg1")
         manager.save(session)
-        manager.create_new_session("cli", "direct", "cli:direct")
+        new_key1 = manager.create_new_session("cli", "direct", "cli:direct")
 
         # Create second session with a message
-        session2 = manager.get_or_create("cli:direct")
+        session2 = manager.get_or_create(new_key1)
         session2.add_message("user", "msg2")
         manager.save(session2)
 
         # Small delay to get different timestamp
-        time.sleep(0.01)
-        manager.create_new_session("cli", "direct", "cli:direct")
+        time.sleep(1.1)
+        new_key2 = manager.create_new_session("cli", "direct", new_key1)
 
-        # Should have 2 archive files (timestamps may collide in fast tests)
-        archive_files = sorted(manager.sessions_dir.glob("cli_direct_*.jsonl"))
-        assert len(archive_files) >= 1  # At least 1 (timestamps might collide)
+        # Keys should be different
+        assert new_key1 != new_key2
+        assert new_key1.startswith("cli.")
+        assert new_key2.startswith("cli.")
+
+        # Both session files should exist
+        assert manager._get_session_path(new_key1).exists()
+        assert manager._get_session_path(new_key2).exists()
+
+        # Old original session file should still exist
+        assert manager._get_session_path("cli:direct").exists()
+
+        # Routing should point to the latest
+        assert manager.resolve_session_key("cli:direct") == new_key2
+
+    def test_new_session_from_routed_key(self, manager):
+        """If old_key is already a routed key, /new should still work."""
+        # Simulate: first /new created feishu.lab.100
+        session = manager.get_or_create("feishu.lab.100")
+        session.add_message("user", "msg in routed session")
+        manager.save(session)
+
+        table = {"feishu.lab:ou_abc": "feishu.lab.100"}
+        manager._save_routing(table)
+
+        # Second /new from the routed key
+        new_key = manager.create_new_session("feishu.lab", "ou_abc", "feishu.lab.100")
+
+        # Old routed session file should still exist
+        assert manager._get_session_path("feishu.lab.100").exists()
+
+        # New session should exist
+        assert manager._get_session_path(new_key).exists()
+        assert new_key != "feishu.lab.100"
+
+        # Routing should point to the new key
+        assert manager.resolve_session_key("feishu.lab:ou_abc") == new_key
 
 
 # ── Routing table persistence ────────────────────────────────────
@@ -144,7 +177,7 @@ class TestCreateNewSession:
 
 class TestRoutingPersistence:
     def test_save_and_load(self, manager):
-        table = {"feishu:ou_abc": "feishu:ou_abc_123", "cli:direct": "cli:direct_456"}
+        table = {"feishu:ou_abc": "feishu.123", "cli:direct": "cli.456"}
         manager._save_routing(table)
 
         loaded = manager._load_routing()

@@ -970,8 +970,8 @@ class AgentLoop:
                 self._consolidating.discard(session.key)
                 self._prune_consolidation_lock(session.key, lock)
 
-            # Archive the old session file (rename with timestamp suffix)
-            # and create a fresh empty session, same as /new.
+            # Leave old session file in place (usage records stay matched).
+            # Create a new session with a timestamped key and update routing.
             self.sessions.create_new_session(
                 channel=msg.channel, chat_id=msg.chat_id, old_key=session.key,
             )
