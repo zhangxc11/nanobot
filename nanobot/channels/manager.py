@@ -192,6 +192,34 @@ class ChannelManager:
             except Exception as e:
                 logger.error("Error stopping {}: {}", name, e)
     
+    def _resolve_channel(self, name: str) -> BaseChannel | None:
+        """Resolve a channel by exact name, then by prefix match.
+
+        For multi-tenant channels (e.g. ``feishu.lab``, ``feishu.ST``),
+        a bare prefix like ``"feishu"`` will match if there is exactly one
+        registered channel whose name starts with ``"feishu."``.
+        """
+        # 1. Exact match
+        channel = self.channels.get(name)
+        if channel is not None:
+            return channel
+
+        # 2. Prefix match: "feishu" → "feishu.*"
+        prefix = name + "."
+        candidates = [
+            (k, ch) for k, ch in self.channels.items() if k.startswith(prefix)
+        ]
+        if len(candidates) == 1:
+            resolved_name, resolved_ch = candidates[0]
+            logger.debug("Channel '{}' resolved to '{}' via prefix match", name, resolved_name)
+            return resolved_ch
+        if len(candidates) > 1:
+            logger.warning(
+                "Ambiguous channel '{}': matches {} — message dropped",
+                name, [k for k, _ in candidates],
+            )
+        return None
+
     async def _dispatch_outbound(self) -> None:
         """Dispatch outbound messages to the appropriate channel."""
         logger.info("Outbound dispatcher started")
@@ -209,7 +237,7 @@ class ChannelManager:
                     if not msg.metadata.get("_tool_hint") and not self.config.channels.send_progress:
                         continue
                 
-                channel = self.channels.get(msg.channel)
+                channel = self._resolve_channel(msg.channel)
                 if channel:
                     try:
                         await channel.send(msg)

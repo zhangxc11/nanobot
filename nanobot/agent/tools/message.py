@@ -53,14 +53,6 @@ class MessageTool(Tool):
                     "type": "string",
                     "description": "The message content to send"
                 },
-                "channel": {
-                    "type": "string",
-                    "description": "Optional: target channel (telegram, discord, etc.)"
-                },
-                "chat_id": {
-                    "type": "string",
-                    "description": "Optional: target chat/user ID"
-                },
                 "media": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -79,8 +71,11 @@ class MessageTool(Tool):
         media: list[str] | None = None,
         **kwargs: Any
     ) -> str:
-        channel = channel or self._default_channel
-        chat_id = chat_id or self._default_chat_id
+        # Always use the context-set defaults for channel routing.
+        # LLM-supplied channel/chat_id are ignored to prevent misrouting
+        # (e.g. LLM passing "feishu" instead of "feishu.lab").
+        channel = self._default_channel
+        chat_id = self._default_chat_id
         message_id = message_id or self._default_message_id
 
         if not channel or not chat_id:

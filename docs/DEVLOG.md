@@ -820,4 +820,34 @@ file:///absolute/path/to/image.jpg?mime=image/jpeg
 
 ---
 
+## Phase 18: 飞书通道文件附件发送修复 🔜
+
+### 需求来源
+- nanobot REQUIREMENTS.md §十七：飞书通道文件附件发送修复
+- Backlog: 2026-03-01 用户在 feishu.lab 通道发送 docx 文件 3 次均失败
+
+### 根因
+LLM 调用 `message` 工具时传入 `channel: "feishu"` 覆盖了默认的 `"feishu.lab"`，导致 `_dispatch_outbound` 找不到匹配的 channel（注册名为 `feishu.lab`/`feishu.ST`），消息被丢弃。`MessageTool.execute()` 误报成功（fire-and-forget）。
+
+### 任务清单
+
+- 🔜 **T18.1** `channels/manager.py` — `_dispatch_outbound` channel 名称容错
+  - 精确匹配失败时尝试前缀匹配
+  - 唯一匹配 → 使用；多个匹配 → 丢弃并 warning
+  - 添加 debug 日志
+
+- 🔜 **T18.2** `agent/tools/message.py` — 移除 `channel`/`chat_id` 参数暴露
+  - 从 parameters schema 中移除 `channel` 和 `chat_id`
+  - `execute()` 始终使用 `_default_channel` 和 `_default_chat_id`
+  - 保留内部 `set_context()` 机制
+
+- 🔜 **T18.3** 测试验证
+  - 单元测试：_dispatch_outbound 前缀匹配
+  - 单元测试：MessageTool 忽略 LLM 传入的 channel/chat_id
+  - 回归测试：现有测试不受影响
+
+- 🔜 **T18.4** Git 提交 + 验证
+
+---
+
 *本文件随开发进展持续更新。*
