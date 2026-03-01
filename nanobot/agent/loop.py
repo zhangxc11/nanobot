@@ -156,22 +156,32 @@ class AgentLoop:
             self._mcp_connecting = False
 
     def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None,
-                          session_key: str = "") -> None:
-        """Update context for all tools that need routing info."""
-        if message_tool := self.tools.get("message"):
+                          session_key: str = "",
+                          tools: ToolRegistry | None = None) -> None:
+        """Update context for all tools that need routing info.
+
+        Parameters
+        ----------
+        tools:
+            ToolRegistry to operate on.  Falls back to ``self.tools`` if None.
+            For concurrent sessions, pass the cloned registry.
+        """
+        _tools = tools or self.tools
+
+        if message_tool := _tools.get("message"):
             if isinstance(message_tool, MessageTool):
                 message_tool.set_context(channel, chat_id, message_id)
 
-        if spawn_tool := self.tools.get("spawn"):
+        if spawn_tool := _tools.get("spawn"):
             if isinstance(spawn_tool, SpawnTool):
                 spawn_tool.set_context(channel, chat_id)
 
-        if cron_tool := self.tools.get("cron"):
+        if cron_tool := _tools.get("cron"):
             if isinstance(cron_tool, CronTool):
                 cron_tool.set_context(channel, chat_id)
 
         # Audit context: session_key + channel + chat_id
-        self.tools.set_audit_context(
+        _tools.set_audit_context(
             session_key=session_key,
             channel=channel,
             chat_id=chat_id,
@@ -227,6 +237,7 @@ class AgentLoop:
     async def _chat_with_retry(
         self,
         *,
+        provider: LLMProvider | None = None,
         messages: list[dict],
         tools: list[dict] | None,
         model: str,
@@ -238,13 +249,19 @@ class AgentLoop:
 
         Retries up to 5 times with delays of 10s, 20s, 40s, 80s, 160s.
         Non-retryable errors are raised immediately.
+
+        Parameters
+        ----------
+        provider:
+            LLM provider to use.  Falls back to ``self.provider`` if None.
         """
+        _provider = provider or self.provider
         max_retries = 5
         base_delay = 10  # seconds
 
         for attempt in range(max_retries + 1):
             try:
-                return await self.provider.chat(
+                return await _provider.chat(
                     messages=messages,
                     tools=tools,
                     model=model,
@@ -277,6 +294,10 @@ class AgentLoop:
         on_progress: Callable[..., Awaitable[None]] | None = None,
         session: Session | None = None,
         callbacks: DefaultCallbacks | None = None,
+        *,
+        provider: LLMProvider | None = None,
+        model: str | None = None,
+        tools: ToolRegistry | None = None,
     ) -> tuple[str | None, list[str], list[dict]]:
         """Run the agent iteration loop. Returns (final_content, tools_used, messages).
 
@@ -287,7 +308,22 @@ class AgentLoop:
         When *callbacks* is provided, events are dispatched to the callback
         object (on_progress, on_message, on_usage).  If both *on_progress*
         and *callbacks* are given, *callbacks.on_progress* takes precedence.
+
+        Parameters
+        ----------
+        provider:
+            LLM provider to use.  Falls back to ``self.provider`` if None.
+        model:
+            Model name to use.  Falls back to ``self.model`` if None.
+        tools:
+            ToolRegistry to use.  Falls back to ``self.tools`` if None.
+            For concurrent gateway sessions, this is a clone from
+            ``ToolRegistry.clone_for_session()``.
         """
+        _provider = provider or self.provider
+        _model = model or self.model
+        _tools = tools or self.tools
+
         from datetime import datetime
         loop_started_at = datetime.now().isoformat()
         messages = initial_messages
@@ -316,9 +352,10 @@ class AgentLoop:
             iteration += 1
 
             response = await self._chat_with_retry(
+                provider=_provider,
                 messages=messages,
-                tools=self.tools.get_definitions(),
-                model=self.model,
+                tools=_tools.get_definitions(),
+                model=_model,
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
                 progress_fn=_progress_fn,
@@ -337,7 +374,7 @@ class AgentLoop:
                     session_key = session.key if session is not None else "unknown"
                     self.usage_recorder.record(
                         session_key=session_key,
-                        model=self.model,
+                        model=_model,
                         prompt_tokens=response.usage.get("prompt_tokens", 0),
                         completion_tokens=response.usage.get("completion_tokens", 0),
                         total_tokens=response.usage.get("total_tokens", 0),
@@ -361,7 +398,7 @@ class AgentLoop:
                     ]
                 self.detail_logger.log_call(
                     session_key=_detail_session_key,
-                    model=self.model,
+                    model=_model,
                     iteration=iteration,
                     messages=messages,
                     response_content=response.content,
@@ -403,7 +440,7 @@ class AgentLoop:
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
-                    result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    result = await _tools.execute(tool_call.name, tool_call.arguments)
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
@@ -477,7 +514,7 @@ class AgentLoop:
             session_key = session.key if session is not None else "unknown"
             usage_record = {
                 "__usage__": True,
-                "model": self.model,
+                "model": _model,
                 "session_key": session_key,
                 "prompt_tokens": accumulated_usage.get("prompt_tokens", 0),
                 "completion_tokens": accumulated_usage.get("completion_tokens", 0),
@@ -495,7 +532,7 @@ class AgentLoop:
                 accumulated_usage["prompt_tokens"],
                 accumulated_usage["completion_tokens"],
                 accumulated_usage["total_tokens"],
-                self.model,
+                _model,
             )
 
             # Notify callbacks of usage data
@@ -710,8 +747,27 @@ class AgentLoop:
         session_key: str | None = None,
         on_progress: Callable[[str], Awaitable[None]] | None = None,
         callbacks: DefaultCallbacks | None = None,
+        *,
+        provider: LLMProvider | None = None,
+        model: str | None = None,
+        tools: ToolRegistry | None = None,
     ) -> OutboundMessage | None:
-        """Process a single inbound message and return the response."""
+        """Process a single inbound message and return the response.
+
+        Parameters
+        ----------
+        provider:
+            LLM provider to use.  Falls back to ``self.provider`` if None.
+        model:
+            Model name to use.  Falls back to ``self.model`` if None.
+        tools:
+            ToolRegistry to use.  Falls back to ``self.tools`` if None.
+            For concurrent gateway sessions, pass a cloned registry.
+        """
+        _provider = provider or self.provider
+        _model = model or self.model
+        _tools = tools or self.tools
+
         # System messages: parse origin from chat_id ("channel:chat_id")
         if msg.channel == "system":
             channel, chat_id = (msg.chat_id.split(":", 1) if ":" in msg.chat_id
@@ -720,7 +776,7 @@ class AgentLoop:
             key = f"{channel}:{chat_id}"
             session = self.sessions.get_or_create(key)
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"),
-                                   session_key=key)
+                                   session_key=key, tools=_tools)
             history = session.get_history(max_messages=self.memory_window)
             messages = self.context.build_messages(
                 history=history,
@@ -732,6 +788,7 @@ class AgentLoop:
 
             final_content, _, all_msgs = await self._run_agent_loop(
                 messages, session=session, callbacks=callbacks,
+                provider=_provider, model=_model, tools=_tools,
             )
             self.sessions.update_metadata(session)
             return OutboundMessage(channel=channel, chat_id=chat_id,
@@ -756,7 +813,10 @@ class AgentLoop:
                     if snapshot:
                         temp = Session(key=session.key)
                         temp.messages = list(snapshot)
-                        if not await self._consolidate_memory(temp, archive_all=True):
+                        if not await self._consolidate_memory(
+                            temp, archive_all=True,
+                            provider=_provider, model=_model,
+                        ):
                             return OutboundMessage(
                                 channel=msg.channel, chat_id=msg.chat_id,
                                 content="Memory archival failed, session not cleared. Please try again.",
@@ -801,7 +861,9 @@ class AgentLoop:
             async def _consolidate_and_unlock():
                 try:
                     async with lock:
-                        await self._consolidate_memory(session)
+                        await self._consolidate_memory(
+                            session, provider=_provider, model=_model,
+                        )
                 finally:
                     self._consolidating.discard(session.key)
                     self._prune_consolidation_lock(session.key, lock)
@@ -813,8 +875,8 @@ class AgentLoop:
             self._consolidation_tasks.add(_task)
 
         self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"),
-                              session_key=key)
-        if message_tool := self.tools.get("message"):
+                              session_key=key, tools=_tools)
+        if message_tool := _tools.get("message"):
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
 
@@ -840,6 +902,7 @@ class AgentLoop:
         final_content, _, all_msgs = await self._run_agent_loop(
             initial_messages, on_progress=on_progress or _bus_progress,
             session=session, callbacks=callbacks,
+            provider=_provider, model=_model, tools=_tools,
         )
 
         if final_content is None:
@@ -851,7 +914,7 @@ class AgentLoop:
         # Messages already persisted in realtime; just update metadata.
         self.sessions.update_metadata(session)
 
-        if message_tool := self.tools.get("message"):
+        if message_tool := _tools.get("message"):
             if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
                 return None
 
@@ -880,10 +943,14 @@ class AgentLoop:
             session.messages.append(entry)
         session.updated_at = datetime.now()
 
-    async def _consolidate_memory(self, session, archive_all: bool = False) -> bool:
+    async def _consolidate_memory(self, session, archive_all: bool = False,
+                                  provider: LLMProvider | None = None,
+                                  model: str | None = None) -> bool:
         """Delegate to MemoryStore.consolidate(). Returns True on success."""
+        _provider = provider or self.provider
+        _model = model or self.model
         return await MemoryStore(self.workspace).consolidate(
-            session, self.provider, self.model,
+            session, _provider, _model,
             archive_all=archive_all, memory_window=self.memory_window,
         )
 
