@@ -253,6 +253,7 @@ class AgentLoop:
         model: str,
         temperature: float,
         max_tokens: int,
+        reasoning_effort: str | None = None,
         progress_fn: Callable[..., Awaitable[None]] | None = None,
     ):
         """Call provider.chat() with exponential backoff for transient errors.
@@ -264,6 +265,8 @@ class AgentLoop:
         ----------
         provider:
             LLM provider to use.  Falls back to ``self.provider`` if None.
+        reasoning_effort:
+            Optional reasoning effort hint passed to the provider.
         """
         _provider = provider or self.provider
         max_retries = 5
@@ -271,13 +274,16 @@ class AgentLoop:
 
         for attempt in range(max_retries + 1):
             try:
-                return await _provider.chat(
+                kwargs: dict = dict(
                     messages=messages,
                     tools=tools,
                     model=model,
                     temperature=temperature,
                     max_tokens=max_tokens,
                 )
+                if reasoning_effort is not None:
+                    kwargs["reasoning_effort"] = reasoning_effort
+                return await _provider.chat(**kwargs)
             except Exception as e:
                 if not self._is_retryable(e) or attempt >= max_retries:
                     raise
