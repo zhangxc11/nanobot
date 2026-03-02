@@ -988,4 +988,111 @@ LLM 调用 `message` 工具时传入 `channel: "feishu"` 覆盖了默认的 `"fe
 
 ---
 
+## Phase 22: Merge main → local (2026-03-02)
+
+> 目的：同步 upstream main 的最新改动到 local 分支
+> 合并提交：`fa3c817` | 修复提交：`6e34d60`, `59ce2bf`
+
+### 背景
+
+local 分支长期独立开发（Phase 1~21），积累了大量架构差异。upstream main 持续更新，需要定期合并以获取 bug fix 和新功能。
+
+### 冲突文件与解决策略
+
+共 **9 个文件** 产生冲突，以下记录每个冲突的取舍决策：
+
+#### 1. `nanobot/agent/loop.py` (8 处冲突) — 核心差异最大
+
+| 冲突点 | Upstream 方案 | Local 方案 | 取舍 |
+|--------|--------------|-----------|------|
+| 并发模型 | `_dispatch()` + `_processing_lock` 串行化 | `run()` 内 `SessionWorker` 并发 task | **保留 local** — 每 session 独立 task，性能更好 |
+| `/stop` 实现 | `_handle_stop()` 操作 `_active_tasks` | `run()` 内 inline 取消 `SessionWorker.task` | **保留 local** — `_handle_stop` 保留为 legacy stub |
+| `reasoning_effort` | 新增参数传递到 `_chat_with_retry` | 不存在 | **合入 upstream** — 新增到 `_chat_with_retry` 签名 |
+| `finish_reason=error` | `_run_agent_loop` 中检测 error response | 不存在 | **合入 upstream** — 防止 error 污染 context |
+| `thinking_blocks` | `_run_agent_loop` 中处理 thinking blocks | 不存在 | **合入 upstream** — 支持 Claude thinking |
+| `_consolidate_memory` 签名 | `(self, session, archive_all)` | `(self, session, archive_all, provider, model)` | **保留 local** — 支持 per-session provider |
+| `/new` 行为 | 先 archive 再 clear | 直接 `create_new_session()` 不 archive | **保留 local** — 快速切换，archive 用 `/flush` |
+| `_get_consolidation_lock` | 新增 helper 方法 | 使用 `_consolidation_locks.setdefault()` | **保留 local** — 修复残留调用 |
+
+#### 2. `nanobot/cli/commands.py` (5 处冲突)
+
+| 冲突点 | 取舍 |
+|--------|------|
+| Provider 初始化 | **保留 local** — 使用 `ProviderPool` 多 provider 支持 |
+| Logging | **保留 local** — loguru + usage/detail/audit logger |
+| AgentLoop 构造 | **保留 local** — 传入 `reasoning_effort` 等额外参数 |
+| 输出格式 | **保留 local** — 自定义 welcome banner |
+| Config 加载 | **保留 local** — 支持 `providers[]` 数组配置 |
+
+#### 3. `nanobot/session/manager.py` (3 处冲突)
+
+| 冲突点 | 取舍 |
+|--------|------|
+| `append_message` | **保留 local** — realtime persist + `_trim_incomplete_tool_tail` |
+| `create_new_session` | **保留 local** — 反转归档方向（旧文件不动，新文件新 key） |
+| Session routing | **保留 local** — `resolve_session_key` + routing table |
+
+#### 4. `nanobot/agent/context.py` (1 处冲突)
+
+- **保留 local** — `thinking_blocks` 过滤逻辑在 `build_messages` 中
+
+#### 5. `nanobot/agent/tools/registry.py` (1 处冲突)
+
+- **保留 local** — `clone()` / `clone_for_session()` 方法，支持并发 session 隔离
+
+#### 6. `nanobot/agent/tools/shell.py` (1 处冲突)
+
+- **保留 local** — `audit_logger` 集成，记录所有 shell 命令执行
+
+#### 7. `nanobot/channels/feishu.py` (1 处冲突)
+
+- **保留 local** — 飞书 SDK (`lark_oapi`) 集成，支持 WebSocket 长连接
+
+#### 8. `nanobot/channels/manager.py` (1 处冲突)
+
+- **合入 upstream** — Matrix channel 支持 + **保留 local** — ChannelManager 架构
+
+#### 9. `nanobot/channels/telegram.py` (1 处冲突)
+
+- **保留 local** — `session_key` 支持（区分群组/私聊）
+
+### 从 Upstream 合入的新功能
+
+| 功能 | 说明 |
+|------|------|
+| Matrix channel | 新增 `channels/matrix.py`，需要 `nh3` 依赖 |
+| `thinking_blocks` 支持 | Claude 3.5+ 的 extended thinking 处理 |
+| `finish_reason=error` 防护 | 检测 API error response，防止污染 session context |
+| `reasoning_effort` 参数 | 传递给 provider，控制推理深度 |
+| `_consolidate_memory` 返回值 | 返回 `bool` 表示成功/失败 |
+
+### 测试修复
+
+| 测试文件 | 修改内容 |
+|----------|---------|
+| `test_task_cancel.py` | 移除 `_dispatch` / `_processing_lock` 测试，新增并发 session 模型测试 |
+| `test_message_tool_suppress.py` | 更新为 local 的 channel override 行为（MessageTool 忽略 LLM 指定的 channel） |
+| `test_consolidate_offset.py` | 修复 mock 签名（`**kwargs`），替换 `/new` archival 测试为 local 的 `/new`（无 archive）+ `/flush` 测试 |
+
+### 最终测试结果
+
+```
+329 passed, 0 failed (excluding test_matrix_channel.py — needs nh3 dep)
+```
+
+### 关键架构差异总结（供后续 merge 参考）
+
+| 维度 | Upstream (main) | Local |
+|------|----------------|-------|
+| 并发模型 | `_dispatch` + `_processing_lock` | `SessionWorker` per-session task |
+| Provider | 单 provider | `ProviderPool` 多 provider + per-session 切换 |
+| `/new` 行为 | archive → clear | 直接 `create_new_session()`（无 archive） |
+| MessageTool routing | 尊重 LLM 指定的 channel | 强制使用 context channel（防 misroute） |
+| Session 持久化 | batch save | realtime persist (`append_message`) |
+| Logging | stdlib logging | loguru + usage/detail/audit 三层 logger |
+| 飞书 | HTTP polling | SDK WebSocket 长连接 |
+| Tool 隔离 | 共享 registry | `clone_for_session()` 每 session 独立 |
+
+---
+
 *本文件随开发进展持续更新。*
