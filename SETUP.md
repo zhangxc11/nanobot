@@ -254,7 +254,54 @@ bash restart.sh all
 
 ---
 
-## 七、常见问题
+## 七、初始化 Agent 记忆
+
+首次部署完成后，需要将以下关键运维规则写入 `~/.nanobot/workspace/memory/MEMORY.md`，确保 agent 在所有 session 中遵守这些约束。
+
+可以手动编辑，也可以在首次对话中让 agent 自行记录。
+
+### 需要写入的内容
+
+将以下内容追加到 `MEMORY.md` 的合适位置：
+
+```markdown
+## Preferences
+
+- 🔧 **所有代码开发严格遵循 `dev-workflow` skill** — 文档先行（需求/架构/DEVLOG）、任务拆解、逐步开发、测试验证、Git 版本管理
+
+## Important Notes
+
+### ⚠️ 配置文件安全
+- `~/.nanobot/config.json` 含敏感信息（API Key、飞书 appSecret 等），**严禁用 LLM 直接读取完整内容**
+- 需要查看配置时，只读取特定字段（如 `jq '.provider.name' config.json`）
+
+### ⚠️ 飞书/Gateway 自重启禁令 & 服务重启说明
+- 飞书等 IM channel 运行在 `nanobot gateway` 进程内，agent **不能自己重启 gateway**（自杀后无法复活）
+- 重启 gateway 应**通过 restart-gateway skill 委托 web-chat worker 代为执行**：
+  - `bash ~/.nanobot/workspace/skills/restart-gateway/scripts/restart_gateway.sh`
+  - 详见 `skills/restart-gateway/SKILL.md`
+- 重启 web-chat 服务（webserver/worker）使用：
+  - `bash ~/.nanobot/workspace/web-chat/restart.sh all|webserver|worker|stop|status`
+  - 详见 `skills/restart-webchat/SKILL.md`
+- **`nanobot gateway` 没有 `--daemonize` 选项**，脚本使用 Python double-fork 方式后台启动
+
+### ⚠️ 开发模式：通过 web-chat 执行 gateway 代码修改
+- 修改 gateway 相关代码时，应先完成文档和任务拆解，然后通过 web-chat session 发送开发指令
+- 这样 worker 独立于 gateway 运行，避免改代码时把 gateway 改挂导致无法继续
+```
+
+### 为什么需要这些规则
+
+| 规则 | 原因 |
+|------|------|
+| dev-workflow | 防止 agent 跳过文档直接写代码，导致项目缺乏可追溯性 |
+| 配置文件安全 | config.json 含 API Key 等敏感信息，agent 读取后会出现在 session 日志中 |
+| Gateway 自重启禁令 | IM 通道的 agent 运行在 gateway 进程内，kill gateway = kill 自己 |
+| 开发模式 | 避免 agent 在 gateway 进程中修改 gateway 代码导致进程崩溃 |
+
+---
+
+## 八、常见问题
 
 ### Q: `nanobot gateway` 启动后立即退出？
 检查 `config.json` 中的 channel 配置是否正确，特别是 `appId`/`appSecret`。查看日志：
@@ -278,7 +325,7 @@ pip install lark-oapi
 
 ---
 
-## 八、相关文档
+## 九、相关文档
 
 - [nanobot 核心 README](https://github.com/zhangxc11/nanobot/blob/main/README.md)
 - [nanobot 上游仓库](https://github.com/HKUDS/nanobot)
