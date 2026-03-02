@@ -147,7 +147,21 @@ pip install lark-oapi requests
 
 飞书 Skill 从 `~/.nanobot/config.json` 的 `channels.feishu` 配置中读取应用凭证，需要在飞书开放平台创建应用并配置：
 - `appId` / `appSecret`
-- 开通权限：`im:message`（消息读写）、`docx:document`（文档操作，feishu-docs 需要）
+
+飞书应用需开通的权限（按 Skill 分类）：
+
+| 权限 scope | 说明 | 需要的 Skill |
+|------------|------|-------------|
+| `im:message` | 获取与发送单聊、群组消息 | gateway, parser, messenger |
+| `im:message:readonly` | 读取消息 | parser |
+| `im:message.group_msg` | 获取群组消息 | gateway, parser |
+| `im:message.p2p_msg:readonly` | 读取用户发给机器人的单聊消息 | gateway, parser |
+| `im:resource` | 上传图片/文件资源 | messenger |
+| `docx:document:create` | 创建文档 | feishu-docs |
+| `docx:document:write_only` | 写入文档 | feishu-docs |
+| `docx:document:readonly` | 读取文档 | feishu-docs |
+| `drive:drive:comment` | 批注操作（读取/创建/回复/解决） | feishu-docs |
+| `drive:drive:permission` | 权限管理（添加协作者） | feishu-docs |
 
 ### 3.5 启动 Gateway（IM 通道）
 
