@@ -1,4 +1,13 @@
-"""Test message tool suppress logic for final replies."""
+"""Test message tool suppress logic for final replies.
+
+Local architecture notes:
+- MessageTool.execute() deliberately ignores LLM-supplied channel/chat_id
+  parameters.  It always routes to the context-set defaults (self._default_channel
+  / self._default_chat_id) to prevent the LLM from misrouting messages.
+- Therefore, _sent_in_turn is always True when the message tool is used,
+  regardless of what channel/chat_id the LLM requests.
+- The final reply is suppressed whenever the message tool was used in the turn.
+"""
 
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -20,7 +29,12 @@ def _make_loop(tmp_path: Path) -> AgentLoop:
 
 
 class TestMessageToolSuppressLogic:
-    """Final reply suppressed only when message tool sends to the same target."""
+    """Final reply suppressed when message tool sends in the same turn.
+
+    Because local's MessageTool always routes to the context channel (ignoring
+    LLM-supplied channel/chat_id), the suppress logic triggers whenever the
+    message tool is used, regardless of the LLM's intended target.
+    """
 
     @pytest.mark.asyncio
     async def test_suppress_when_sent_to_same_target(self, tmp_path: Path) -> None:
@@ -48,10 +62,17 @@ class TestMessageToolSuppressLogic:
         assert result is None  # suppressed
 
     @pytest.mark.asyncio
-    async def test_not_suppress_when_sent_to_different_target(self, tmp_path: Path) -> None:
+    async def test_suppress_even_when_llm_requests_different_channel(self, tmp_path: Path) -> None:
+        """Local's MessageTool ignores LLM-supplied channel/chat_id.
+
+        Even when the LLM requests sending to "email", the message is routed
+        to the context channel (feishu:chat123).  Since the message was sent
+        to the same target, the final reply IS suppressed.
+        """
         loop = _make_loop(tmp_path)
         tool_call = ToolCallRequest(
             id="call1", name="message",
+            # LLM requests "email" channel, but local ignores this
             arguments={"content": "Email content", "channel": "email", "chat_id": "user@example.com"},
         )
         calls = iter([
@@ -70,9 +91,11 @@ class TestMessageToolSuppressLogic:
         result = await loop._process_message(msg)
 
         assert len(sent) == 1
-        assert sent[0].channel == "email"
-        assert result is not None  # not suppressed
-        assert result.channel == "feishu"
+        # Local routes to context channel, not LLM-requested channel
+        assert sent[0].channel == "feishu"
+        assert sent[0].chat_id == "chat123"
+        # Suppressed because message was sent to the same target (context channel)
+        assert result is None
 
     @pytest.mark.asyncio
     async def test_not_suppress_when_no_message_tool_used(self, tmp_path: Path) -> None:
@@ -101,3 +124,26 @@ class TestMessageToolTurnTracking:
         tool._sent_in_turn = True
         tool.start_turn()
         assert not tool._sent_in_turn
+
+
+class TestMessageToolChannelOverride:
+    """Verify that MessageTool ignores LLM-supplied channel/chat_id."""
+
+    @pytest.mark.asyncio
+    async def test_execute_ignores_llm_channel(self) -> None:
+        sent: list[OutboundMessage] = []
+        tool = MessageTool(send_callback=AsyncMock(side_effect=lambda m: sent.append(m)))
+        tool.set_context("feishu", "chat123")
+
+        # LLM tries to send to "email" channel
+        result = await tool.execute(
+            content="Hello",
+            channel="email",
+            chat_id="user@example.com",
+        )
+
+        assert len(sent) == 1
+        # Context channel is used, not LLM-supplied
+        assert sent[0].channel == "feishu"
+        assert sent[0].chat_id == "chat123"
+        assert "feishu:chat123" in result

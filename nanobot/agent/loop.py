@@ -963,7 +963,7 @@ class AgentLoop:
         # Slash commands
         cmd = msg.content.strip().lower()
         if cmd == "/flush":
-            lock = self._get_consolidation_lock(session.key)
+            lock = self._consolidation_locks.setdefault(session.key, asyncio.Lock())
             self._consolidating.add(session.key)
             try:
                 async with lock:
