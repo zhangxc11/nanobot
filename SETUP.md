@@ -54,7 +54,7 @@ nanobot --help
 
 ```bash
 # 首次运行，自动创建 ~/.nanobot/ 目录结构
-nanobot init
+nanobot onboard
 
 # 编辑配置文件
 vim ~/.nanobot/config.json
