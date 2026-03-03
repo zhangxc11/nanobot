@@ -125,13 +125,16 @@ python3 worker.py &
 所有 Skill 安装到 `~/.nanobot/workspace/skills/` 目录下。
 
 ```bash
-cd ~/.nanobot/workspace/skills
+cd ~/.nanobot/workspace
 
-# ── 辅助 Skill 集合 ──
+# ── 辅助 Skill 集合（clone 到 workspace 根目录，避免被识别为 skill）──
 git clone git@github.com:zhangxc11/nanobot-skills.git _nanobot-skills
-ln -s _nanobot-skills/dev-workflow dev-workflow
-ln -s _nanobot-skills/restart-gateway restart-gateway
-ln -s _nanobot-skills/restart-webchat restart-webchat
+
+# 软链接到 skills 目录
+cd skills
+ln -s ../_nanobot-skills/dev-workflow dev-workflow
+ln -s ../_nanobot-skills/restart-gateway restart-gateway
+ln -s ../_nanobot-skills/restart-webchat restart-webchat
 
 # ── 飞书 Skills（需要飞书应用凭证）──
 git clone git@github.com:zhangxc11/nanobot-feishu-docs.git feishu-docs
@@ -194,14 +197,14 @@ nohup nanobot gateway > ~/.nanobot/gateway.log 2>&1 &
 │   │   ├── webserver.py           # API 网关 (:8081)
 │   │   ├── worker.py              # Agent 执行器 (:8082)
 │   │   └── restart.sh             # 服务管理脚本
+│   ├── _nanobot-skills/           # nanobot-skills 仓库（被软链接引用）
 │   └── skills/
-│       ├── dev-workflow/           # → _nanobot-skills/dev-workflow
-│       ├── restart-gateway/        # → _nanobot-skills/restart-gateway
-│       ├── restart-webchat/        # → _nanobot-skills/restart-webchat
+│       ├── dev-workflow/           # → ../_nanobot-skills/dev-workflow
+│       ├── restart-gateway/        # → ../_nanobot-skills/restart-gateway
+│       ├── restart-webchat/        # → ../_nanobot-skills/restart-webchat
 │       ├── feishu-docs/            # 飞书文档操作
 │       ├── feishu-messenger/       # 飞书消息发送
-│       ├── feishu-parser/          # 飞书消息解析
-│       └── _nanobot-skills/        # nanobot-skills 仓库（被软链接引用）
+│       └── feishu-parser/          # 飞书消息解析
 ```
 
 ---
@@ -251,7 +254,7 @@ git merge upstream/main    # 或 git rebase upstream/main
 ### 更新 Skills
 
 ```bash
-cd ~/.nanobot/workspace/skills/_nanobot-skills && git pull
+cd ~/.nanobot/workspace/_nanobot-skills && git pull
 cd ~/.nanobot/workspace/skills/feishu-docs && git pull
 cd ~/.nanobot/workspace/skills/feishu-messenger && git pull
 cd ~/.nanobot/workspace/skills/feishu-parser && git pull
