@@ -30,6 +30,9 @@
 | Phase 18: 飞书通道文件附件发送修复 | ✅ 已完成 | local |
 | Phase 19: Gateway 并发执行 + Per-Session Provider | ✅ 已完成 | feat/concurrent-gateway → local |
 | Phase 20: /session 状态查询命令 | ✅ 已完成 | local |
+| Phase 21: /new 归档方向反转 + Session 命名简化 | 🔜 进行中 | local |
+| Phase 22: Merge main → local | ✅ 已完成 | local |
+| Phase 23: LLM 错误响应持久化与前端展示 | ✅ 已完成 | local |
 
 ---
 
@@ -1008,7 +1011,7 @@ local 分支长期独立开发（Phase 1~21），积累了大量架构差异。u
 | 并发模型 | `_dispatch()` + `_processing_lock` 串行化 | `run()` 内 `SessionWorker` 并发 task | **保留 local** — 每 session 独立 task，性能更好 |
 | `/stop` 实现 | `_handle_stop()` 操作 `_active_tasks` | `run()` 内 inline 取消 `SessionWorker.task` | **保留 local** — `_handle_stop` 保留为 legacy stub |
 | `reasoning_effort` | 新增参数传递到 `_chat_with_retry` | 不存在 | **合入 upstream** — 新增到 `_chat_with_retry` 签名 |
-| `finish_reason=error` | `_run_agent_loop` 中检测 error response | 不存在 | **合入 upstream** — 防止 error 污染 context |
+| `finish_reason=error` | `_run_agent_loop` 中检测 error response | 不存在 | **合入 upstream** — 防止 error 污染 context（⚠️ Phase 23 进一步改进：改为存储到 JSONL 但由 get_history Phase 2 过滤） |
 | `thinking_blocks` | `_run_agent_loop` 中处理 thinking blocks | 不存在 | **合入 upstream** — 支持 Claude thinking |
 | `_consolidate_memory` 签名 | `(self, session, archive_all)` | `(self, session, archive_all, provider, model)` | **保留 local** — 支持 per-session provider |
 | `/new` 行为 | 先 archive 再 clear | 直接 `create_new_session()` 不 archive | **保留 local** — 快速切换，archive 用 `/flush` |
@@ -1062,7 +1065,7 @@ local 分支长期独立开发（Phase 1~21），积累了大量架构差异。u
 |------|------|
 | Matrix channel | 新增 `channels/matrix.py`，需要 `nh3` 依赖 |
 | `thinking_blocks` 支持 | Claude 3.5+ 的 extended thinking 处理 |
-| `finish_reason=error` 防护 | 检测 API error response，防止污染 session context |
+| `finish_reason=error` 防护 | 检测 API error response，防止污染 session context（⚠️ Phase 23 改进为存储+过滤方案） |
 | `reasoning_effort` 参数 | 传递给 provider，控制推理深度 |
 | `_consolidate_memory` 返回值 | 返回 `bool` 表示成功/失败 |
 
@@ -1092,6 +1095,39 @@ local 分支长期独立开发（Phase 1~21），积累了大量架构差异。u
 | Logging | stdlib logging | loguru + usage/detail/audit 三层 logger |
 | 飞书 | HTTP polling | SDK WebSocket 长连接 |
 | Tool 隔离 | 共享 registry | `clone_for_session()` 每 session 独立 |
+
+---
+
+## Phase 23: LLM 错误响应持久化与前端展示 (2026-03-03) ✅
+
+> Phase 22 merge 后续修正 | 直接在 local 分支
+> commit: `ea0ed02`
+
+### 背景
+
+Phase 22 合并 upstream 时引入了 `finish_reason="error"` 防护：不存储错误响应到 JSONL。但这导致 web-chat 前端看不到错误信息、SSE 无错误内容。
+
+### 方案
+
+利用 `get_history()` Phase 2 已有的 `"Error calling LLM:"` 前缀过滤机制：
+- 存储到 JSONL（前端可展示） + 自动从 LLM context 过滤（防中毒）
+
+### 任务清单
+
+- ✅ **T23.1** `loop.py` — 错误响应持久化 + callback 通知（`on_message` + `on_progress`）
+- ✅ **T23.2** web-chat `MessageItem.tsx` — 检测错误前缀 → ❌ 图标 + 红色气泡
+- ✅ **T23.3** web-chat `MessageList.module.css` — `.errorBubble` 样式
+- ✅ **T23.4** `test_error_response.py` — 5 个新测试（持久化、历史过滤、callback、默认消息、正常不受影响）
+- ✅ **T23.5** 全量测试 334 passed + 前端构建 + 服务重启
+
+### 影响文件
+
+| 文件 | 改动 |
+|------|------|
+| `nanobot/agent/loop.py` | `finish_reason="error"` 分支重写 |
+| web-chat `MessageItem.tsx` | 错误消息检测与样式化 |
+| web-chat `MessageList.module.css` | 错误气泡 CSS |
+| `tests/test_error_response.py` | 新增 5 个测试 |
 
 ---
 

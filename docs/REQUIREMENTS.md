@@ -1343,4 +1343,56 @@ class GatewayCallbacks(DefaultCallbacks):
 
 ---
 
+## 二十一、LLM 错误响应持久化与前端展示（Phase 23）
+
+### 21.1 需求背景
+
+Phase 22 合并 upstream 时引入了 `finish_reason="error"` 防护逻辑：当 LLM API 返回错误响应时，upstream 选择**不存储**到 session JSONL，以防止 error 消息污染后续 LLM context（#1303）。
+
+但这导致了新问题：
+1. **Web 前端看不到错误信息** — JSONL 中无记录，页面刷新后错误消息消失
+2. **SSE 流无错误内容** — 正常发送 `done` 事件但不含错误文本
+3. **错误只存在于日志** — 用户完全不知道发生了什么
+
+### 21.2 目标
+
+在保持 upstream 的 "防止 context 中毒" 安全机制的同时，让错误消息对用户可见。
+
+### 21.3 设计方案
+
+**核心思路**：利用 `get_history()` Phase 2 的错误消息过滤机制（已有），将错误消息以特定前缀存储到 JSONL。这样：
+- 存储层有记录 → 前端可展示
+- `get_history()` 自动过滤 → 不进入 LLM context
+
+**后端改动（`loop.py`）**：
+1. `finish_reason="error"` 分支中，将错误消息以 `"Error calling LLM: {text}"` 前缀存入 JSONL
+2. 调用 `callbacks.on_message()` 通知前端实时展示
+3. 调用 `on_progress("❌ {text}")` 发送 SSE progress 事件
+
+**前端改动（web-chat `MessageItem.tsx`）**：
+1. 检测 `"Error calling LLM:"` 前缀的 assistant 消息
+2. 剥离前缀，显示干净的错误文本 + ❌ 图标
+3. 错误气泡使用红色调背景和边框
+
+### 21.4 安全机制
+
+- `get_history()` Phase 2 已有过滤逻辑：`m["content"].startswith("Error calling LLM:")` 的 assistant 消息自动剥离
+- 此机制在 Phase 8 实现（Session 自修复），Phase 22 合并 upstream 时保留
+- 因此错误消息**永远不会进入 LLM context**，不会造成 upstream 担心的 "permanent 400 loops"
+
+### 21.5 影响范围
+
+| 文件 | 改动 |
+|------|------|
+| `nanobot/agent/loop.py` | `finish_reason="error"` 分支：存储 + callback 通知 |
+| web-chat `MessageItem.tsx` | 错误消息检测与样式化（❌ 图标 + 红色气泡） |
+| web-chat `MessageList.module.css` | `.errorBubble` / `.errorIcon` / `.errorText` 样式 |
+| `tests/test_error_response.py` | 5 个新测试 |
+
+### 21.6 与 Phase 22 的关系
+
+本 Phase 是 Phase 22 merge 的后续修正。Phase 22 合并时对 `finish_reason="error"` 取舍为 "合入 upstream"，但 upstream 的方案（不存储）与 local 的 web-chat 前端配合不佳。本 Phase 在保留 upstream 安全意图的基础上，改进了用户体验。
+
+---
+
 *本文档将随需求迭代持续更新。*
