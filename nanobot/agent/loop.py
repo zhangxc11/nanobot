@@ -491,11 +491,25 @@ class AgentLoop:
                             await _progress_fn(f"📝 User: {injected[:80]}")
             else:
                 clean = self._strip_think(response.content)
-                # Don't persist error responses to session history — they can
-                # poison the context and cause permanent 400 loops (#1303).
+                # Error responses: persist to JSONL for display but prefix
+                # with "Error calling LLM:" so get_history() Phase 2 strips
+                # them from future LLM context (prevents poison loops #1303).
                 if response.finish_reason == "error":
                     logger.error("LLM returned error: {}", (clean or "")[:200])
-                    final_content = clean or "Sorry, I encountered an error calling the AI model."
+                    error_text = clean or "Sorry, I encountered an error calling the AI model."
+                    final_content = error_text
+                    prefixed = f"Error calling LLM: {error_text}"
+                    error_msg = {
+                        "role": "assistant",
+                        "content": prefixed,
+                        "timestamp": datetime.now().isoformat(),
+                    }
+                    if session is not None:
+                        self.sessions.append_message(session, error_msg)
+                    if callbacks is not None:
+                        await callbacks.on_message(error_msg)
+                    if _progress_fn:
+                        await _progress_fn(f"❌ {error_text}")
                     break
                 final_content = clean
                 # Append the final assistant message so it gets persisted
