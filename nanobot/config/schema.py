@@ -243,6 +243,7 @@ class ProviderConfig(Base):
     api_key: str = ""
     api_base: str | None = None
     extra_headers: dict[str, str] | None = None  # Custom headers (e.g. APP-Code for AiHubMix)
+    preferred_model: str | None = None  # Preferred default model for this provider (overrides built-in defaults)
 
 
 class ProvidersConfig(Base):

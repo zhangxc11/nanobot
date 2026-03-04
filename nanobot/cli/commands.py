@@ -238,21 +238,26 @@ def _make_provider(config: Config):
 
         try:
             if spec.is_oauth and spec.name == "openai_codex":
-                instance = OpenAICodexProvider(default_model=default_model if spec.name == default_provider_name else "openai-codex/codex-mini-latest")
+                codex_model = p.preferred_model or (default_model if spec.name == default_provider_name else "openai-codex/codex-mini-latest")
+                instance = OpenAICodexProvider(default_model=codex_model)
                 model_for_entry = instance.get_default_model()
             elif spec.is_oauth and spec.name == "github_copilot":
-                instance = OpenAICodexProvider(default_model=default_model if spec.name == default_provider_name else "github_copilot/claude-sonnet-4")
+                copilot_model = p.preferred_model or (default_model if spec.name == default_provider_name else "github_copilot/claude-sonnet-4")
+                instance = OpenAICodexProvider(default_model=copilot_model)
                 model_for_entry = instance.get_default_model()
             elif spec.name == "custom":
+                custom_default = p.preferred_model or (default_model if spec.name == default_provider_name else "custom-model")
                 instance = CustomProvider(
                     api_key=p.api_key,
                     api_base=p.api_base or "http://localhost:8000/v1",
-                    default_model=default_model if spec.name == default_provider_name else "custom-model",
+                    default_model=custom_default,
                 )
                 model_for_entry = instance.get_default_model()
             else:
                 # Determine the model for this provider
-                if spec.name == default_provider_name:
+                if p.preferred_model:
+                    model_for_entry = p.preferred_model
+                elif spec.name == default_provider_name:
                     model_for_entry = default_model
                 else:
                     # Use a sensible default model per provider type
