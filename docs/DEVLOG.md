@@ -1131,4 +1131,33 @@ Phase 22 合并 upstream 时引入了 `finish_reason="error"` 防护：不存储
 
 ---
 
+## Phase 24: ProviderConfig preferred_model 字段
+
+> 日期：2026-03-04
+> 需求：web-chat REQUIREMENTS.md §三十三 (Issue #46)
+
+### 改动
+
+- `config/schema.py`: `ProviderConfig` 新增 `preferred_model: str | None = None`
+- `cli/commands.py`: `_make_provider()` 优先使用 `p.preferred_model`，fallback 到硬编码默认值
+- 适用于所有 provider 类型：LiteLLM、Custom、OAuth (Codex/Copilot)
+- 向后兼容：`None` 表示使用现有默认行为
+
+### 任务清单
+
+- ✅ **T24.1** `config/schema.py` — 新增 `preferred_model` 字段
+- ✅ **T24.2** `cli/commands.py` — `_make_provider()` 使用 `preferred_model`
+- ✅ **T24.3** 334 tests passed
+- ✅ **T24.4** `docs/LOCAL_CHANGES.md` 更新
+
+### 影响文件
+
+| 文件 | 改动 |
+|------|------|
+| `nanobot/config/schema.py` | `preferred_model: str \| None = None` |
+| `nanobot/cli/commands.py` | OAuth/Custom/LiteLLM 三处 preferred_model 优先 |
+| `docs/LOCAL_CHANGES.md` | Phase 24 记录 |
+
+---
+
 *本文件随开发进展持续更新。*
