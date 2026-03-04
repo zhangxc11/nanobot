@@ -505,4 +505,29 @@ quality=30 → 返回（best effort）
 
 ---
 
+## Phase 24: ProviderConfig preferred_model 字段
+
+> Commit: `2f62f59` | 日期: 2026-03-04
+
+### 改动
+- `config/schema.py`: `ProviderConfig` 新增 `preferred_model: str | None = None` 字段
+- `cli/commands.py`: `_make_provider()` 优先使用 `p.preferred_model`，fallback 到 `_PROVIDER_DEFAULT_MODELS` 硬编码值
+- 适用于所有 provider 类型：LiteLLM、Custom、OAuth (Codex/Copilot)
+- 向后兼容：`None` 表示使用现有默认行为
+
+### 使用方式
+在 `config.json` 中为 provider 配置 `preferredModel`：
+```json
+{
+  "providers": {
+    "gemini": {
+      "apiKey": "...",
+      "preferredModel": "gemini-2.5-pro"
+    }
+  }
+}
+```
+
+---
+
 *本文档随 local 分支改动持续更新。*
