@@ -1441,4 +1441,255 @@ async def execute(
 
 ---
 
+## 十一、spawn subagent 能力增强（Phase 26）
+
+> 需求：REQUIREMENTS.md §二十四
+
+### 11.1 概述
+
+增强 `SubagentManager._run_subagent()` 的能力，使 subagent 从"玩具级"提升为可靠的后台任务执行器。改动集中在 `subagent.py`，不影响主 agent loop。
+
+### 11.2 当前架构
+
+```
+SpawnTool.execute(task, label)
+    │
+    └── SubagentManager.spawn(task, label, origin_*, session_key)
+            │
+            └── asyncio.create_task(_run_subagent(...))
+                    │
+                    ├── 构建独立 ToolRegistry（无 message/spawn/cron）
+                    ├── 构建 system prompt（含 skills summary）
+                    ├── while iteration < 15:    ← 硬编码
+                    │       provider.chat()       ← 无重试
+                    │       tools.execute()       ← 应该能工作
+                    │       纯内存 messages       ← 不持久化
+                    │
+                    └── _announce_result() → bus.publish_inbound()
+```
+
+### 11.3 改造后架构
+
+```
+SpawnTool.execute(task, label, max_iterations?, persist?)
+    │
+    └── SubagentManager.spawn(task, ..., max_iterations?, persist?)
+            │
+            └── asyncio.create_task(_run_subagent(...))
+                    │
+                    ├── 构建独立 ToolRegistry
+                    ├── 构建 system prompt
+                    ├── [persist] 创建 session: subagent_{task_id}
+                    │
+                    ├── while iteration < effective_max_iterations:
+                    │       │
+                    │       ├── budget alert 注入（复用 _budget_alert_threshold）
+                    │       ├── _chat_with_retry()   ← 新增重试
+                    │       ├── tools.execute()
+                    │       ├── [persist] session.append_message()
+                    │       └── usage_recorder.record()  ← 新增
+                    │
+                    └── _announce_result() → bus.publish_inbound()
+```
+
+### 11.4 SpawnTool parameters 扩展
+
+```python
+@property
+def parameters(self) -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "task": {
+                "type": "string",
+                "description": "The task for the subagent to complete",
+            },
+            "label": {
+                "type": "string",
+                "description": "Optional short label for the task (for display)",
+            },
+            "max_iterations": {
+                "type": "integer",
+                "description": (
+                    "Maximum tool call iterations for the subagent (default 30, max 100). "
+                    "Use higher values for complex multi-step tasks."
+                ),
+            },
+            "persist": {
+                "type": "boolean",
+                "description": (
+                    "If true, persist subagent messages to a session file for debugging. "
+                    "Default false."
+                ),
+            },
+        },
+        "required": ["task"],
+    }
+```
+
+### 11.5 SubagentManager 改造要点
+
+#### 11.5.1 构造函数扩展
+
+```python
+class SubagentManager:
+    def __init__(
+        self,
+        ...,
+        default_max_iterations: int = 30,
+        usage_recorder: "UsageRecorder | None" = None,
+        session_manager: "SessionManager | None" = None,
+    ):
+        self.default_max_iterations = default_max_iterations
+        self.usage_recorder = usage_recorder
+        self.session_manager = session_manager
+```
+
+#### 11.5.2 spawn() 签名扩展
+
+```python
+async def spawn(
+    self,
+    task: str,
+    label: str | None = None,
+    ...,
+    max_iterations: int | None = None,
+    persist: bool = False,
+) -> str:
+```
+
+#### 11.5.3 _run_subagent() 改造
+
+核心循环改造：
+
+```python
+MAX_SUBAGENT_ITERATIONS = 100
+
+async def _run_subagent(self, task_id, task, label, origin,
+                         max_iterations, persist):
+    effective_max = min(max_iterations or self.default_max_iterations,
+                        MAX_SUBAGENT_ITERATIONS)
+
+    # [persist] 创建 session
+    session = None
+    if persist and self.session_manager:
+        session_key = f"subagent:{task_id}"
+        session = self.session_manager.get_or_create(session_key)
+        # 写入 user 消息
+        self.session_manager.append_message(session, {
+            "role": "user", "content": task,
+            "timestamp": datetime.now().isoformat()
+        })
+
+    # 主循环
+    while iteration < effective_max:
+        iteration += 1
+
+        # Budget alert
+        remaining = effective_max - iteration
+        threshold = _budget_alert_threshold(effective_max)
+        if remaining == threshold:
+            messages.append({"role": "system", "content": f"⚠️ Budget alert: ..."})
+
+        # LLM call with retry
+        response = await self._chat_with_retry(messages, tools)
+
+        # Usage recording
+        if response.usage and self.usage_recorder:
+            self.usage_recorder.record(
+                session_key=f"subagent:{task_id}",
+                model=self.model,
+                prompt_tokens=response.usage.get("prompt_tokens", 0),
+                ...
+            )
+
+        # Tool execution + message building
+        ...
+
+        # [persist] 持久化消息
+        if session and self.session_manager:
+            self.session_manager.append_message(session, assistant_msg)
+            for tool_msg in tool_results:
+                self.session_manager.append_message(session, tool_msg)
+```
+
+#### 11.5.4 _chat_with_retry() 方法
+
+独立实现（不依赖 AgentLoop），逻辑简化版：
+
+```python
+async def _chat_with_retry(self, messages, tools, max_retries=3):
+    """LLM call with exponential backoff retry for transient errors."""
+    delays = [5, 10, 20]
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            return await self.provider.chat(
+                messages=messages,
+                tools=tools.get_definitions(),
+                model=self.model,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                reasoning_effort=self.reasoning_effort,
+            )
+        except Exception as e:
+            if attempt < max_retries and _is_retryable(e):
+                delay = delays[min(attempt, len(delays) - 1)]
+                logger.warning("Subagent LLM retry {}/{} after {}s: {}",
+                              attempt + 1, max_retries, delay, e)
+                await asyncio.sleep(delay)
+                last_error = e
+            else:
+                raise
+    raise last_error  # unreachable but type-safe
+```
+
+`_is_retryable()` 复用 `agent/loop.py` 中已有的静态方法（提取为模块级函数或导入）。
+
+### 11.6 与现有系统的交互
+
+| 系统 | 交互方式 | 说明 |
+|------|----------|------|
+| UsageRecorder | 直接调用 | subagent token 消耗记入 `subagent:{task_id}` session |
+| SessionManager | 直接调用 | persist 模式下写入 `subagent_{task_id}.jsonl` |
+| MessageBus | _announce_result | 完成后通知主 agent（已有机制，不变） |
+| AuditLogger | 通过 ToolRegistry | subagent 的工具调用也被审计（ToolRegistry 已有拦截） |
+| ProviderPool | 通过 self.provider | 使用主 agent 的 provider/model（不支持 per-subagent 切换） |
+
+### 11.7 死锁分析
+
+**不存在死锁风险**：
+- subagent 在 AgentLoop 进程内以 `asyncio.Task` 运行
+- 不经过 web-chat worker 的 HTTP 请求队列
+- 不经过 MessageBus.inbound（只通过 bus 发送结果通知）
+- 与 B2（worker 并发限制）完全独立
+
+### 11.8 测试设计
+
+| 测试 | 说明 |
+|------|------|
+| test_default_max_iterations | 默认 30 轮 |
+| test_custom_max_iterations | 自定义轮数 |
+| test_max_iterations_cap | 超过 100 被限制 |
+| test_budget_alert_injected | budget alert 消息注入 |
+| test_retry_on_rate_limit | rate limit 时重试 |
+| test_retry_exhausted | 重试耗尽后抛异常 |
+| test_usage_recorded | token 消耗写入 SQLite |
+| test_persist_session | persist 模式下 JSONL 文件生成 |
+| test_persist_false_no_file | 默认不生成文件 |
+| test_tool_execution_works | write_file + read_file 验证 |
+| test_announce_result | 完成后通知主 agent |
+| test_spawn_parameters | SpawnTool 参数 schema 正确 |
+
+### 11.9 文件变更清单
+
+| 文件 | 改动类型 | 说明 |
+|------|----------|------|
+| `agent/subagent.py` | 修改 | 核心改造：max_iterations 可配 + persist + budget alert + retry + usage |
+| `agent/tools/spawn.py` | 修改 | parameters 新增 max_iterations/persist；execute 透传 |
+| `agent/loop.py` | 修改 | SubagentManager 构造时传入 usage_recorder + session_manager（~2 行） |
+| `tests/test_subagent.py` | 新增 | ~12 个测试 |
+
+---
+
 *本文档将随开发进展持续更新。*

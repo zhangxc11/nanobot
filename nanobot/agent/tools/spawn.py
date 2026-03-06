@@ -1,4 +1,7 @@
-"""Spawn tool for creating background subagents."""
+"""Spawn tool for creating background subagents.
+
+Phase 26: Added max_iterations and persist parameters.
+"""
 
 from typing import TYPE_CHECKING, Any
 
@@ -48,11 +51,32 @@ class SpawnTool(Tool):
                     "type": "string",
                     "description": "Optional short label for the task (for display)",
                 },
+                "max_iterations": {
+                    "type": "integer",
+                    "description": (
+                        "Maximum tool call iterations for the subagent (default 30, max 100). "
+                        "Use higher values for complex multi-step tasks."
+                    ),
+                },
+                "persist": {
+                    "type": "boolean",
+                    "description": (
+                        "If true, persist subagent messages to a session file for debugging. "
+                        "Default false."
+                    ),
+                },
             },
             "required": ["task"],
         }
 
-    async def execute(self, task: str, label: str | None = None, **kwargs: Any) -> str:
+    async def execute(
+        self,
+        task: str,
+        label: str | None = None,
+        max_iterations: int | None = None,
+        persist: bool = False,
+        **kwargs: Any,
+    ) -> str:
         """Spawn a subagent to execute the given task."""
         return await self._manager.spawn(
             task=task,
@@ -60,6 +84,8 @@ class SpawnTool(Tool):
             origin_channel=self._origin_channel,
             origin_chat_id=self._origin_chat_id,
             session_key=self._session_key,
+            max_iterations=max_iterations,
+            persist=persist,
         )
 
     def clone(self) -> "SpawnTool":

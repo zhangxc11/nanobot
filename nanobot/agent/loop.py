@@ -108,6 +108,8 @@ class AgentLoop:
             web_proxy=web_proxy,
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
+            usage_recorder=usage_recorder,
+            session_manager=self.sessions,
         )
 
         self._running = False

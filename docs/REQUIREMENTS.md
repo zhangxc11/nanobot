@@ -1517,4 +1517,97 @@ if remaining == budget_alert_threshold:
 
 ---
 
+## 二十四、spawn subagent 能力增强（Phase 26）
+
+### 24.1 需求背景
+
+spawn subagent 是 nanobot 的后台任务执行机制，允许主 agent 将独立任务委托给子 agent 在后台完成。但在 eval-bench 批量构造的实际使用中，spawn 几乎无法胜任需要文件 I/O 的任务，导致不得不用三层编排（主控 → 调度 session → worker session）的 workaround。
+
+**当前 spawn 的限制**：
+1. **15 轮硬限制**：`max_iterations = 15` 硬编码在 `subagent.py` 中，稍复杂的任务根本完不成
+2. **无 session 持久化**：纯内存运行，所有消息在 subagent 完成后丢失，无法回溯调试
+3. **工具可能不生效**：用户反馈 write_file/exec 调用不生效（需验证根因）
+4. **无迭代预算提醒**：subagent 不享有主 agent loop 的 budget alert 机制
+5. **无 LLM 重试**：subagent 的 `provider.chat()` 调用无重试机制，遇到 rate limit 直接失败
+6. **无 usage 记录**：subagent 的 token 消耗不被记录到 analytics.db
+
+**对编排简化的帮助**：如果 spawn 可靠，可以把三层架构简化为两层甚至一层：
+- 不需要 curl 启动 worker session 的 workaround
+- spawn 完成后通过内部 message bus 自动通知主 agent
+- 错误处理更简单——异常直接在结果中报告
+
+### 24.2 目标
+
+增强 spawn subagent 的能力，使其能可靠地完成中等复杂度的文件 I/O 任务。
+
+### 24.3 子需求
+
+#### 24.3.1 max_iterations 可配置
+
+将 `max_iterations` 从硬编码 15 改为可配置：
+- spawn 工具新增可选 `max_iterations` 参数，LLM 可按任务复杂度指定
+- 默认值从 15 提升到 30（更实用的默认值）
+- 硬上限 100（防止 LLM 设置过大值导致失控）
+- SubagentManager 构造函数接受 `default_max_iterations` 参数
+
+#### 24.3.2 Session 持久化（可选）
+
+subagent 的消息可选写入 session JSONL，便于调试和回溯：
+- 新增 `persist` 参数（默认 `false`，保持向后兼容）
+- persist=true 时，subagent 消息写入 `sessions/subagent_{task_id}.jsonl`
+- 持久化使用现有 `SessionManager.append_message()` 机制
+- subagent 完成后，session 文件保留（不自动清理）
+
+#### 24.3.3 迭代预算提醒
+
+复用主 agent loop 的 `_budget_alert_threshold()` 机制：
+- subagent 循环内注入 budget alert system 消息
+- 阈值计算复用 `_budget_alert_threshold()` 函数
+
+#### 24.3.4 LLM 重试机制
+
+subagent 的 `provider.chat()` 调用增加重试：
+- 复用 `AgentLoop._is_retryable()` 和指数退避逻辑
+- 最大重试 3 次（subagent 场景下不需要 5 次那么多）
+- 重试间隔：5s → 10s → 20s
+
+#### 24.3.5 Usage 记录
+
+subagent 的 token 消耗写入 analytics.db：
+- SubagentManager 接受 `usage_recorder` 参数
+- 每次 LLM 调用后立即写入（复用 Phase 4 的逐次写入模式）
+- session_key 格式：`subagent:{task_id}`
+
+#### 24.3.6 工具执行验证
+
+验证并修复 subagent 的工具执行问题：
+- 编写集成测试验证 write_file/exec/read_file 在 subagent 中正常工作
+- 如发现根因问题则修复
+
+### 24.4 设计要求
+
+1. **向后兼容**：spawn 工具的现有调用方式不变，新参数均为可选
+2. **安全上限**：max_iterations 硬上限 100，防止失控
+3. **不引入死锁风险**：subagent 在当前进程内执行，不经过 web-chat worker 队列，因此不与 B2（worker 并发限制）冲突
+4. **最小侵入**：改动集中在 `subagent.py` 和 `spawn.py`，不影响主 agent loop
+5. **可观测性**：persist 模式下可通过 session 文件回溯 subagent 执行过程
+
+### 24.5 影响范围
+
+| 文件 | 改动 |
+|------|------|
+| `agent/subagent.py` | max_iterations 可配 + persist + budget alert + retry + usage |
+| `agent/tools/spawn.py` | parameters 新增 max_iterations/persist；透传给 SubagentManager |
+| `agent/loop.py` | SubagentManager 构造时传入 usage_recorder + session_manager |
+| `tests/test_subagent.py` | 新增测试套件 |
+
+### 24.6 不做什么
+
+- 不做 subagent 间通信（subagent 完成后通过 bus 通知主 agent，已有机制）
+- 不做 subagent 嵌套（subagent 不能再 spawn subagent）
+- 不做 subagent 并发限制（当前场景下不需要）
+- 不修改 subagent 的工具集（保持与主 agent 一致，但不含 message/spawn/cron）
+
+---
+
 *本文档将随需求迭代持续更新。*

@@ -33,6 +33,8 @@
 | Phase 21: /new 归档方向反转 + Session 命名简化 | 🔜 进行中 | local |
 | Phase 22: Merge main → local | ✅ 已完成 | local |
 | Phase 23: LLM 错误响应持久化与前端展示 | ✅ 已完成 | local |
+| Phase 25: 迭代预算软限制 + exec 动态超时 | ✅ 已完成 | local |
+| Phase 26: spawn subagent 能力增强 | ✅ 已完成 | local |
 
 ---
 
@@ -963,7 +965,7 @@ LLM 调用 `message` 工具时传入 `channel: "feishu"` 覆盖了默认的 `"fe
 
 ---
 
-## Phase 21: /new 归档方向反转 + Session 命名简化 🔜
+## Phase 21: /new 归档方向反转 + Session 命名简化 ✅
 
 > 需求：REQUIREMENTS.md §二十 | 分支：直接在 `local` 上开发
 > 开始时间：2026-03-01
@@ -1131,7 +1133,7 @@ Phase 22 合并 upstream 时引入了 `finish_reason="error"` 防护：不存储
 
 ---
 
-## Phase 24: ProviderConfig preferred_model 字段
+## Phase 24: ProviderConfig preferred_model 字段 ✅
 
 > 日期：2026-03-04
 > 需求：web-chat REQUIREMENTS.md §三十三 (Issue #46)
@@ -1189,6 +1191,58 @@ eval-bench 批量构造中两个最频繁的问题：
 
 - ✅ **T25.4** Git commit: `a56e30e` (docs+code) + `1c438db` (tests) + `docs/LOCAL_CHANGES.md` 更新
 - 🔜 **T25.5** 更新 MEMORY.md 项目状态
+
+---
+
+## Phase 26: spawn subagent 能力增强 (2026-03-06)
+
+> 来源: eval-bench 复盘 B4 | REQUIREMENTS.md §二十四 | ARCHITECTURE.md §十一
+> 直接在 local 分支 | 改动集中在 subagent.py + spawn.py
+
+### 背景
+
+spawn subagent 有 15 轮硬限制、无 session 持久化、无 LLM 重试、无 usage 记录，实际使用中几乎无法完成需要文件 I/O 的任务。增强后可简化批量编排架构。
+
+### 任务清单
+
+#### 26a: SubagentManager 核心改造
+
+- ✅ **T26a.1** `subagent.py` — 构造函数扩展：接受 `default_max_iterations`, `usage_recorder`, `session_manager`
+- ✅ **T26a.2** `subagent.py` — `spawn()` 签名扩展：接受 `max_iterations`, `persist` 参数
+- ✅ **T26a.3** `subagent.py` — `_run_subagent()` max_iterations 可配 + 硬上限 100
+- ✅ **T26a.4** `subagent.py` — `_run_subagent()` budget alert 注入（复用 `_budget_alert_threshold`）
+- ✅ **T26a.5** `subagent.py` — `_chat_with_retry()` LLM 重试机制（3 次，5s/10s/20s）
+- ✅ **T26a.6** `subagent.py` — usage 记录（每次 LLM 调用后写入 SQLite）
+- ✅ **T26a.7** `subagent.py` — persist 模式：session 持久化到 JSONL
+
+#### 26b: SpawnTool 参数扩展
+
+- ✅ **T26b.1** `spawn.py` — parameters 新增 `max_iterations` 和 `persist`
+- ✅ **T26b.2** `spawn.py` — execute() 透传新参数给 SubagentManager.spawn()
+
+#### 26c: AgentLoop 集成
+
+- ✅ **T26c.1** `loop.py` — SubagentManager 构造时传入 `usage_recorder` + `session_manager`（2 行）
+
+#### 26d: 测试
+
+- ✅ **T26d.1** `tests/test_subagent.py` — 27 个测试全部通过
+  - _budget_alert_threshold: 3 项
+  - _is_retryable: 4 项
+  - SubagentManager defaults: 3 项
+  - spawn max_iterations: 3 项
+  - budget alert injection: 1 项
+  - _chat_with_retry: 4 项
+  - usage recording: 2 项
+  - session persistence: 2 项
+  - SpawnTool parameters: 3 项
+  - announce result: 2 项
+- ✅ **T26d.2** 全量回归: 376 passed, 0 failed（排除 test_matrix_channel.py 已知 dep 问题）
+
+#### 26e: 收尾
+
+- ✅ **T26e.1** Git commit: `3114b8d`
+- ✅ **T26e.2** 更新 MEMORY.md 项目状态
 
 ---
 
