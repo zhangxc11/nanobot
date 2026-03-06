@@ -1479,7 +1479,7 @@ SpawnTool.execute(task, label, max_iterations?, persist?)
                     │
                     ├── 构建独立 ToolRegistry
                     ├── 构建 system prompt
-                    ├── [persist] 创建 session: subagent_{task_id}
+                    ├── [persist] 创建 session: subagent:{parent_key}_{task_id}
                     │
                     ├── while iteration < effective_max_iterations:
                     │       │
@@ -1573,7 +1573,7 @@ async def _run_subagent(self, task_id, task, label, origin,
     # [persist] 创建 session
     session = None
     if persist and self.session_manager:
-        session_key = f"subagent:{task_id}"
+        session_key = f"subagent:{parent_key_sanitized}_{task_id}"
         session = self.session_manager.get_or_create(session_key)
         # 写入 user 消息
         self.session_manager.append_message(session, {
@@ -1597,7 +1597,7 @@ async def _run_subagent(self, task_id, task, label, origin,
         # Usage recording
         if response.usage and self.usage_recorder:
             self.usage_recorder.record(
-                session_key=f"subagent:{task_id}",
+                session_key=subagent_session_key,  # subagent:{parent}_{task_id}
                 model=self.model,
                 prompt_tokens=response.usage.get("prompt_tokens", 0),
                 ...
@@ -1650,8 +1650,8 @@ async def _chat_with_retry(self, messages, tools, max_retries=3):
 
 | 系统 | 交互方式 | 说明 |
 |------|----------|------|
-| UsageRecorder | 直接调用 | subagent token 消耗记入 `subagent:{task_id}` session |
-| SessionManager | 直接调用 | persist 模式下写入 `subagent_{task_id}.jsonl` |
+| UsageRecorder | 直接调用 | subagent token 消耗记入 `subagent:{parent}_{task_id}` session |
+| SessionManager | 直接调用 | persist 模式下写入 `subagent_{parent}_{task_id}.jsonl` |
 | MessageBus | _announce_result | 完成后通知主 agent（已有机制，不变） |
 | AuditLogger | 通过 ToolRegistry | subagent 的工具调用也被审计（ToolRegistry 已有拦截） |
 | ProviderPool | 通过 self.provider | 使用主 agent 的 provider/model（不支持 per-subagent 切换） |

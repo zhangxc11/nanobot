@@ -149,10 +149,21 @@ class SubagentManager:
             hard cap: ``MAX_SUBAGENT_ITERATIONS``).
         persist:
             If True, persist subagent messages to a session JSONL file.
+            The session key will be ``subagent:<parent_key_sanitized>_<task_id>``
+            so the frontend can identify and group subagent sessions.
         """
         task_id = str(uuid.uuid4())[:8]
         display_label = label or task[:30] + ("..." if len(task) > 30 else "")
         origin = {"channel": origin_channel, "chat_id": origin_chat_id}
+
+        # Build subagent session key with parent info for frontend identification
+        # e.g. "subagent:webchat_1772030778_a1b2c3d4"
+        if session_key:
+            # Sanitize parent session key: replace ':' with '_' for filename safety
+            parent_sanitized = session_key.replace(":", "_")
+            subagent_key = f"subagent:{parent_sanitized}_{task_id}"
+        else:
+            subagent_key = f"subagent:{task_id}"
 
         # Clamp max_iterations
         effective_max = min(
@@ -162,7 +173,7 @@ class SubagentManager:
 
         bg_task = asyncio.create_task(
             self._run_subagent(task_id, task, display_label, origin,
-                               effective_max, persist)
+                               effective_max, persist, subagent_key)
         )
         self._running_tasks[task_id] = bg_task
         if session_key:
@@ -189,6 +200,7 @@ class SubagentManager:
         origin: dict[str, str],
         max_iterations: int,
         persist: bool,
+        subagent_session_key: str,
     ) -> None:
         """Execute the subagent task and announce the result."""
         logger.info("Subagent [{}] starting task: {} (max_iterations={})",
@@ -219,7 +231,6 @@ class SubagentManager:
 
             # ── Session persistence setup ──
             session = None
-            subagent_session_key = f"subagent:{task_id}"
             if persist and self.session_manager:
                 session = self.session_manager.get_or_create(subagent_session_key)
                 user_msg = {

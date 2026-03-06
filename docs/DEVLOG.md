@@ -1162,7 +1162,7 @@ Phase 22 合并 upstream 时引入了 `finish_reason="error"` 防护：不存储
 
 ---
 
-## Phase 25: 迭代预算软限制提醒 + exec 动态超时 (2026-03-06)
+## Phase 25: 迭代预算软限制提醒 + exec 动态超时 (2026-03-06) ✅
 
 > 来源: eval-bench batch_build + QA R2 复盘改进项 (B1 + exec timeout)
 > 直接在 local 分支 | REQUIREMENTS.md §二十二 + §二十三 | ARCHITECTURE.md §十
