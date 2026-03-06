@@ -367,6 +367,19 @@ class AgentLoop:
         while iteration < self.max_iterations:
             iteration += 1
 
+            # ── Budget alert: warn LLM when iterations are running low ──
+            remaining = self.max_iterations - iteration
+            threshold = _budget_alert_threshold(self.max_iterations)
+            if remaining == threshold:
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        f"⚠️ Budget alert: You have {remaining} tool call iterations "
+                        f"remaining (out of {self.max_iterations}). Please prioritize "
+                        f"saving your work state and wrapping up gracefully."
+                    ),
+                })
+
             response = await self._chat_with_retry(
                 provider=_provider,
                 messages=messages,
@@ -1167,3 +1180,17 @@ class AgentLoop:
             await callbacks.on_done(AgentResult(content=result_content))
 
         return result_content
+
+
+# ── Module-level helpers ────────────────────────────────────────────
+
+
+def _budget_alert_threshold(max_iterations: int) -> int:
+    """Return the remaining-iterations count at which to inject a budget alert.
+
+    - max_iterations >= 20  →  threshold = 10
+    - max_iterations < 20   →  threshold = max(3, max_iterations // 4)
+    """
+    if max_iterations >= 20:
+        return 10
+    return max(3, max_iterations // 4)

@@ -12,6 +12,8 @@ from nanobot.agent.tools.base import Tool
 class ExecTool(Tool):
     """Tool to execute shell commands."""
 
+    MAX_TIMEOUT = 600  # Hard upper limit: 10 minutes
+
     def __init__(
         self,
         timeout: int = 60,
@@ -58,6 +60,14 @@ class ExecTool(Tool):
                 "working_dir": {
                     "type": "string",
                     "description": "Optional working directory for the command"
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": (
+                        "Optional timeout in seconds for this command "
+                        "(overrides default). Use for long-running commands "
+                        "like git clone, large file operations, etc."
+                    )
                 }
             },
             "required": ["command"]
@@ -75,7 +85,12 @@ class ExecTool(Tool):
         stripped = re.sub(r"&&|[0-9]*>&[0-9]*|&>", "", stripped)
         return "&" in stripped
 
-    async def execute(self, command: str, working_dir: str | None = None, **kwargs: Any) -> str:
+    async def execute(self, command: str, working_dir: str | None = None, timeout: int | None = None, **kwargs: Any) -> str:
+        # Dynamic timeout: caller-specified > instance default, capped at MAX_TIMEOUT
+        effective_timeout = self.timeout
+        if timeout is not None:
+            effective_timeout = min(timeout, self.MAX_TIMEOUT)
+
         cwd = working_dir or self.working_dir or os.getcwd()
         guard_error = self._guard_command(command, cwd)
         if guard_error:
@@ -116,7 +131,7 @@ class ExecTool(Tool):
             try:
                 stdout, stderr = await asyncio.wait_for(
                     process.communicate(),
-                    timeout=self.timeout
+                    timeout=effective_timeout
                 )
             except asyncio.TimeoutError:
                 process.kill()
@@ -124,7 +139,7 @@ class ExecTool(Tool):
                     await asyncio.wait_for(process.wait(), timeout=5.0)
                 except asyncio.TimeoutError:
                     pass
-                return f"Error: Command timed out after {self.timeout} seconds"
+                return f"Error: Command timed out after {effective_timeout} seconds"
             
             output_parts = []
             

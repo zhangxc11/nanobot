@@ -1160,4 +1160,36 @@ Phase 22 合并 upstream 时引入了 `finish_reason="error"` 防护：不存储
 
 ---
 
+## Phase 25: 迭代预算软限制提醒 + exec 动态超时 (2026-03-06)
+
+> 来源: eval-bench batch_build + QA R2 复盘改进项 (B1 + exec timeout)
+> 直接在 local 分支 | REQUIREMENTS.md §二十二 + §二十三 | ARCHITECTURE.md §十
+
+### 背景
+
+eval-bench 批量构造中两个最频繁的问题：
+1. AgentLoop 迭代耗尽时 LLM 无预警，无法优雅收尾（调度 session 多次被截断）
+2. exec 工具超时固定（默认 60s），git clone 大仓库等长命令频繁超时
+
+### 任务清单
+
+#### 25a: 迭代预算软限制提醒
+
+- 🔜 **T25a.1** `loop.py` — 新增 `_budget_alert_threshold()` 函数 + 循环内 budget alert 注入
+- 🔜 **T25a.2** `tests/test_budget_alert.py` — 5 个测试（阈值计算、单次注入、消息内容）
+- 🔜 **T25a.3** 全量测试通过
+
+#### 25b: exec 动态超时参数
+
+- 🔜 **T25b.1** `shell.py` — `parameters` 新增 `timeout`；`execute()` 支持动态超时 + `MAX_TIMEOUT` 上限
+- 🔜 **T25b.2** `tests/test_exec_timeout.py` — 4 个测试（动态超时、默认 fallback、上限保护、错误消息）
+- 🔜 **T25b.3** 全量测试通过
+
+#### 收尾
+
+- 🔜 **T25.4** Git commit + `docs/LOCAL_CHANGES.md` 更新
+- 🔜 **T25.5** 更新 MEMORY.md 项目状态
+
+---
+
 *本文件随开发进展持续更新。*

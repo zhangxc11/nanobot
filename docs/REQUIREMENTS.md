@@ -1395,4 +1395,126 @@ Phase 22 合并 upstream 时引入了 `finish_reason="error"` 防护逻辑：当
 
 ---
 
+## 二十二、AgentLoop 迭代预算软限制提醒（Phase 25a）
+
+### 22.1 需求背景
+
+`AgentLoop._run_agent_loop()` 有 `max_iterations` 硬限制（默认 40，config 可配）。当迭代次数耗尽时，循环直接截断，LLM 没有任何预警，无法优雅地保存工作状态。
+
+这在 eval-bench 批量构造场景中是**最频繁**的问题：
+- batch_build Gen3~5 调度 session 因迭代截断无法完成任务
+- QA R2 dispatch_1 也因此被截断
+- 每次截断后需要主控手动补全状态和缺失文件
+
+**核心痛点**：LLM 不知道自己还剩多少迭代预算，无法在耗尽前做收尾工作（保存状态、输出中间结果）。
+
+### 22.2 目标
+
+在迭代次数接近上限时，向 LLM 注入 system 提醒消息，告知剩余预算，引导其优雅收尾。
+
+### 22.3 设计方案
+
+在 `_run_agent_loop()` 的 `while` 循环内，当剩余迭代次数达到阈值时，注入一条 system 消息：
+
+```python
+remaining = max_iterations - iteration
+if remaining == budget_alert_threshold:
+    budget_msg = {
+        "role": "system",
+        "content": f"⚠️ Budget alert: You have {remaining} tool call iterations remaining "
+                   f"(out of {max_iterations}). Please prioritize saving your work state "
+                   f"and wrapping up gracefully."
+    }
+    messages.append(budget_msg)
+```
+
+**阈值策略**：
+- 固定阈值：`remaining == 10`（当 max_iterations >= 20 时）
+- 短任务保护：当 `max_iterations < 20` 时，阈值为 `max(3, max_iterations // 4)`
+- 只触发一次（`remaining == threshold`，非 `<=`），避免重复注入
+
+### 22.4 设计要求
+
+1. **单次注入**：只在 `remaining == threshold` 时注入一次，不重复
+2. **不持久化**：budget alert 消息不写入 session JSONL（仅存在于当前 turn 的 messages 列表中）
+3. **不影响正常流程**：注入消息后继续正常循环，不改变任何其他逻辑
+4. **阈值可预测**：固定规则，不依赖外部配置（简化实现）
+5. **对所有调用方式生效**：CLI、Web、Gateway、SDK 统一行为
+
+### 22.5 影响范围
+
+| 文件 | 改动 |
+|------|------|
+| `nanobot/agent/loop.py` | `_run_agent_loop()` 循环内新增 budget alert 逻辑（~10 行） |
+| `tests/test_budget_alert.py` | 新增测试：阈值触发、单次注入、短任务保护 |
+
+### 22.6 不做什么
+
+- 不修改 `max_iterations` 的默认值或配置方式
+- 不做"自动延长迭代"功能
+- 不做 callback 通知（仅注入 system 消息给 LLM）
+
+---
+
+## 二十三、exec 工具动态超时参数（Phase 25b）
+
+### 23.1 需求背景
+
+当前 `ExecTool` 的超时时间在初始化时固定（默认 60s，config 可配），LLM 调用时只能传 `command` 和 `working_dir` 两个参数，无法根据命令特性动态指定超时。
+
+在 eval-bench 批量构造场景中，以下操作经常超时：
+- `git clone` 大仓库（可能需要 2-5 分钟）
+- 复杂的 Python 脚本执行（数据处理、文件复制）
+- `tar`/`zip` 压缩大目录
+
+**核心痛点**：LLM 知道某个命令需要更长时间，但无法告知 exec 工具调整超时。
+
+### 23.2 目标
+
+为 `exec` 工具新增可选的 `timeout` 参数，允许 LLM 在调用时动态指定超时时间，覆盖实例默认值。
+
+### 23.3 设计方案
+
+1. **参数定义**：在 `ExecTool.parameters` 的 `properties` 中新增 `timeout` 字段：
+   ```json
+   {
+     "timeout": {
+       "type": "integer",
+       "description": "Optional timeout in seconds for this command (overrides default). Use for long-running commands like git clone, large file operations, etc."
+     }
+   }
+   ```
+   注意：不加入 `required` 列表（可选参数）。
+
+2. **执行逻辑**：`execute()` 方法中优先使用调用时传入的 `timeout`，否则 fallback 到 `self.timeout`：
+   ```python
+   async def execute(self, command: str, working_dir: str | None = None, timeout: int | None = None) -> str:
+       effective_timeout = timeout if timeout is not None else self.timeout
+       # ... 使用 effective_timeout ...
+   ```
+
+3. **安全上限**：设置硬上限（如 600s = 10 分钟），防止 LLM 设置过大的超时值导致进程长时间挂起。
+
+### 23.4 设计要求
+
+1. **向后兼容**：`timeout` 参数可选，不传时行为不变
+2. **安全上限**：`min(timeout, MAX_TIMEOUT)` 防止滥用，`MAX_TIMEOUT = 600`
+3. **错误消息更新**：超时错误消息中显示实际使用的超时值
+4. **审计日志**：如果使用了自定义 timeout，在审计日志中记录
+
+### 23.5 影响范围
+
+| 文件 | 改动 |
+|------|------|
+| `nanobot/agent/tools/shell.py` | `parameters` 新增 `timeout`；`execute()` 方法支持动态超时 |
+| `tests/test_exec_timeout.py` | 新增测试：动态超时、默认 fallback、安全上限 |
+
+### 23.6 不做什么
+
+- 不修改 config 中的默认超时配置方式
+- 不做命令级自动超时估算（由 LLM 自行判断）
+- 不影响 deny_patterns / allow_patterns 等安全检查逻辑
+
+---
+
 *本文档将随需求迭代持续更新。*

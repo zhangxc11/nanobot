@@ -530,4 +530,27 @@ quality=30 → 返回（best effort）
 
 ---
 
+## Phase 25: 迭代预算软限制提醒 + exec 动态超时
+
+> 日期: 2026-03-06
+
+### 25a: AgentLoop 迭代预算软限制提醒
+- `agent/loop.py`: 新增 `_budget_alert_threshold()` 函数 + `_run_agent_loop()` 循环内 budget alert 注入
+- 当剩余迭代次数达到阈值时，向 LLM 注入 system 提醒消息，引导优雅收尾
+- 阈值策略：`max_iterations >= 20` → 10；`< 20` → `max(3, max_iterations // 4)`
+- 消息不持久化到 session JSONL，仅存在于当前 turn 的 messages 列表中
+
+### 25b: exec 工具动态超时参数
+- `agent/tools/shell.py`: `parameters` 新增可选 `timeout` 字段；`execute()` 支持动态超时
+- `ExecTool.MAX_TIMEOUT = 600`（10 分钟硬上限），防止 LLM 设置过大超时值
+- 优先级：调用时传入 timeout > 实例默认值（config），硬上限保护
+- 向后兼容：不传 timeout 时行为完全不变
+
+### 测试
+- `tests/test_budget_alert.py`: 8 项测试（阈值计算 5 + 注入逻辑 3）
+- `tests/test_exec_timeout.py`: 7 项测试（参数定义、动态超时、默认 fallback、上限保护、错误消息、None 处理、常量检查）
+- 全量 349 passed
+
+---
+
 *本文档随 local 分支改动持续更新。*

@@ -1288,4 +1288,157 @@ def _handle_session_command(
 
 ---
 
+## 十、迭代预算软限制提醒 + exec 动态超时（Phase 25）
+
+> 需求：REQUIREMENTS.md §二十二 + §二十三
+
+### 10.1 概述
+
+Phase 25 包含两个独立的轻量改进，均源自 eval-bench 批量构造的复盘：
+
+| 子项 | 改动文件 | 改动量 |
+|------|----------|--------|
+| 25a: 迭代预算提醒 | `agent/loop.py` | ~15 行 |
+| 25b: exec 动态超时 | `agent/tools/shell.py` | ~10 行 |
+
+### 10.2 迭代预算软限制提醒（25a）
+
+#### 10.2.1 注入位置
+
+在 `_run_agent_loop()` 的 `while iteration < self.max_iterations` 循环内，每次 iteration 递增后、调用 `provider.chat()` 之前检查：
+
+```python
+while iteration < self.max_iterations:
+    iteration += 1
+
+    # ── Budget alert ──
+    remaining = self.max_iterations - iteration
+    if remaining == _budget_alert_threshold(self.max_iterations):
+        messages.append({
+            "role": "system",
+            "content": (
+                f"⚠️ Budget alert: You have {remaining} tool call iterations remaining "
+                f"(out of {self.max_iterations}). Please prioritize saving your work state "
+                f"and wrapping up gracefully."
+            ),
+        })
+
+    response = await self._chat_with_retry(...)
+    # ... 后续逻辑不变 ...
+```
+
+#### 10.2.2 阈值函数
+
+```python
+def _budget_alert_threshold(max_iterations: int) -> int:
+    """计算 budget alert 的触发阈值（剩余迭代数）。
+    
+    - max_iterations >= 20: threshold = 10
+    - max_iterations < 20:  threshold = max(3, max_iterations // 4)
+    """
+    if max_iterations >= 20:
+        return 10
+    return max(3, max_iterations // 4)
+```
+
+#### 10.2.3 不持久化
+
+budget alert 消息只存在于当前 turn 的 `messages` 列表中，不会被 `append_message()` 写入 JSONL（因为它是在循环内动态注入的，不经过持久化路径）。
+
+如果 turn 结束后用户再发消息，新 turn 的 `get_history()` 不会包含此消息。
+
+### 10.3 exec 动态超时（25b）
+
+#### 10.3.1 参数扩展
+
+```python
+class ExecTool(Tool):
+    MAX_TIMEOUT = 600  # 安全上限: 10 分钟
+
+    @property
+    def parameters(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "The shell command to execute",
+                },
+                "working_dir": {
+                    "type": "string",
+                    "description": "Optional working directory for the command",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": (
+                        "Optional timeout in seconds for this command "
+                        "(overrides default). Use for long-running commands "
+                        "like git clone, large file operations, etc."
+                    ),
+                },
+            },
+            "required": ["command"],
+        }
+```
+
+#### 10.3.2 执行逻辑
+
+```python
+async def execute(
+    self, command: str, working_dir: str | None = None, timeout: int | None = None
+) -> str:
+    # 动态超时：调用时传入 > 实例默认值，硬上限保护
+    effective_timeout = self.timeout
+    if timeout is not None:
+        effective_timeout = min(timeout, self.MAX_TIMEOUT)
+
+    # ... 安全检查逻辑不变 ...
+
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            process.communicate(), timeout=effective_timeout
+        )
+    except asyncio.TimeoutError:
+        # ... kill process ...
+        return f"Error: Command timed out after {effective_timeout} seconds"
+```
+
+#### 10.3.3 安全考量
+
+- **硬上限 600s**：`min(timeout, MAX_TIMEOUT)` 防止 LLM 设置过大的超时
+- **不影响安全检查**：deny_patterns / allow_patterns 等检查在超时逻辑之前执行
+- **向后兼容**：`timeout=None` 时行为完全不变
+
+### 10.4 测试设计
+
+#### 25a 测试（`tests/test_budget_alert.py`）
+
+| 测试 | 说明 |
+|------|------|
+| `test_threshold_normal` | `max_iterations=40` → threshold=10 |
+| `test_threshold_small` | `max_iterations=12` → threshold=3 |
+| `test_threshold_minimum` | `max_iterations=8` → threshold=3 (下限) |
+| `test_alert_injected_once` | 验证 alert 消息只注入一次 |
+| `test_alert_content` | 验证消息内容包含 remaining 和 max_iterations |
+
+#### 25b 测试（`tests/test_exec_timeout.py`）
+
+| 测试 | 说明 |
+|------|------|
+| `test_dynamic_timeout` | 传入 `timeout=5`，验证命令使用 5s 超时 |
+| `test_default_fallback` | 不传 `timeout`，验证使用实例默认值 |
+| `test_max_timeout_cap` | 传入 `timeout=9999`，验证被限制为 600s |
+| `test_timeout_error_message` | 超时后错误消息包含实际使用的超时值 |
+
+### 10.5 文件变更清单
+
+| 文件 | 改动类型 | 子项 |
+|------|----------|------|
+| `nanobot/agent/loop.py` | 修改 | 25a: budget alert 注入 |
+| `nanobot/agent/tools/shell.py` | 修改 | 25b: timeout 参数 + MAX_TIMEOUT |
+| `tests/test_budget_alert.py` | 新增 | 25a: 5 个测试 |
+| `tests/test_exec_timeout.py` | 新增 | 25b: 4 个测试 |
+
+---
+
 *本文档将随开发进展持续更新。*
