@@ -553,4 +553,67 @@ quality=30 → 返回（best effort）
 
 ---
 
+## Phase 26: spawn subagent 能力增强
+
+> Commits: `9740feb` (主体), `f2d456f` (session key 格式优化) | 日期: 2026-03-06
+> 来源: eval-bench 复盘 B4
+
+**问题**: spawn subagent 有 15 轮硬限制、无 session 持久化、无 LLM 重试、无 usage 记录。实际使用中几乎无法完成需要文件 I/O 的复杂任务。
+
+### 26a: SubagentManager 核心改造
+
+**文件**: `agent/subagent.py`
+
+1. **可配置 max_iterations**: 默认 30（原 15），硬上限 `MAX_SUBAGENT_ITERATIONS = 100`
+2. **persist 模式**: `persist=True` 时将 subagent 消息持久化到 session JSONL（key: `subagent:{parent_key_sanitized}_{task_id}`）
+3. **budget alert 注入**: 复用 `_budget_alert_threshold()` 逻辑，剩余迭代达阈值时注入 system 提醒
+4. **LLM 重试**: `_chat_with_retry()` 最多 3 次重试，退避间隔 5s/10s/20s；`_is_retryable()` 判断可重试错误类型
+5. **usage 记录**: 每次 LLM 调用后写入 SQLite（通过 `usage_recorder`）
+6. **构造函数扩展**: 新增 `default_max_iterations`, `usage_recorder`, `session_manager` 参数
+
+### 26b: SpawnTool 参数扩展
+
+**文件**: `agent/tools/spawn.py`
+
+- `parameters` 新增可选 `max_iterations`（integer）和 `persist`（boolean）字段
+- `execute()` 透传新参数给 `SubagentManager.spawn()`
+
+### 26c: AgentLoop 集成
+
+**文件**: `agent/loop.py`
+
+- SubagentManager 构造时传入 `usage_recorder` + `session_manager`（2 行改动）
+
+### 26d: subagent session key 格式优化 (`f2d456f`)
+
+**文件**: `agent/subagent.py`, `docs/ARCHITECTURE.md`, `docs/REQUIREMENTS.md`
+
+- session key 从 `subagent:{task_id}` 改为 `subagent:{parent_key_sanitized}_{task_id}`
+- 例: `subagent:webchat_1772030778_a1b2c3d4`
+- 使前端可识别 subagent channel + 提取父 session 信息进行分组
+
+### 死锁分析
+
+subagent 以 `asyncio.Task` 在进程内运行，不经过 web-chat worker 队列，与 Worker 并发限制（B2）完全独立，不存在死锁风险。
+
+### 安全限制
+
+subagent 的工具集不包含 `spawn`/`message`/`cron`，防止递归创建或越权操作。
+
+### 测试
+- `tests/test_subagent.py`: 27 项测试
+  - _budget_alert_threshold: 3 项
+  - _is_retryable: 4 项
+  - SubagentManager defaults: 3 项
+  - spawn max_iterations: 3 项
+  - budget alert injection: 1 项
+  - _chat_with_retry: 4 项
+  - usage recording: 2 项
+  - session persistence: 2 项
+  - SpawnTool parameters: 3 项
+  - announce result: 2 项
+- 全量 376 passed
+
+---
+
 *本文档随 local 分支改动持续更新。*
