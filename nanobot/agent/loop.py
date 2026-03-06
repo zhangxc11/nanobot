@@ -72,6 +72,7 @@ class AgentLoop:
         usage_recorder: UsageRecorder | None = None,
         detail_logger: LLMDetailLogger | None = None,
         audit_logger: AuditLogger | None = None,
+        subagent_task_keeper: "Callable[[asyncio.Task], None] | None" = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         self.bus = bus
@@ -110,6 +111,7 @@ class AgentLoop:
             restrict_to_workspace=restrict_to_workspace,
             usage_recorder=usage_recorder,
             session_manager=self.sessions,
+            task_keeper=subagent_task_keeper,
         )
 
         self._running = False

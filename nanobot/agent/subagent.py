@@ -2,6 +2,10 @@
 
 Phase 26: Enhanced with configurable max_iterations, session persistence,
 budget alerts, LLM retry, and usage recording.
+
+Phase 26 fix: Added ``task_keeper`` callback to prevent asyncio.Task GC
+when the host AgentLoop/SubagentManager is garbage collected (critical for
+web worker where each request creates a short-lived AgentLoop).
 """
 
 import asyncio
@@ -9,7 +13,7 @@ import json
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from loguru import logger
 
@@ -102,6 +106,7 @@ class SubagentManager:
         default_max_iterations: int = DEFAULT_SUBAGENT_ITERATIONS,
         usage_recorder: "UsageRecorder | None" = None,
         session_manager: "SessionManager | None" = None,
+        task_keeper: "Callable[[asyncio.Task], None] | None" = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         self.provider = provider
@@ -118,6 +123,7 @@ class SubagentManager:
         self.default_max_iterations = min(default_max_iterations, MAX_SUBAGENT_ITERATIONS)
         self.usage_recorder = usage_recorder
         self.session_manager = session_manager
+        self._task_keeper = task_keeper
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
 
@@ -178,6 +184,14 @@ class SubagentManager:
         self._running_tasks[task_id] = bg_task
         if session_key:
             self._session_tasks.setdefault(session_key, set()).add(task_id)
+
+        # Register with external task keeper to prevent GC when SubagentManager
+        # is garbage collected (critical for web worker short-lived AgentLoop).
+        if self._task_keeper is not None:
+            try:
+                self._task_keeper(bg_task)
+            except Exception as e:
+                logger.warning("task_keeper registration failed: {}", e)
 
         def _cleanup(_: asyncio.Task) -> None:
             self._running_tasks.pop(task_id, None)

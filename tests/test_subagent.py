@@ -466,6 +466,88 @@ class TestSpawnToolParameters:
         assert call_kwargs["persist"] is False
 
 
+# ── Tests: Task Keeper (GC prevention) ──────────────────────────────────────
+
+
+class TestTaskKeeper:
+    @pytest.mark.asyncio
+    async def test_task_keeper_called(self):
+        """task_keeper callback should be called with the asyncio.Task."""
+        kept_tasks = []
+
+        def keeper(task):
+            kept_tasks.append(task)
+
+        mgr = _make_manager(task_keeper=keeper)
+        mgr.provider.chat = AsyncMock(
+            return_value=FakeLLMResponse("Done", usage=None)
+        )
+
+        await mgr.spawn(task="keeper test")
+        await asyncio.sleep(0.2)
+        for task in list(mgr._running_tasks.values()):
+            if not task.done():
+                await task
+
+        assert len(kept_tasks) == 1
+        assert isinstance(kept_tasks[0], asyncio.Task)
+
+    @pytest.mark.asyncio
+    async def test_task_survives_manager_gc(self):
+        """Subagent task should survive even after SubagentManager is GC'd,
+        provided an external task_keeper holds a reference."""
+        import gc
+
+        kept_tasks = []
+
+        def keeper(task):
+            kept_tasks.append(task)
+
+        mgr = _make_manager(task_keeper=keeper)
+
+        # Track whether the task actually ran
+        task_completed = asyncio.Event()
+        original_chat = AsyncMock(return_value=FakeLLMResponse("Done from GC test", usage=None))
+        mgr.provider.chat = original_chat
+
+        await mgr.spawn(task="gc survival test")
+        await asyncio.sleep(0.05)  # Let task start
+
+        # Delete the manager (simulating web worker GC)
+        del mgr
+        gc.collect()
+
+        # The task should still be in kept_tasks and should complete
+        assert len(kept_tasks) == 1
+        task = kept_tasks[0]
+
+        # Wait for task to complete
+        try:
+            await asyncio.wait_for(task, timeout=5.0)
+        except asyncio.TimeoutError:
+            pass
+
+        assert task.done()
+
+    @pytest.mark.asyncio
+    async def test_no_keeper_still_works(self):
+        """Without task_keeper, spawn should still work normally."""
+        mgr = _make_manager()  # No task_keeper
+        assert mgr._task_keeper is None
+
+        mgr.provider.chat = AsyncMock(
+            return_value=FakeLLMResponse("Done", usage=None)
+        )
+
+        result = await mgr.spawn(task="no keeper test")
+        assert "started" in result
+
+        await asyncio.sleep(0.2)
+        for task in list(mgr._running_tasks.values()):
+            if not task.done():
+                await task
+
+
 # ── Tests: Announce result ──────────────────────────────────────────────────
 
 
