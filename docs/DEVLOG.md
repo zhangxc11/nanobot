@@ -1175,19 +1175,19 @@ eval-bench 批量构造中两个最频繁的问题：
 
 #### 25a: 迭代预算软限制提醒
 
-- 🔜 **T25a.1** `loop.py` — 新增 `_budget_alert_threshold()` 函数 + 循环内 budget alert 注入
-- 🔜 **T25a.2** `tests/test_budget_alert.py` — 5 个测试（阈值计算、单次注入、消息内容）
-- 🔜 **T25a.3** 全量测试通过
+- ✅ **T25a.1** `loop.py` — 新增 `_budget_alert_threshold()` 函数 + 循环内 budget alert 注入
+- ✅ **T25a.2** `tests/test_budget_alert.py` — 8 个测试（阈值计算 5 + 注入逻辑 3）
+- ✅ **T25a.3** 全量测试通过 (349 passed)
 
 #### 25b: exec 动态超时参数
 
-- 🔜 **T25b.1** `shell.py` — `parameters` 新增 `timeout`；`execute()` 支持动态超时 + `MAX_TIMEOUT` 上限
-- 🔜 **T25b.2** `tests/test_exec_timeout.py` — 4 个测试（动态超时、默认 fallback、上限保护、错误消息）
-- 🔜 **T25b.3** 全量测试通过
+- ✅ **T25b.1** `shell.py` — `parameters` 新增 `timeout`；`execute()` 支持动态超时 + `MAX_TIMEOUT=600` 上限
+- ✅ **T25b.2** `tests/test_exec_timeout.py` — 7 个测试（参数定义、动态超时、默认 fallback、上限保护、错误消息、None 处理、常量）
+- ✅ **T25b.3** 全量测试通过 (349 passed)
 
 #### 收尾
 
-- 🔜 **T25.4** Git commit + `docs/LOCAL_CHANGES.md` 更新
+- ✅ **T25.4** Git commit: `a56e30e` (docs+code) + `1c438db` (tests) + `docs/LOCAL_CHANGES.md` 更新
 - 🔜 **T25.5** 更新 MEMORY.md 项目状态
 
 ---
