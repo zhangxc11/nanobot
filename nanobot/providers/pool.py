@@ -177,6 +177,7 @@ class ProviderPool(LLMProvider):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         """Route the chat call to the active provider.
 
@@ -192,6 +193,7 @@ class ProviderPool(LLMProvider):
             model=self._active_model,
             max_tokens=max_tokens,
             temperature=temperature,
+            reasoning_effort=reasoning_effort,
         )
 
     def get_default_model(self) -> str:
