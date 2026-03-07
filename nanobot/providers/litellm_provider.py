@@ -245,11 +245,43 @@ class LiteLLMProvider(LLMProvider):
             response = await acompletion(**kwargs)
             return self._parse_response(response)
         except Exception as e:
-            # Return error as content for graceful handling
+            # Let retryable errors (rate limit, timeout, 5xx, etc.)
+            # propagate so that _chat_with_retry() in AgentLoop /
+            # SubagentManager can catch and retry them with backoff.
+            if self._is_retryable(e):
+                raise
+            # Non-retryable errors: return as content for graceful handling
             return LLMResponse(
                 content=f"Error calling LLM: {str(e)}",
                 finish_reason="error",
             )
+
+    @staticmethod
+    def _is_retryable(error: Exception) -> bool:
+        """Check if an LLM error is transient and worth retrying.
+
+        Mirrors AgentLoop._is_retryable() logic so that provider.chat()
+        lets these exceptions propagate for upstream retry handling.
+        """
+        error_type = type(error).__name__
+        if error_type in (
+            "RateLimitError",
+            "APIConnectionError",
+            "APITimeoutError",
+            "Timeout",
+            "ServiceUnavailableError",
+            "InternalServerError",
+        ):
+            return True
+        status = getattr(error, "status_code", None)
+        if status in (429, 500, 502, 503, 504, 529):
+            return True
+        error_str = str(error).lower()
+        if "rate limit" in error_str or "rate_limit" in error_str:
+            return True
+        if "overloaded" in error_str or "capacity" in error_str:
+            return True
+        return False
 
     def _parse_response(self, response: Any) -> LLMResponse:
         """Parse LiteLLM response into our standard format."""
