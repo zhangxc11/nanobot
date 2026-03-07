@@ -1615,4 +1615,49 @@ subagent 的 token 消耗写入 analytics.db：
 
 ---
 
+## §二十五 ProviderPool 接口同步防护 (Phase 27)
+
+> 来源: reasoning_effort bug 复盘
+> 状态: ✅ 已完成 (Phase 27, commit `38d6bf8`)
+
+### 25.1 问题描述
+
+Phase 22 merge upstream 时，`LLMProvider.chat()` 接口新增 `reasoning_effort` 参数，但 local 独有的 `ProviderPool.chat()` 未同步更新签名。导致 Phase 26 的 subagent 全部失败（3月5日~7日）。
+
+### 25.2 需求
+
+1. ProviderPool.chat() 应能自动透传 upstream 新增的任何参数，无需手动同步
+2. SubagentManager._chat_with_retry() 应与 AgentLoop._chat_with_retry() 保持一致的参数传递模式
+3. 每次 merge upstream 后应有自动化检查确保所有 LLMProvider 实现的签名一致
+4. 维护一份 merge 后必检清单文档
+
+### 25.3 设计方案
+
+#### 25.3.1 ProviderPool **kwargs 透传
+
+将 `chat()` 签名改为 `(self, messages, **kwargs)`，透传所有参数给底层 provider。`model` 参数始终被覆盖为 `self._active_model`。
+
+#### 25.3.2 SubagentManager 条件传递
+
+`_chat_with_retry()` 使用 `if param is not None: kwargs[key] = param` 模式，与 `AgentLoop._chat_with_retry()` 一致。
+
+#### 25.3.3 接口签名一致性测试
+
+`TestProviderInterfaceConsistency` 测试类，检查所有 LLMProvider 实现（ProviderPool、LiteLLMProvider、CustomProvider）的 chat() 签名与 base.py 一致。
+
+#### 25.3.4 Merge 后必检清单
+
+在 `docs/LOCAL_CHANGES.md` 末尾维护清单，列出每次 merge 后需要检查的 local 自定义代码。
+
+### 25.4 影响范围
+
+| 文件 | 改动 |
+|------|------|
+| `providers/pool.py` | chat() → **kwargs 透传 |
+| `agent/subagent.py` | _chat_with_retry() 条件传递 |
+| `tests/test_provider_pool.py` | +5 新测试 |
+| `docs/LOCAL_CHANGES.md` | Merge 必检清单 |
+
+---
+
 *本文档将随需求迭代持续更新。*
