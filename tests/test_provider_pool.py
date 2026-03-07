@@ -212,6 +212,40 @@ class TestProviderPoolChat:
             temperature=0.5,
         )
 
+    def test_chat_passes_reasoning_effort(self):
+        """Regression test: reasoning_effort must be forwarded to the underlying provider."""
+        mock_provider = _make_mock_provider("anthropic")
+        pool = ProviderPool(
+            providers={"anthropic": (mock_provider, "claude-opus-4-6")},
+            active_provider="anthropic",
+            active_model="claude-opus-4-6",
+        )
+
+        messages = [{"role": "user", "content": "hi"}]
+        asyncio.new_event_loop().run_until_complete(
+            pool.chat(messages, reasoning_effort="medium")
+        )
+
+        call_kwargs = mock_provider.chat.call_args.kwargs
+        assert call_kwargs.get("reasoning_effort") == "medium"
+
+    def test_chat_forwards_unknown_kwargs(self):
+        """ProviderPool should transparently forward any new kwargs to the underlying provider."""
+        mock_provider = _make_mock_provider("anthropic")
+        pool = ProviderPool(
+            providers={"anthropic": (mock_provider, "claude-opus-4-6")},
+            active_provider="anthropic",
+            active_model="claude-opus-4-6",
+        )
+
+        messages = [{"role": "user", "content": "hi"}]
+        asyncio.new_event_loop().run_until_complete(
+            pool.chat(messages, some_future_param="value123")
+        )
+
+        call_kwargs = mock_provider.chat.call_args.kwargs
+        assert call_kwargs.get("some_future_param") == "value123"
+
 
 # ── /provider command tests (AgentLoop integration) ──
 
@@ -357,3 +391,66 @@ class TestProviderPoolPerSession:
         _, model_b = pool.get_for_session("session_b")
         assert model_a == "deepseek-chat"
         assert model_b == "claude-sonnet-4-20250514"
+
+
+# ── Interface signature consistency tests ──
+
+class TestProviderInterfaceConsistency:
+    """Ensure all LLMProvider implementations accept the same parameters as base.
+
+    This catches the class of bugs where upstream adds a new parameter to
+    LLMProvider.chat() but a local implementation (e.g. ProviderPool) doesn't
+    get updated during merge.
+    """
+
+    def test_pool_chat_accepts_base_params(self):
+        """ProviderPool.chat() must accept all parameters that base.chat() defines."""
+        import inspect
+        base_sig = inspect.signature(LLMProvider.chat)
+        pool_sig = inspect.signature(ProviderPool.chat)
+
+        base_params = set(base_sig.parameters.keys()) - {"self"}
+        pool_params = set(pool_sig.parameters.keys()) - {"self"}
+
+        # Pool uses **kwargs, so it should have 'messages' + 'kwargs'
+        # The key check: pool must accept at least 'messages' (positional)
+        # and **kwargs (to forward everything else)
+        assert "messages" in pool_params, "ProviderPool.chat() must accept 'messages'"
+        assert "kwargs" in pool_params, (
+            f"ProviderPool.chat() should use **kwargs for forward-compatibility. "
+            f"Base params: {base_params}, Pool params: {pool_params}"
+        )
+
+    def test_litellm_provider_chat_matches_base(self):
+        """LiteLLMProvider.chat() must accept all parameters that base.chat() defines."""
+        import inspect
+        from nanobot.providers.litellm_provider import LiteLLMProvider
+
+        base_sig = inspect.signature(LLMProvider.chat)
+        impl_sig = inspect.signature(LiteLLMProvider.chat)
+
+        base_params = set(base_sig.parameters.keys()) - {"self"}
+        impl_params = set(impl_sig.parameters.keys()) - {"self"}
+
+        missing = base_params - impl_params
+        assert not missing, (
+            f"LiteLLMProvider.chat() is missing parameters from base: {missing}. "
+            f"Base: {sorted(base_params)}, Impl: {sorted(impl_params)}"
+        )
+
+    def test_custom_provider_chat_matches_base(self):
+        """CustomProvider.chat() must accept all parameters that base.chat() defines."""
+        import inspect
+        from nanobot.providers.custom_provider import CustomProvider
+
+        base_sig = inspect.signature(LLMProvider.chat)
+        impl_sig = inspect.signature(CustomProvider.chat)
+
+        base_params = set(base_sig.parameters.keys()) - {"self"}
+        impl_params = set(impl_sig.parameters.keys()) - {"self"}
+
+        missing = base_params - impl_params
+        assert not missing, (
+            f"CustomProvider.chat() is missing parameters from base: {missing}. "
+            f"Base: {sorted(base_params)}, Impl: {sorted(impl_params)}"
+        )

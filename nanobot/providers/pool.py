@@ -173,28 +173,23 @@ class ProviderPool(LLMProvider):
     async def chat(
         self,
         messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None = None,
-        model: str | None = None,
-        max_tokens: int = 4096,
-        temperature: float = 0.7,
-        reasoning_effort: str | None = None,
+        **kwargs: Any,
     ) -> LLMResponse:
         """Route the chat call to the active provider.
 
-        The ``model`` parameter from the caller is **ignored** — the pool
-        always uses ``self._active_model``.  This ensures that switching
-        provider+model via ``switch()`` takes full effect without requiring
-        AgentLoop code changes.
+        Accepts ``**kwargs`` and transparently forwards them to the
+        underlying provider.  This means that when upstream adds new
+        parameters (e.g. ``reasoning_effort``), ProviderPool does **not**
+        need to be updated — the new kwarg is simply passed through.
+
+        The ``model`` kwarg from the caller is **overridden** with
+        ``self._active_model`` so that switching provider+model via
+        ``switch()`` takes full effect without requiring AgentLoop code
+        changes.
         """
         provider, _ = self._providers[self._active_provider]
-        return await provider.chat(
-            messages,
-            tools=tools,
-            model=self._active_model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            reasoning_effort=reasoning_effort,
-        )
+        kwargs["model"] = self._active_model  # always override model
+        return await provider.chat(messages, **kwargs)
 
     def get_default_model(self) -> str:
         """Return the currently active model."""

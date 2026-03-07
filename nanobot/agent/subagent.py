@@ -381,14 +381,16 @@ class SubagentManager:
         last_error: Exception | None = None
         for attempt in range(_MAX_RETRIES + 1):
             try:
-                return await self.provider.chat(
+                kwargs: dict[str, Any] = dict(
                     messages=messages,
                     tools=tools.get_definitions(),
                     model=self.model,
                     temperature=self.temperature,
                     max_tokens=self.max_tokens,
-                    reasoning_effort=self.reasoning_effort,
                 )
+                if self.reasoning_effort is not None:
+                    kwargs["reasoning_effort"] = self.reasoning_effort
+                return await self.provider.chat(**kwargs)
             except Exception as e:
                 if attempt < _MAX_RETRIES and _is_retryable(e):
                     delay = _RETRY_DELAYS[min(attempt, len(_RETRY_DELAYS) - 1)]
