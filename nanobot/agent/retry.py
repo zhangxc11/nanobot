@@ -114,12 +114,12 @@ def is_fast_retryable(error: Exception) -> bool:
 def compute_retry_delay(attempt: int, fast: bool) -> float:
     """Compute retry delay in seconds based on attempt number and error type.
 
-    Fast retry (disconnected/timeout): 2, 4, 8, 16, 30 seconds
-    Slow retry (rate limit/overload):  10, 20, 40, 60, 60 seconds
+    Fast retry (disconnected/timeout): 1, 2, 4, 8, 16, 30 seconds
+    Slow retry (rate limit/overload):  5, 10, 20, 40, 60 seconds
     """
     if fast:
-        delay = 2 * (2 ** attempt)  # 2, 4, 8, 16, 32, ...
+        delay = max(1, 2 ** attempt)  # 1, 2, 4, 8, 16, 32, ...
         return min(delay, 30.0)
     else:
-        delay = 10 * (2 ** attempt)  # 10, 20, 40, 80, ...
+        delay = 5 * (2 ** attempt)  # 5, 10, 20, 40, 80, ...
         return min(delay, 60.0)
