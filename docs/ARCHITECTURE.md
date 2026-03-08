@@ -1204,20 +1204,31 @@ class GatewayCallbacks(DefaultCallbacks):
     """Per-session callbacks with user injection support."""
     
     def __init__(self, bus: MessageBus, channel: str, chat_id: str):
-        self._inject_queue: asyncio.Queue[str] = asyncio.Queue()
+        self._inject_queue: asyncio.Queue[str | dict] = asyncio.Queue()
         self._bus = bus
         self._channel = channel
         self._chat_id = chat_id
     
-    async def check_user_input(self) -> str | None:
-        """Called by _run_agent_loop after each tool round."""
+    async def check_user_input(self) -> str | dict | None:
+        """Called by _run_agent_loop after each tool round.
+        
+        Returns:
+            str: user message (role="user")
+            dict: structured message with role/content keys (e.g. from SessionMessenger)
+            None: no pending input
+        """
         try:
             return self._inject_queue.get_nowait()
         except asyncio.QueueEmpty:
             return None
     
-    async def inject(self, text: str):
-        """Called by dispatcher when same session receives new message."""
+    async def inject(self, text: str | dict):
+        """Called by dispatcher when same session receives new message,
+        or by SessionMessenger for inter-session communication.
+        
+        Args:
+            text: plain str (user message) or dict with "role"/"content" keys
+        """
         await self._inject_queue.put(text)
     
     async def on_progress(self, text: str, *, tool_hint: bool = False):
@@ -1228,6 +1239,17 @@ class GatewayCallbacks(DefaultCallbacks):
             content=text, metadata=meta,
         ))
 ```
+
+### 8.7 Subagent 回报消息 Role 策略
+
+subagent 完成后通过 SessionMessenger 向父 session 发送回报。为防止 agent 误将回报当成用户指令，role 判定通过**结构化通道信息**而非内容文本：
+
+| 路径 | 判定方式 | role |
+|------|---------|------|
+| inject（父 session 运行中） | `isinstance(injected, dict)` → 使用 dict 中的 `role` 字段 | `"system"` |
+| trigger（父 session 空闲） | `msg.channel == "session_messenger"` | `"system"` |
+| 用户消息 inject | `isinstance(injected, str)` | `"user"` |
+| 用户消息 trigger | `msg.channel != "session_messenger"` | `"user"` |
 
 ### 8.7 _process_message 参数化
 

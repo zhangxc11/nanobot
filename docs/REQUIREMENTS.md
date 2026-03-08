@@ -1819,6 +1819,57 @@ Web worker 模式下的实现：running task → inject queue，idle → `_run_t
 
 ---
 
+## §30 Subagent 回报消息 role 修正 + announce 模板优化
+
+### 30.1 背景
+
+Phase 30 引入 SessionMessenger 后，subagent 回报消息在两条路径上都以 `role: "user"` 进入父 session：
+- **inject 路径**（父 session 正在运行）：inject 队列只传递 `str`，checkpoint 处硬编码 `role: "user"`
+- **trigger 路径**（父 session 已 idle）：通过 `InboundMessage` 触发 `_process_message`，`build_messages` 硬编码 `role: "user"`
+
+导致 agent 把 subagent 回报当成用户新指令执行，产生重复工作或误操作。
+
+### 30.2 需求
+
+1. subagent 回报消息以 `role: "system"` 注入，而非 `role: "user"`
+2. role 判定通过结构化通道信息（inject dict 的 role 字段 / InboundMessage 的 channel 字段），不依赖内容文本
+3. announce 模板改为通知式，引导 agent 结合上下文自主决策，避免主动重复执行
+4. spawn 工具 persist 默认值改为 true
+
+### 30.3 设计
+
+#### 30.3.1 inject 队列扩展 (callbacks.py)
+
+inject 队列从 `Queue[str]` 改为 `Queue[str | dict]`：
+- `str`：用户消息（向后兼容），checkpoint 处 `role: "user"`
+- `dict`：结构化消息（含 `role` 和 `content` 键），checkpoint 处使用 dict 中的 role
+
+#### 30.3.2 GatewaySessionMessenger inject 改造 (loop.py)
+
+inject 时传 `{"role": "system", "content": prefixed}` 而非纯字符串。
+
+#### 30.3.3 trigger 路径 role 修正 (loop.py)
+
+`_process_message` 中判断 `msg.channel == "session_messenger"` → 将 `build_messages` 输出的最后一条消息 role 改为 `"system"`。
+
+#### 30.3.4 announce 模板重写 (subagent.py)
+
+从指令式改为通知式，引导 agent 结合上下文决策：
+- 不再要求 "Summarize this naturally"
+- 明确告知 "如果不用响应，不用有输出"
+- 明确告知 "不要重复已完成的工作"
+
+### 30.4 影响范围
+
+| 文件 | 改动 |
+|------|------|
+| `agent/callbacks.py` | inject 队列 `str` → `str \| dict`，类型注解更新 |
+| `agent/loop.py` | inject checkpoint 处理 dict + GatewaySessionMessenger inject dict + _process_message channel 判断 |
+| `agent/subagent.py` | announce_content 模板重写 |
+| `agent/tools/spawn.py` | persist 默认值 → True |
+
+---
+
 ### 手动维护的 backlog
 
 **note** 这个部分手动添加需求 backlog。被激活后，更新前序需求文档章节，推进开发。

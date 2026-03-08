@@ -122,7 +122,7 @@ class SubagentManager:
         session_key: str | None = None,
         # Phase 26 additions
         max_iterations: int | None = None,
-        persist: bool = False,
+        persist: bool = True,
     ) -> str:
         """Spawn a subagent to execute a task in the background.
 
@@ -141,6 +141,7 @@ class SubagentManager:
             hard cap: ``MAX_SUBAGENT_ITERATIONS``).
         persist:
             If True, persist subagent messages to a session JSONL file.
+            Default True — only set False for trivial throwaway tasks.
             The session key will be ``subagent:<parent_key_sanitized>_<task_id>``
             so the frontend can identify and group subagent sessions.
         """
@@ -421,14 +422,18 @@ class SubagentManager:
         """
         status_text = "completed successfully" if status == "ok" else "failed"
 
-        announce_content = f"""[Subagent '{label}' {status_text}]
+        announce_content = f"""[Subagent Result Notification]
+A previously spawned subagent '{label}' has {status_text}.
 
-Task: {task}
+Original task: {task}
 
-Result:
+Subagent result:
 {result}
 
-Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not mention technical details like "subagent" or task IDs."""
+Review this result in the context of your current session. Choose the appropriate response:
+- If you were waiting for this result to continue a planned workflow, proceed accordingly.
+- If the conversation has already moved on or the user has been informed, no output is needed.
+- Do not repeat work that has already been done in this session."""
 
         # Prefer SessionMessenger if available (Phase 30)
         if self.session_messenger and parent_session_key:

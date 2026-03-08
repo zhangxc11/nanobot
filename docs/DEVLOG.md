@@ -39,6 +39,7 @@
 | Phase 28: 弱网 LLM API 稳定性增强 | ✅ 已完成 | feat/weak-network-resilience → local |
 | Phase 29: SpawnTool session_key 传递修复 | ✅ 已完成 | local |
 | Phase 30: Session 间消息传递机制 (SessionMessenger) | ✅ 已完成 | local |
+| Phase 31: Subagent 回报消息 role 修正 + announce 模板优化 | ✅ 已完成 | local |
 
 ---
 
@@ -1432,6 +1433,70 @@ subagent 完成后通过 `_announce_result()` 发 `InboundMessage(channel="syste
 | web-chat `worker.py` | +WorkerSessionMessenger, inject 前缀, on_message 解析改进 |
 | `tests/test_session_messenger.py` | 12 个新测试 |
 | `tests/test_concurrent_gateway.py` | 更新 inject 断言适配新前缀 |
+
+---
+
+## Phase 31: Subagent 回报消息 role 修正 + announce 模板优化 (2026-03-08)
+
+> 需求: REQUIREMENTS.md §30 | 分支: local
+> 完成时间: 2026-03-08
+
+### 背景
+
+Phase 30 引入 SessionMessenger 后，subagent 回报消息在 inject 和 trigger 两条路径上都以 `role: "user"` 进入父 session，导致 agent 误将回报当成用户新指令执行（重复工作、误操作）。在 session webchat_1772952110 中复现：agent 已完成回复 → session idle → subagent 回报以 user role 触发新一轮执行 → agent 重复执行所有分析。
+
+### 任务清单
+
+- ✅ **T31.1** `subagent.py` — announce_content 模板重写
+  - 从指令式 ("Summarize this naturally") 改为通知式
+  - 引导 agent 结合上下文自主决策：按计划继续 / 不用响应 / 不重复已完成的工作
+
+- ✅ **T31.2** `callbacks.py` — inject 队列扩展 `str` → `str | dict`
+  - `AgentCallbacks.check_user_input()` 返回类型 → `str | dict | None`
+  - `GatewayCallbacks._inject_queue` 类型 → `Queue[str | dict]`
+  - `GatewayCallbacks.inject()` 参数类型 → `str | dict`
+
+- ✅ **T31.3** `loop.py` inject checkpoint — 处理 dict 类型
+  - `isinstance(injected, dict)` → 使用 dict 中的 `role` 字段
+  - 纯字符串 → 保持 `role: "user"`（向后兼容）
+
+- ✅ **T31.4** `loop.py` GatewaySessionMessenger — inject 传 dict
+  - `inject({"role": "system", "content": prefixed})` 替代 `inject(prefixed)`
+
+- ✅ **T31.5** `loop.py` `_process_message` — trigger 路径 role 修正
+  - `msg.channel == "session_messenger"` → `build_messages` 输出最后一条 role 改为 `"system"`
+
+- ✅ **T31.6** `spawn.py` — persist 默认值 → True
+
+- ✅ **T31.7** 测试更新
+  - `test_subagent.py`: `test_execute_defaults` persist 断言 → True; `test_retry_exhausted` call_count → 6
+  - `test_session_messenger.py`: `test_inject_into_running_session` 断言 inject 为 dict + role="system"; trigger 测试 inject 调用更新为 dict 格式
+  - 全量测试: 410 passed, 4 deselected (已知 flaky llm_retry)
+
+- ✅ **T31.8** 文档更新
+  - REQUIREMENTS.md §30 新增
+  - ARCHITECTURE.md §8.6 GatewayCallbacks 更新 + §8.7 Subagent 回报 Role 策略新增
+  - DEVLOG.md 本条记录
+
+### 设计决策
+
+**role 判定不依赖内容文本**：
+- inject 路径：通过 `isinstance(injected, dict)` + dict 中的 `role` 字段
+- trigger 路径：通过 `InboundMessage.channel == "session_messenger"` 结构化字段
+- 即使 announce 模板格式变化，role 判定仍然稳定
+
+### 影响文件
+
+| 文件 | 改动 |
+|------|------|
+| `agent/subagent.py` | announce_content 模板重写 |
+| `agent/callbacks.py` | inject 队列 `str` → `str \| dict`，类型注解更新 |
+| `agent/loop.py` | inject checkpoint dict 处理 + GatewaySessionMessenger dict inject + _process_message channel 判断 |
+| `agent/tools/spawn.py` | persist 默认值 → True |
+| `tests/test_subagent.py` | 2 个断言更新 |
+| `tests/test_session_messenger.py` | inject 断言更新为 dict |
+| `docs/REQUIREMENTS.md` | §30 新增 |
+| `docs/ARCHITECTURE.md` | §8.6 更新 + §8.7 新增 |
 
 ---
 

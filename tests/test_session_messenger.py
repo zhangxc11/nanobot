@@ -77,7 +77,7 @@ class TestSessionMessengerProtocol:
 class TestGatewaySessionMessengerInjectRunning:
     @pytest.mark.asyncio
     async def test_inject_into_running_session(self):
-        """When target session is running, message should be injected."""
+        """When target session is running, message should be injected as system role dict."""
         from nanobot.agent.callbacks import GatewayCallbacks
 
         # Set up active_sessions with a running worker
@@ -113,7 +113,10 @@ class TestGatewaySessionMessengerInjectRunning:
                 if target_session_key in self._active:
                     w = self._active[target_session_key]
                     if not w.task.done():
-                        await w.callbacks.inject(prefixed)
+                        await w.callbacks.inject({
+                            "role": "system",
+                            "content": prefixed,
+                        })
                         return True
                     else:
                         self._active.pop(target_session_key, None)
@@ -137,8 +140,11 @@ class TestGatewaySessionMessengerInjectRunning:
         # Verify the message was injected (check the inject queue)
         injected = await callbacks.check_user_input()
         assert injected is not None
-        assert "[Message from session subagent:abc]" in injected
-        assert "test content" in injected
+        # Should be a dict with role="system"
+        assert isinstance(injected, dict)
+        assert injected["role"] == "system"
+        assert "[Message from session subagent:abc]" in injected["content"]
+        assert "test content" in injected["content"]
         # Bus should NOT have been called (inject path, not publish)
         bus.publish_inbound.assert_not_called()
 
@@ -165,7 +171,10 @@ class TestGatewaySessionMessengerTriggerIdle:
                 if target_session_key in self._active:
                     w = self._active[target_session_key]
                     if not w.task.done():
-                        await w.callbacks.inject(prefixed)
+                        await w.callbacks.inject({
+                            "role": "system",
+                            "content": prefixed,
+                        })
                         return True
                     else:
                         self._active.pop(target_session_key, None)

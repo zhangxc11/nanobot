@@ -479,17 +479,25 @@ class AgentLoop:
                 if callbacks is not None:
                     injected = await callbacks.check_user_input()
                     if injected:
-                        # Fallback prefix: if the message doesn't already have
-                        # a bracketed prefix (e.g. from SessionMessenger or
-                        # gateway inject), add a default one.
-                        if not injected.startswith("["):
-                            injected = f"[Message from user during execution]\n{injected}"
-                        logger.info("Injected message: {}", injected[:120])
-                        inject_msg = {
-                            "role": "user",
-                            "content": injected,
-                            "timestamp": datetime.now().isoformat(),
-                        }
+                        if isinstance(injected, dict):
+                            # Structured inject (e.g. from SessionMessenger)
+                            # — role is determined by the sender, not by content.
+                            inject_msg = {
+                                "role": injected.get("role", "user"),
+                                "content": injected["content"],
+                                "timestamp": datetime.now().isoformat(),
+                            }
+                        else:
+                            # Plain string inject (user message during execution)
+                            if not injected.startswith("["):
+                                injected = f"[Message from user during execution]\n{injected}"
+                            inject_msg = {
+                                "role": "user",
+                                "content": injected,
+                                "timestamp": datetime.now().isoformat(),
+                            }
+                        logger.info("Injected message (role={}): {}",
+                                    inject_msg["role"], inject_msg["content"][:120])
                         messages.append(inject_msg)
 
                         # Realtime persist: injected user message
@@ -637,7 +645,14 @@ class AgentLoop:
                 if target_session_key in self._active:
                     worker = self._active[target_session_key]
                     if not worker.task.done():
-                        await worker.callbacks.inject(prefixed)
+                        # Inject as system role dict — the inject checkpoint
+                        # will use the role from the dict rather than defaulting
+                        # to "user", preventing the agent from treating subagent
+                        # results as user instructions.
+                        await worker.callbacks.inject({
+                            "role": "system",
+                            "content": prefixed,
+                        })
                         logger.debug("GatewaySessionMessenger: injected into running session {}",
                                      target_session_key)
                         return True
@@ -1113,7 +1128,16 @@ class AgentLoop:
             channel=msg.channel, chat_id=msg.chat_id,
         )
 
-        # Realtime persist: user message (last element of initial_messages)
+        # Session messenger messages (e.g. subagent results) should be
+        # injected as system role, not user role, to prevent the agent
+        # from treating them as new user instructions.
+        if msg.channel == "session_messenger":
+            initial_messages[-1] = {
+                **initial_messages[-1],
+                "role": "system",
+            }
+
+        # Realtime persist: user/system message (last element of initial_messages)
         self.sessions.append_message(session, initial_messages[-1])
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:

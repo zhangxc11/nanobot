@@ -73,7 +73,7 @@ class SpawnTool(Tool):
                     "type": "boolean",
                     "description": (
                         "If true, persist subagent messages to a session file for debugging. "
-                        "Default false."
+                        "Default true. Only set to false for trivial throwaway tasks."
                     ),
                 },
             },
@@ -85,7 +85,7 @@ class SpawnTool(Tool):
         task: str,
         label: str | None = None,
         max_iterations: int | None = None,
-        persist: bool = False,
+        persist: bool = True,
         **kwargs: Any,
     ) -> str:
         """Spawn a subagent to execute the given task."""

@@ -299,8 +299,8 @@ class TestChatWithRetry:
                     [{"role": "user", "content": "hi"}], tools
                 )
 
-        # 1 initial + 3 retries = 4 calls
-        assert mgr.provider.chat.call_count == 4
+        # 1 initial + 5 retries = 6 calls
+        assert mgr.provider.chat.call_count == 6
 
     @pytest.mark.asyncio
     async def test_non_retryable_raises_immediately(self):
@@ -463,7 +463,7 @@ class TestSpawnToolParameters:
 
         call_kwargs = manager.spawn.call_args[1]
         assert call_kwargs["max_iterations"] is None
-        assert call_kwargs["persist"] is False
+        assert call_kwargs["persist"] is True
 
 
 # ── Tests: Task Keeper (GC prevention) ──────────────────────────────────────

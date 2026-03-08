@@ -120,7 +120,7 @@ class AgentCallbacks(Protocol):
         """Called when the agent turn fails with an exception."""
         ...
 
-    async def check_user_input(self) -> str | None:
+    async def check_user_input(self) -> str | dict | None:
         """Check if user has pending input to inject into the agent loop.
 
         Called between tool execution rounds — after all tools in the
@@ -129,8 +129,9 @@ class AgentCallbacks(Protocol):
 
         Returns
         -------
-        str or None
-            User text to inject, or ``None`` if no input is pending.
+        str, dict, or None
+            User text to inject (str), session message to inject (dict with
+            ``role`` and ``content`` keys), or ``None`` if no input is pending.
         """
         ...
 
@@ -157,7 +158,7 @@ class DefaultCallbacks:
     async def on_error(self, error: Exception) -> None:
         pass
 
-    async def check_user_input(self) -> str | None:
+    async def check_user_input(self) -> str | dict | None:
         return None
 
 
@@ -173,20 +174,27 @@ class GatewayCallbacks(DefaultCallbacks):
     """
 
     def __init__(self, bus: "MessageBus", channel: str, chat_id: str):
-        self._inject_queue: asyncio.Queue[str] = asyncio.Queue()
+        self._inject_queue: asyncio.Queue[str | dict] = asyncio.Queue()
         self._bus = bus
         self._channel = channel
         self._chat_id = chat_id
 
-    async def check_user_input(self) -> str | None:
+    async def check_user_input(self) -> str | dict | None:
         """Non-blocking check for injected user messages."""
         try:
             return self._inject_queue.get_nowait()
         except asyncio.QueueEmpty:
             return None
 
-    async def inject(self, text: str) -> None:
-        """Called by the dispatcher to inject a user message into this session."""
+    async def inject(self, text: str | dict) -> None:
+        """Called by the dispatcher to inject a user message into this session.
+
+        Parameters
+        ----------
+        text:
+            Either a plain string (user message) or a dict with ``role``
+            and ``content`` keys (e.g. system message from SessionMessenger).
+        """
         await self._inject_queue.put(text)
 
     async def on_progress(self, text: str, *, tool_hint: bool = False) -> None:
