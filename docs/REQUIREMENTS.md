@@ -1216,14 +1216,6 @@ class GatewayCallbacks(DefaultCallbacks):
 
 ---
 
-### 手动维护的 backlog
-
-**note** 这个部分手动添加需求 backlog。被激活后，更新前序需求文档章节，推进开发。
-
-（暂无）
-
----
-
 ## 二十、/new 归档方向反转 + Session 命名简化（Phase 21）
 
 ### 20.1 需求背景
@@ -1766,6 +1758,14 @@ Phase 11 实现了 `AgentLoop._chat_with_retry()` 指数退避重试机制，Pha
 |------|------|
 | `agent/tools/spawn.py` | `set_context()` 新增 `session_key` 参数 |
 | `agent/loop.py` | `_set_tool_context()` 传入 `session_key` |
+
+---
+
+### 手动维护的 backlog
+
+**note** 这个部分手动添加需求 backlog。被激活后，更新前序需求文档章节，推进开发。
+
+（暂无）
 
 ---
 
