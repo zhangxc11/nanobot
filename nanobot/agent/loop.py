@@ -222,31 +222,10 @@ class AgentLoop:
     def _is_retryable(error: Exception) -> bool:
         """Check if an LLM error is transient and worth retrying.
 
-        Matches rate-limit, connection, and timeout errors from litellm
-        and upstream providers without importing their exception classes.
+        Delegates to the shared ``agent.retry`` module (Phase 28).
         """
-        error_type = type(error).__name__
-        # litellm wraps provider errors with these class names
-        if error_type in (
-            "RateLimitError",
-            "APIConnectionError",
-            "APITimeoutError",
-            "Timeout",
-            "ServiceUnavailableError",
-            "InternalServerError",
-        ):
-            return True
-        # Check HTTP status code if available (litellm attaches it)
-        status = getattr(error, "status_code", None)
-        if status in (429, 500, 502, 503, 504, 529):
-            return True
-        # Fallback: check error message string
-        error_str = str(error).lower()
-        if "rate limit" in error_str or "rate_limit" in error_str:
-            return True
-        if "overloaded" in error_str or "capacity" in error_str:
-            return True
-        return False
+        from nanobot.agent.retry import is_retryable
+        return is_retryable(error)
 
     async def _chat_with_retry(
         self,
@@ -262,8 +241,9 @@ class AgentLoop:
     ):
         """Call provider.chat() with exponential backoff for transient errors.
 
-        Retries up to 5 times with delays of 10s, 20s, 40s, 80s, 160s.
-        Non-retryable errors are raised immediately.
+        Phase 28: Enhanced with smart retry delays — fast for disconnected/
+        timeout errors (2/4/8s), slow for rate-limit/overload (10/20/40s).
+        Retries up to 7 times. Non-retryable errors are raised immediately.
 
         Parameters
         ----------
@@ -272,9 +252,10 @@ class AgentLoop:
         reasoning_effort:
             Optional reasoning effort hint passed to the provider.
         """
+        from nanobot.agent.retry import is_fast_retryable, compute_retry_delay
+
         _provider = provider or self.provider
-        max_retries = 5
-        base_delay = 10  # seconds
+        max_retries = 7
 
         for attempt in range(max_retries + 1):
             try:
@@ -291,15 +272,18 @@ class AgentLoop:
             except Exception as e:
                 if not self._is_retryable(e) or attempt >= max_retries:
                     raise
-                delay = base_delay * (2 ** attempt)  # 10, 20, 40, 80, 160
+                fast = is_fast_retryable(e)
+                delay = compute_retry_delay(attempt, fast)
+                retry_type = "fast" if fast else "slow"
                 logger.warning(
-                    "LLM call failed (attempt {}/{}): {}. Retrying in {}s...",
-                    attempt + 1, max_retries, str(e)[:200], delay,
+                    "LLM call failed (attempt {}/{}, {} retry): {}. Retrying in {:.0f}s...",
+                    attempt + 1, max_retries, retry_type, str(e)[:200], delay,
                 )
                 if progress_fn:
                     try:
+                        label = "网络断连" if fast else "API 限流"
                         await progress_fn(
-                            f"⏳ API 限流，等待 {delay}s 后重试 ({attempt + 1}/{max_retries})"
+                            f"⏳ {label}，等待 {delay:.0f}s 后重试 ({attempt + 1}/{max_retries})"
                         )
                     except Exception:
                         pass  # progress notification is best-effort

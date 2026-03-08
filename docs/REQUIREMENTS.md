@@ -1694,4 +1694,47 @@ Phase 11 实现了 `AgentLoop._chat_with_retry()` 指数退避重试机制，Pha
 
 ---
 
+## §二十七 弱网环境 LLM API 稳定性增强 (Phase 28)
+
+### 27.1 问题描述
+
+弱网条件下频繁出现两类错误导致 session 中断：
+1. `litellm.InternalServerError: AnthropicException - Server disconnected`
+2. `litellm.Timeout: AnthropicException - Connection timed out. Timeout passed=600.0`
+
+### 27.2 诊断结果
+
+| # | 问题 | 严重性 |
+|---|------|--------|
+| 1 | litellm 默认 `request_timeout=6000s`，未覆盖，弱网下单次请求卡 100 分钟 | 🔴 高 |
+| 2 | 无独立 connect timeout，TCP 握手阶段也用全局 timeout | 🔴 高 |
+| 3 | AgentLoop 重试延迟 10/20/40/80/160s，对 disconnected 瞬时错误等待过久 | 🟡 中 |
+| 4 | subagent `_is_retryable()` 遗漏 `"Timeout"` 类名 | 🟡 中 |
+| 5 | `_is_retryable()` 缺少 "disconnected"/"connection reset" 字符串匹配 | 🟡 中 |
+
+### 27.3 需求
+
+1. **合理超时**：设置 connect timeout 30s + read timeout 300s（通过 litellm `timeout` 参数）
+2. **智能重试延迟**：区分 disconnected（快重试 2/4/8s）和 rate limit（慢重试 10/20/40s）
+3. **统一 `_is_retryable()`**：提取为共享函数，AgentLoop 和 subagent 复用，补全遗漏模式
+4. **增加重试次数**：AgentLoop 从 5 次增到 7 次，subagent 从 3 次增到 5 次
+5. **litellm 层面启用 `num_retries=2`**：连接级快速重试，不等待
+
+### 27.4 影响范围
+
+| 文件 | 改动 |
+|------|------|
+| `providers/litellm_provider.py` | 添加 timeout 参数、num_retries |
+| `agent/loop.py` | 重构重试逻辑，使用共享 `_is_retryable`，智能延迟 |
+| `agent/subagent.py` | 使用共享 `_is_retryable`，增加重试次数 |
+| `agent/retry.py` (新) | 提取共享重试工具函数 |
+
+### 27.5 不做什么
+
+- 不改变 streaming vs non-streaming 模式
+- 不改变错误 response 写入 session 的行为
+- 不修改 config schema（超时值暂硬编码，后续可配置化）
+
+---
+
 *本文档将随需求迭代持续更新。*
