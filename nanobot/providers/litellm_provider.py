@@ -14,9 +14,16 @@ from nanobot.providers.registry import find_by_model, find_gateway
 
 # Phase 28: Weak-network resilience — timeout + litellm-level retries
 # litellm converts httpx.Timeout to float for providers that don't support it,
-# so we use a simple float timeout (300s = 5 min, down from default 6000s).
-_LLM_TIMEOUT = 300.0  # seconds — connect + read combined
-_LLM_NUM_RETRIES = 2  # litellm-level fast retries for connection errors
+# so we use a simple float timeout.
+#
+# Phase 28.1: Reduced from 300s → 120s.  300s was still too long for
+# disconnected-network scenarios — the first retry wouldn't fire for
+# 300s × (1 + num_retries) = up to 15 minutes.  120s is long enough for
+# large-context completions while keeping the failure-detection fast.
+# litellm num_retries set to 0 so that our own _chat_with_retry() manages
+# all retry logic with smart delays (fast vs slow).
+_LLM_TIMEOUT = 120.0  # seconds — connect + read combined
+_LLM_NUM_RETRIES = 0  # let _chat_with_retry() handle retries
 
 # Standard chat-completion message keys.
 _ALLOWED_MSG_KEYS = frozenset({"role", "content", "tool_calls", "tool_call_id", "name", "reasoning_content"})
