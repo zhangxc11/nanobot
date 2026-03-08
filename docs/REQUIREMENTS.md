@@ -1224,38 +1224,6 @@ class GatewayCallbacks(DefaultCallbacks):
 
 ---
 
-## §二十八 SpawnTool session_key 传递 Bug 修复
-
-### 28.1 问题描述
-
-`SpawnTool.set_context()` 从 `channel + ":" + chat_id` 拼接 `_session_key`，但在以下场景中 channel:chat_id 与实际 session_key 不一致：
-
-| 场景 | channel | chat_id | 实际 session_key | SpawnTool 拼出的 key |
-|------|---------|---------|-----------------|---------------------|
-| web worker | `web` | `1772941119` | `webchat:1772941119` | `web:1772941119` ❌ |
-| 飞书 routing 后 | `feishu.lab` | `ou_xxx` | `feishu.lab.1772855249` | `feishu.lab:ou_xxx` ❌ |
-| CLI routing 后 | `cli` | `direct` | `cli.1772605898` | `cli:direct` ❌ |
-
-**影响**：subagent session_key 格式为 `subagent:{parent_sanitized}_{task_id}`，parent_sanitized 来自错误的 key，导致前端 `resolveParent()` 无法还原父子关系，subagent session 不会显示为父 session 的子节点。
-
-### 28.2 根因
-
-`_set_tool_context()` 已经接收了正确的 `session_key` 参数（经过 routing 解析后的真正 key），但没有传给 `spawn_tool.set_context()`。
-
-### 28.3 修复方案
-
-1. `SpawnTool.set_context()` 新增 `session_key` 可选参数，优先使用传入值
-2. `_set_tool_context()` 将 `session_key` 传给 `spawn_tool.set_context()`
-
-### 28.4 影响范围
-
-| 文件 | 改动 |
-|------|------|
-| `agent/tools/spawn.py` | `set_context()` 新增 `session_key` 参数 |
-| `agent/loop.py` | `_set_tool_context()` 传入 `session_key` |
-
----
-
 ## 二十、/new 归档方向反转 + Session 命名简化（Phase 21）
 
 ### 20.1 需求背景
@@ -1766,6 +1734,38 @@ Phase 11 实现了 `AgentLoop._chat_with_retry()` 指数退避重试机制，Pha
 - 不改变 streaming vs non-streaming 模式
 - 不改变错误 response 写入 session 的行为
 - 不修改 config schema（超时值暂硬编码，后续可配置化）
+
+---
+
+## §二十八 SpawnTool session_key 传递 Bug 修复 (Phase 29)
+
+### 28.1 问题描述
+
+`SpawnTool.set_context()` 从 `channel + ":" + chat_id` 拼接 `_session_key`，但在以下场景中 channel:chat_id 与实际 session_key 不一致：
+
+| 场景 | channel | chat_id | 实际 session_key | SpawnTool 拼出的 key |
+|------|---------|---------|-----------------|---------------------|
+| web worker | `web` | `1772941119` | `webchat:1772941119` | `web:1772941119` ❌ |
+| 飞书 routing 后 | `feishu.lab` | `ou_xxx` | `feishu.lab.1772855249` | `feishu.lab:ou_xxx` ❌ |
+| CLI routing 后 | `cli` | `direct` | `cli.1772605898` | `cli:direct` ❌ |
+
+**影响**：subagent session_key 格式为 `subagent:{parent_sanitized}_{task_id}`，parent_sanitized 来自错误的 key，导致前端 `resolveParent()` 无法还原父子关系，subagent session 不会显示为父 session 的子节点。
+
+### 28.2 根因
+
+`_set_tool_context()` 已经接收了正确的 `session_key` 参数（经过 routing 解析后的真正 key），但没有传给 `spawn_tool.set_context()`。
+
+### 28.3 修复方案
+
+1. `SpawnTool.set_context()` 新增 `session_key` 可选参数，优先使用传入值
+2. `_set_tool_context()` 将 `session_key` 传给 `spawn_tool.set_context()`
+
+### 28.4 影响范围
+
+| 文件 | 改动 |
+|------|------|
+| `agent/tools/spawn.py` | `set_context()` 新增 `session_key` 参数 |
+| `agent/loop.py` | `_set_tool_context()` 传入 `session_key` |
 
 ---
 
