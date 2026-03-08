@@ -1498,6 +1498,17 @@ Phase 30 引入 SessionMessenger 后，subagent 回报消息在 inject 和 trigg
 | `docs/REQUIREMENTS.md` | §30 新增 |
 | `docs/ARCHITECTURE.md` | §8.6 更新 + §8.7 新增 |
 
+### 补丁: Worker 模式遗漏修复 (2026-03-08 17:05)
+
+Phase 31 只改了 Gateway 模式（loop.py），遗漏了 Web-Chat Worker 模式（worker.py）。
+webchat session 走的是 Worker 模式，所以 inject 和 trigger 两条路径的 role 都没生效。
+
+**修复 3 处**：
+- ✅ `WorkerSessionMessenger.send_to_session()` inject 路径：`put(prefixed)` → `put({"role": "system", "content": prefixed})`
+- ✅ `WorkerCallbacks.check_user_input()` 返回类型：`str | None` → `str | dict | None`
+- ✅ `WorkerSessionMessenger.send_to_session()` trigger 路径：`_run_task_sdk(key, prefixed)` → `_run_task_sdk(key, prefixed, channel='session_messenger')`
+- ✅ `_run_task_sdk()` 新增 `channel` 参数（默认 `'web'`），`_execute` 中使用该参数
+
 ---
 
 *本文件随开发进展持续更新。*
