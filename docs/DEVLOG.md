@@ -37,6 +37,7 @@
 | Phase 26: spawn subagent 能力增强 | ✅ 已完成 | local |
 | Phase 27: ProviderPool **kwargs 透传 + 接口一致性防护 | ✅ 已完成 | local |
 | Phase 28: 弱网 LLM API 稳定性增强 | ✅ 已完成 | feat/weak-network-resilience → local |
+| Phase 29: SpawnTool session_key 传递修复 | ✅ 已完成 | local |
 
 ---
 
@@ -1389,3 +1390,26 @@ Phase 22 merge upstream 时，`base.py` 和 `litellm_provider.py` 新增了 `rea
 ---
 
 *本文件随开发进展持续更新。*
+
+---
+
+## Phase 29: SpawnTool session_key 传递修复
+
+**需求**: §28 | **状态**: ✅ 已完成 | **Commit**: `350286f`
+
+### 问题
+
+`SpawnTool.set_context()` 从 `channel:chat_id` 拼接 `_session_key`，在以下场景与实际 session_key 不一致：
+- web worker: `channel='web'` 但 session_key 前缀为 `webchat:`
+- 飞书/CLI routing 后: natural key 被映射为 timestamped key
+
+导致 subagent session key 编码了错误的 parent，前端 `resolveParent()` 无法还原父子关系。
+
+### 修复
+
+- `spawn.py`: `set_context()` 新增 `session_key` 可选参数，优先使用传入值
+- `loop.py`: `_set_tool_context()` 将已有的 `session_key` 透传给 `spawn_tool.set_context()`
+
+### 影响范围
+
+2 个文件，改动 3 行代码。向后兼容（`session_key` 参数有默认值，不传则 fallback 到原逻辑）。
