@@ -1291,4 +1291,41 @@ Phase 22 merge upstream 时，`base.py` 和 `litellm_provider.py` 新增了 `rea
 
 ---
 
+## Hotfix §26: LiteLLMProvider 错误吞没导致 Retry 失效 ✅
+
+**日期**: 2026-03-08
+**分支**: local (直接提交，hotfix 级别)
+
+### 背景
+
+用户在 webchat session 中频繁遇到 `Error calling LLM: litellm.RateLimitError` 错误，Phase 11 实现的 retry 机制未生效。排查发现 `LiteLLMProvider.chat()` 的 `except Exception` 吞掉了所有异常（包括 RateLimitError），将其包装为 `LLMResponse(finish_reason="error")` 返回，导致 `_chat_with_retry()` 永远收不到异常、无法触发重试。该 bug 自 Phase 11 引入以来一直存在。
+
+### 任务清单
+
+- ✅ **H26.1** `providers/litellm_provider.py` — 新增 `_is_retryable()` 静态方法
+  - 镜像 `AgentLoop._is_retryable()` 逻辑
+  - 可重试错误 re-raise，不可重试错误保持原行为
+
+- ✅ **H26.2** 测试验证
+  - 34 个 retry 测试通过
+  - 39 个 provider 测试通过
+
+- ✅ **H26.3** 文档补齐
+  - REQUIREMENTS.md §26 追加 bug 记录
+  - ARCHITECTURE.md §7.8 补充 provider 层错误传播策略
+  - DEVLOG.md 本条记录
+
+- ✅ **H26.4** Gateway 重启生效 (PID 91610)
+
+### 影响文件
+
+| 文件 | 改动 |
+|------|------|
+| `providers/litellm_provider.py` | 新增 `_is_retryable()` + except 分支改为条件 re-raise |
+| `docs/REQUIREMENTS.md` | §26 bug 记录 |
+| `docs/ARCHITECTURE.md` | §7.8 provider 层错误传播策略 |
+| `docs/DEVLOG.md` | 本条 |
+
+---
+
 *本文件随开发进展持续更新。*

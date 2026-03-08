@@ -1660,4 +1660,38 @@ Phase 22 merge upstream 时，`LLMProvider.chat()` 接口新增 `reasoning_effor
 
 ---
 
+## §二十六 LiteLLMProvider 错误吞没导致 Retry 机制失效 (Hotfix)
+
+### 26.1 问题描述
+
+Phase 11 实现了 `AgentLoop._chat_with_retry()` 指数退避重试机制，Phase 26 在 SubagentManager 中也复制了相同逻辑。但**两者从未真正生效过**。
+
+**根因**：`LiteLLMProvider.chat()` 的 `except Exception as e` 捕获了所有异常（包括 `RateLimitError`），将其包装为 `LLMResponse(content="Error calling LLM: ...", finish_reason="error")` 返回。上层 `_chat_with_retry()` 收到的是正常返回值而非异常，永远不会进入 retry 分支。
+
+**现象**：
+- 遇到 rate limit 时直接返回错误消息写入 session，无任何重试
+- 错误消息出现双重前缀：`"Error calling LLM: Error calling LLM: litellm.RateLimitError..."`（provider 层 + loop 层各加一次）
+- 该 bug 自 Phase 11 引入以来一直存在
+
+### 26.2 修复方案
+
+在 `LiteLLMProvider` 中新增 `_is_retryable()` 静态方法（镜像 `AgentLoop._is_retryable()` 逻辑），对可重试错误 **re-raise** 让上层处理：
+
+- **可重试错误**（re-raise）：`RateLimitError`、`APIConnectionError`、`APITimeoutError`、`Timeout`、`ServiceUnavailableError`、`InternalServerError`、状态码 429/500/502/503/504/529、消息含 "rate limit"/"overloaded"/"capacity"
+- **不可重试错误**（保持原行为）：返回 `LLMResponse(finish_reason="error")` 优雅降级
+
+### 26.3 影响范围
+
+| 文件 | 改动 |
+|------|------|
+| `providers/litellm_provider.py` | 新增 `_is_retryable()` + 修改 except 分支逻辑 |
+
+### 26.4 验证
+
+- 34 个 retry 相关测试通过
+- 39 个 provider 相关测试通过
+- Gateway 重启后生效
+
+---
+
 *本文档将随需求迭代持续更新。*

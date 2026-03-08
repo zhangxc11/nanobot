@@ -1062,6 +1062,25 @@ nanobot/providers/
 | `agent/loop.py` | 修改 | 16 | `/provider` 斜杠命令处理；`self.model` 同步更新 |
 | `tests/test_provider_pool.py` | 新增 | 16 | ProviderPool 单元测试（switch、chat 路由、边界情况） |
 
+### 7.8 Provider 层错误传播策略（Hotfix §26）
+
+`LiteLLMProvider.chat()` 的异常处理需区分可重试与不可重试错误：
+
+```
+LiteLLMProvider.chat()
+  ├── 可重试错误 (RateLimitError, 5xx, timeout 等) → re-raise
+  │     └── 由上层 _chat_with_retry() 捕获并指数退避重试
+  └── 不可重试错误 (AuthError, InvalidRequest 等) → LLMResponse(finish_reason="error")
+        └── 优雅降级，错误信息写入 session
+```
+
+`_is_retryable()` 在三处保持一致逻辑：
+- `AgentLoop._is_retryable()` — 主循环重试判断
+- `SubagentManager._is_retryable()` — 子 agent 重试判断
+- `LiteLLMProvider._is_retryable()` — provider 层错误分类
+
+> **设计约束**：provider 层必须让可重试异常穿透，否则上层 retry 机制无法感知错误。
+
 ---
 
 ## 八、Gateway 并发执行架构（Phase 19）
