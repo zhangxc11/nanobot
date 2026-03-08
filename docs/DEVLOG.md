@@ -30,12 +30,13 @@
 | Phase 18: 飞书通道文件附件发送修复 | ✅ 已完成 | local |
 | Phase 19: Gateway 并发执行 + Per-Session Provider | ✅ 已完成 | feat/concurrent-gateway → local |
 | Phase 20: /session 状态查询命令 | ✅ 已完成 | local |
-| Phase 21: /new 归档方向反转 + Session 命名简化 | 🔜 进行中 | local |
+| Phase 21: /new 归档方向反转 + Session 命名简化 | ✅ 已完成 | local |
 | Phase 22: Merge main → local | ✅ 已完成 | local |
 | Phase 23: LLM 错误响应持久化与前端展示 | ✅ 已完成 | local |
 | Phase 25: 迭代预算软限制 + exec 动态超时 | ✅ 已完成 | local |
 | Phase 26: spawn subagent 能力增强 | ✅ 已完成 | local |
 | Phase 27: ProviderPool **kwargs 透传 + 接口一致性防护 | ✅ 已完成 | local |
+| Phase 28: 弱网 LLM API 稳定性增强 | ✅ 已完成 | feat/weak-network-resilience → local |
 
 ---
 
@@ -1324,6 +1325,65 @@ Phase 22 merge upstream 时，`base.py` 和 `litellm_provider.py` 新增了 `rea
 | `providers/litellm_provider.py` | 新增 `_is_retryable()` + except 分支改为条件 re-raise |
 | `docs/REQUIREMENTS.md` | §26 bug 记录 |
 | `docs/ARCHITECTURE.md` | §7.8 provider 层错误传播策略 |
+| `docs/DEVLOG.md` | 本条 |
+
+---
+
+## Phase 28: 弱网 LLM API 稳定性增强
+
+> 日期: 2026-03-08 | 分支: feat/weak-network-resilience
+
+### 背景
+
+弱网条件下频繁出现 `Server disconnected` 和 `Connection timed out (600s)` 导致 session 中断。
+
+### 诊断结果
+
+| # | 问题 | 严重性 |
+|---|------|--------|
+| 1 | litellm 默认 timeout=6000s，弱网下单次请求卡太久 | 🔴 高 |
+| 2 | AgentLoop 重试延迟 10/20/40/80/160s，对 disconnected 等待过久 | 🟡 中 |
+| 3 | subagent `_is_retryable()` 遗漏 `Timeout` 类名 | 🟡 中 |
+| 4 | `_is_retryable()` 缺少 disconnected/connection reset 匹配 | 🟡 中 |
+| 5 | AgentLoop 和 subagent 各自维护重复的 `_is_retryable()` | 🟡 中 |
+
+### 实现
+
+- ✅ **H28.1** 新建 `agent/retry.py` 共享模块
+  - `is_retryable()` — 统一判断是否可重试（类名 + 状态码 + 消息模式）
+  - `is_fast_retryable()` — 区分 fast（断连/超时 → 2/4/8s）vs slow（限流 → 10/20/40s）
+  - `compute_retry_delay()` — 智能延迟计算
+
+- ✅ **H28.2** 修改 `providers/litellm_provider.py`
+  - 设置 `timeout=300s`（从默认 6000s 降低）
+  - 启用 `num_retries=2`（litellm 层面连接级快速重试）
+  - `_is_retryable()` 委托给共享模块
+
+- ✅ **H28.3** 修改 `agent/loop.py`
+  - `_is_retryable()` 委托给共享模块
+  - `_chat_with_retry()` 使用智能延迟（fast vs slow）
+  - 重试次数从 5 次增到 7 次
+  - progress 消息区分"网络断连"和"API 限流"
+
+- ✅ **H28.4** 修改 `agent/subagent.py`
+  - `_is_retryable()` 委托给共享模块
+  - `_chat_with_retry()` 使用智能延迟
+  - 重试次数从 3 次增到 5 次
+
+- ✅ **H28.5** 测试
+  - 新增 `tests/test_retry.py`（18 个测试全部通过）
+  - 全量回归测试 402 passed, 0 failed
+
+### 影响文件
+
+| 文件 | 改动 |
+|------|------|
+| `agent/retry.py` (新) | 共享重试工具模块 |
+| `agent/loop.py` | 使用共享 retry，智能延迟，7 次重试 |
+| `agent/subagent.py` | 使用共享 retry，智能延迟，5 次重试 |
+| `providers/litellm_provider.py` | timeout=300s, num_retries=2, 共享 _is_retryable |
+| `tests/test_retry.py` (新) | 18 个单元测试 |
+| `docs/REQUIREMENTS.md` | §27 需求记录 |
 | `docs/DEVLOG.md` | 本条 |
 
 ---

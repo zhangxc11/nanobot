@@ -12,6 +12,12 @@ from litellm import acompletion
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from nanobot.providers.registry import find_by_model, find_gateway
 
+# Phase 28: Weak-network resilience — timeout + litellm-level retries
+# litellm converts httpx.Timeout to float for providers that don't support it,
+# so we use a simple float timeout (300s = 5 min, down from default 6000s).
+_LLM_TIMEOUT = 300.0  # seconds — connect + read combined
+_LLM_NUM_RETRIES = 2  # litellm-level fast retries for connection errors
+
 # Standard chat-completion message keys.
 _ALLOWED_MSG_KEYS = frozenset({"role", "content", "tool_calls", "tool_call_id", "name", "reasoning_content"})
 _ANTHROPIC_EXTRA_KEYS = frozenset({"thinking_blocks"})
@@ -241,6 +247,10 @@ class LiteLLMProvider(LLMProvider):
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
 
+        # Phase 28: Weak-network resilience — timeout + litellm-level retries
+        kwargs["timeout"] = _LLM_TIMEOUT
+        kwargs["num_retries"] = _LLM_NUM_RETRIES
+
         try:
             response = await acompletion(**kwargs)
             return self._parse_response(response)
@@ -260,28 +270,11 @@ class LiteLLMProvider(LLMProvider):
     def _is_retryable(error: Exception) -> bool:
         """Check if an LLM error is transient and worth retrying.
 
-        Mirrors AgentLoop._is_retryable() logic so that provider.chat()
-        lets these exceptions propagate for upstream retry handling.
+        Delegates to the shared ``agent.retry.is_retryable()`` function
+        to keep all three call-sites (provider, AgentLoop, subagent) in sync.
         """
-        error_type = type(error).__name__
-        if error_type in (
-            "RateLimitError",
-            "APIConnectionError",
-            "APITimeoutError",
-            "Timeout",
-            "ServiceUnavailableError",
-            "InternalServerError",
-        ):
-            return True
-        status = getattr(error, "status_code", None)
-        if status in (429, 500, 502, 503, 504, 529):
-            return True
-        error_str = str(error).lower()
-        if "rate limit" in error_str or "rate_limit" in error_str:
-            return True
-        if "overloaded" in error_str or "capacity" in error_str:
-            return True
-        return False
+        from nanobot.agent.retry import is_retryable
+        return is_retryable(error)
 
     def _parse_response(self, response: Any) -> LLMResponse:
         """Parse LiteLLM response into our standard format."""

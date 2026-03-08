@@ -36,36 +36,18 @@ MAX_SUBAGENT_ITERATIONS = 100
 # Default iterations — raised from 15 to 30 for practical usability
 DEFAULT_SUBAGENT_ITERATIONS = 30
 
-# Retry configuration for transient LLM errors
-_RETRY_DELAYS = [5, 10, 20]  # seconds
-_MAX_RETRIES = 3
+# Retry configuration for transient LLM errors (Phase 28: use shared module)
+from nanobot.agent.retry import is_retryable as _is_retryable_shared
+from nanobot.agent.retry import is_fast_retryable, compute_retry_delay
+_MAX_RETRIES = 5
 
 
 def _is_retryable(error: Exception) -> bool:
     """Check if an LLM error is transient and worth retrying.
 
-    Mirrors the logic in ``AgentLoop._is_retryable()`` (agent/loop.py).
+    Delegates to shared ``agent.retry.is_retryable()`` (Phase 28).
     """
-    cls_name = type(error).__name__
-    retryable_classes = {
-        "RateLimitError", "APIConnectionError", "APITimeoutError",
-        "InternalServerError", "ServiceUnavailableError",
-    }
-    if cls_name in retryable_classes:
-        return True
-
-    # Check HTTP status code attribute
-    status = getattr(error, "status_code", None) or getattr(error, "status", None)
-    if isinstance(status, int) and (status == 429 or 500 <= status < 600):
-        return True
-
-    # Fallback: message-based detection
-    msg_lower = str(error).lower()
-    for pattern in ("rate limit", "overloaded", "capacity", "too many requests"):
-        if pattern in msg_lower:
-            return True
-
-    return False
+    return _is_retryable_shared(error)
 
 
 def _budget_alert_threshold(max_iterations: int) -> int:
@@ -375,7 +357,9 @@ class SubagentManager:
     ) -> Any:
         """Call provider.chat() with exponential backoff retry for transient errors.
 
-        Retries up to ``_MAX_RETRIES`` times with delays from ``_RETRY_DELAYS``.
+        Phase 28: Enhanced with smart retry delays — fast for disconnected/
+        timeout errors, slow for rate-limit/overload.
+        Retries up to ``_MAX_RETRIES`` times.
         Non-retryable errors are raised immediately.
         """
         last_error: Exception | None = None
@@ -393,10 +377,12 @@ class SubagentManager:
                 return await self.provider.chat(**kwargs)
             except Exception as e:
                 if attempt < _MAX_RETRIES and _is_retryable(e):
-                    delay = _RETRY_DELAYS[min(attempt, len(_RETRY_DELAYS) - 1)]
+                    fast = is_fast_retryable(e)
+                    delay = compute_retry_delay(attempt, fast)
+                    retry_type = "fast" if fast else "slow"
                     logger.warning(
-                        "Subagent LLM retry {}/{} after {}s: {}",
-                        attempt + 1, _MAX_RETRIES, delay, e,
+                        "Subagent LLM retry {}/{} ({}) after {:.0f}s: {}",
+                        attempt + 1, _MAX_RETRIES, retry_type, delay, e,
                     )
                     await asyncio.sleep(delay)
                     last_error = e
