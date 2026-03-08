@@ -187,7 +187,7 @@ class AgentLoop:
 
         if spawn_tool := _tools.get("spawn"):
             if isinstance(spawn_tool, SpawnTool):
-                spawn_tool.set_context(channel, chat_id)
+                spawn_tool.set_context(channel, chat_id, session_key=session_key)
 
         if cron_tool := _tools.get("cron"):
             if isinstance(cron_tool, CronTool):
