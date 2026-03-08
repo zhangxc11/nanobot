@@ -73,6 +73,7 @@ class AgentLoop:
         detail_logger: LLMDetailLogger | None = None,
         audit_logger: AuditLogger | None = None,
         subagent_task_keeper: "Callable[[asyncio.Task], None] | None" = None,
+        session_messenger: "Any | None" = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         self.bus = bus
@@ -93,6 +94,7 @@ class AgentLoop:
         self.usage_recorder = usage_recorder
         self.detail_logger = detail_logger
         self.audit_logger = audit_logger
+        self.session_messenger = session_messenger
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
@@ -112,6 +114,7 @@ class AgentLoop:
             usage_recorder=usage_recorder,
             session_manager=self.sessions,
             task_keeper=subagent_task_keeper,
+            session_messenger=session_messenger,
         )
 
         self._running = False
@@ -476,10 +479,15 @@ class AgentLoop:
                 if callbacks is not None:
                     injected = await callbacks.check_user_input()
                     if injected:
-                        logger.info("User injected message: {}", injected[:120])
+                        # Fallback prefix: if the message doesn't already have
+                        # a bracketed prefix (e.g. from SessionMessenger or
+                        # gateway inject), add a default one.
+                        if not injected.startswith("["):
+                            injected = f"[Message from user during execution]\n{injected}"
+                        logger.info("Injected message: {}", injected[:120])
                         inject_msg = {
                             "role": "user",
-                            "content": f"[User interjection during execution]\n{injected}",
+                            "content": injected,
                             "timestamp": datetime.now().isoformat(),
                         }
                         messages.append(inject_msg)
@@ -610,6 +618,48 @@ class AgentLoop:
 
         active_sessions: dict[str, SessionWorker] = {}
 
+        # ── Phase 30: Create GatewaySessionMessenger for subagent announce ──
+        class GatewaySessionMessenger:
+            """SessionMessenger for gateway mode — inject into running sessions or trigger new ones."""
+
+            def __init__(self, active, bus, sessions_mgr):
+                self._active = active  # mutable dict reference
+                self._bus = bus
+                self._sessions = sessions_mgr
+
+            async def send_to_session(self, target_session_key, content, source_session_key=None):
+                if source_session_key:
+                    prefixed = f"[Message from session {source_session_key}]\n{content}"
+                else:
+                    prefixed = content
+
+                # Check if target is running
+                if target_session_key in self._active:
+                    worker = self._active[target_session_key]
+                    if not worker.task.done():
+                        await worker.callbacks.inject(prefixed)
+                        logger.debug("GatewaySessionMessenger: injected into running session {}",
+                                     target_session_key)
+                        return True
+                    else:
+                        self._active.pop(target_session_key, None)
+
+                # Idle → publish InboundMessage to trigger new task
+                msg = InboundMessage(
+                    channel="session_messenger",
+                    sender_id=source_session_key or "unknown",
+                    chat_id=target_session_key,
+                    content=prefixed,
+                    session_key_override=target_session_key,
+                )
+                await self._bus.publish_inbound(msg)
+                logger.debug("GatewaySessionMessenger: published inbound for idle session {}",
+                             target_session_key)
+                return True
+
+        messenger = GatewaySessionMessenger(active_sessions, self.bus, self.sessions)
+        self.subagents.session_messenger = messenger
+
         def _on_task_done(session_key: str, task: asyncio.Task) -> None:
             """Callback when a session task finishes."""
             active_sessions.pop(session_key, None)
@@ -667,7 +717,7 @@ class AgentLoop:
                 worker = active_sessions[session_key]
                 if not worker.task.done():
                     logger.info("Injecting message into active session {}", session_key)
-                    await worker.callbacks.inject(msg.content)
+                    await worker.callbacks.inject(f"[Message from user during execution]\n{msg.content}")
                     continue
                 else:
                     # Task already done, remove stale entry

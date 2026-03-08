@@ -38,6 +38,7 @@
 | Phase 27: ProviderPool **kwargs 透传 + 接口一致性防护 | ✅ 已完成 | local |
 | Phase 28: 弱网 LLM API 稳定性增强 | ✅ 已完成 | feat/weak-network-resilience → local |
 | Phase 29: SpawnTool session_key 传递修复 | ✅ 已完成 | local |
+| Phase 30: Session 间消息传递机制 (SessionMessenger) | ✅ 已完成 | local |
 
 ---
 
@@ -1386,6 +1387,51 @@ Phase 22 merge upstream 时，`base.py` 和 `litellm_provider.py` 新增了 `rea
 | `tests/test_retry.py` (新) | 18 个单元测试 |
 | `docs/REQUIREMENTS.md` | §27 需求记录 |
 | `docs/DEVLOG.md` | 本条 |
+
+---
+
+## Phase 30: Session 间消息传递机制 (SessionMessenger)
+
+> 需求: REQUIREMENTS.md §29 | 分支: local
+> 完成时间: 2026-03-08 | Commit: `6b29ac1`
+
+### 背景
+
+subagent 完成后通过 `_announce_result()` 发 `InboundMessage(channel="system")` 到 bus，存在 session_key 不匹配、web worker 消息丢失、CLI 消息丢失三个问题。
+
+### 任务清单
+
+- ✅ **T30.1** `callbacks.py` — 新增 `SessionMessenger` Protocol
+- ✅ **T30.2** `subagent.py` — 新增 `session_messenger` 参数，改造 `_announce_result`
+  - 新增 `parent_session_key` 参数传递链：spawn() → _run_subagent() → _announce_result()
+  - 优先使用 SessionMessenger，fallback 到 bus publish（加 session_key_override 修复 key 不匹配 bug）
+- ✅ **T30.3** `loop.py` — 新增参数透传，inject 前缀兜底，`GatewaySessionMessenger` 实现
+  - AgentLoop.__init__ 新增 session_messenger 参数，透传给 SubagentManager
+  - run() 中创建 GatewaySessionMessenger 并设置到 subagents
+  - Gateway inject 加 `[Message from user during execution]` 前缀
+  - _run_agent_loop inject checkpoint 加兜底前缀逻辑
+- ✅ **T30.4** `worker.py` — `WorkerSessionMessenger` 实现，inject 前缀
+  - WorkerSessionMessenger: running task → inject queue, idle → _run_task_sdk()
+  - _handle_inject 加前缀
+  - on_message user 解析改进（支持 source 提取）
+- ✅ **T30.5** `tests/test_session_messenger.py` — 12 个新测试全部通过
+  - Protocol 存在性 + runtime checkable: 2 项
+  - GatewaySessionMessenger inject/trigger/prefix: 4 项
+  - SubagentManager announce with/without messenger: 3 项
+  - Inject prefix fallback: 2 项
+  - End-to-end spawn with messenger: 1 项
+- ✅ **T30.6** 全量测试 387 passed（排除 2 个已知 flaky: test_llm_retry + test_subagent retry_exhausted）
+
+### 影响文件
+
+| 文件 | 改动 |
+|------|------|
+| `agent/callbacks.py` | +SessionMessenger Protocol |
+| `agent/subagent.py` | +session_messenger 参数, parent_session_key 传递, _announce_result 改造 |
+| `agent/loop.py` | +session_messenger 参数透传, GatewaySessionMessenger, inject 前缀 |
+| web-chat `worker.py` | +WorkerSessionMessenger, inject 前缀, on_message 解析改进 |
+| `tests/test_session_messenger.py` | 12 个新测试 |
+| `tests/test_concurrent_gateway.py` | 更新 inject 断言适配新前缀 |
 
 ---
 

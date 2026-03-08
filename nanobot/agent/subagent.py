@@ -27,6 +27,7 @@ from nanobot.config.schema import ExecToolConfig
 from nanobot.providers.base import LLMProvider
 
 if TYPE_CHECKING:
+    from nanobot.agent.callbacks import SessionMessenger
     from nanobot.session.manager import SessionManager
     from nanobot.usage.recorder import UsageRecorder
 
@@ -89,6 +90,8 @@ class SubagentManager:
         usage_recorder: "UsageRecorder | None" = None,
         session_manager: "SessionManager | None" = None,
         task_keeper: "Callable[[asyncio.Task], None] | None" = None,
+        # Phase 30 addition
+        session_messenger: "SessionMessenger | None" = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         self.provider = provider
@@ -106,6 +109,7 @@ class SubagentManager:
         self.usage_recorder = usage_recorder
         self.session_manager = session_manager
         self._task_keeper = task_keeper
+        self.session_messenger = session_messenger
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
 
@@ -161,7 +165,8 @@ class SubagentManager:
 
         bg_task = asyncio.create_task(
             self._run_subagent(task_id, task, display_label, origin,
-                               effective_max, persist, subagent_key)
+                               effective_max, persist, subagent_key,
+                               parent_session_key=session_key)
         )
         self._running_tasks[task_id] = bg_task
         if session_key:
@@ -197,6 +202,7 @@ class SubagentManager:
         max_iterations: int,
         persist: bool,
         subagent_session_key: str,
+        parent_session_key: str | None = None,
     ) -> None:
         """Execute the subagent task and announce the result."""
         logger.info("Subagent [{}] starting task: {} (max_iterations={})",
@@ -343,12 +349,16 @@ class SubagentManager:
 
             logger.info("Subagent [{}] completed successfully (iterations: {}/{})",
                          task_id, iteration, max_iterations)
-            await self._announce_result(task_id, label, task, final_result, origin, "ok")
+            await self._announce_result(task_id, label, task, final_result, origin, "ok",
+                                        subagent_session_key=subagent_session_key,
+                                        parent_session_key=parent_session_key)
 
         except Exception as e:
             error_msg = f"Error: {str(e)}"
             logger.error("Subagent [{}] failed: {}", task_id, e)
-            await self._announce_result(task_id, label, task, error_msg, origin, "error")
+            await self._announce_result(task_id, label, task, error_msg, origin, "error",
+                                        subagent_session_key=subagent_session_key,
+                                        parent_session_key=parent_session_key)
 
     async def _chat_with_retry(
         self,
@@ -400,8 +410,15 @@ class SubagentManager:
         result: str,
         origin: dict[str, str],
         status: str,
+        subagent_session_key: str | None = None,
+        parent_session_key: str | None = None,
     ) -> None:
-        """Announce the subagent result to the main agent via the message bus."""
+        """Announce the subagent result to the parent session.
+
+        Phase 30: Prefers SessionMessenger (inject into running parent, or
+        trigger new execution).  Falls back to bus publish with
+        ``session_key_override`` to fix the key mismatch bug.
+        """
         status_text = "completed successfully" if status == "ok" else "failed"
 
         announce_content = f"""[Subagent '{label}' {status_text}]
@@ -413,17 +430,32 @@ Result:
 
 Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not mention technical details like "subagent" or task IDs."""
 
-        # Inject as system message to trigger main agent
+        # Prefer SessionMessenger if available (Phase 30)
+        if self.session_messenger and parent_session_key:
+            try:
+                await self.session_messenger.send_to_session(
+                    target_session_key=parent_session_key,
+                    content=announce_content,
+                    source_session_key=subagent_session_key,
+                )
+                logger.debug("Subagent [{}] announced via SessionMessenger to {}",
+                             task_id, parent_session_key)
+                return
+            except Exception as e:
+                logger.warning("SessionMessenger failed, falling back to bus: {}", e)
+
+        # Fallback: bus publish (legacy behavior, with session_key_override fix)
         msg = InboundMessage(
             channel="system",
             sender_id="subagent",
             chat_id=f"{origin['channel']}:{origin['chat_id']}",
             content=announce_content,
+            session_key_override=parent_session_key,
         )
 
         await self.bus.publish_inbound(msg)
-        logger.debug("Subagent [{}] announced result to {}:{}",
-                      task_id, origin["channel"], origin["chat_id"])
+        logger.debug("Subagent [{}] announced via bus to {}:{} (override={})",
+                      task_id, origin["channel"], origin["chat_id"], parent_session_key)
 
     def _build_subagent_prompt(self) -> str:
         """Build a focused system prompt for the subagent."""

@@ -198,7 +198,8 @@ class TestUserInjection:
             await asyncio.wait_for(injection_received.wait(), timeout=3.0)
 
             out = await asyncio.wait_for(bus.consume_outbound(), timeout=3.0)
-            assert "Got injection: additional info" in out.content
+            assert "additional info" in out.content
+            assert "Got injection:" in out.content
 
             agent.stop()
             run_task.cancel()

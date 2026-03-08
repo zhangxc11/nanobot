@@ -1761,6 +1761,64 @@ Phase 11 实现了 `AgentLoop._chat_with_retry()` 指数退避重试机制，Pha
 
 ---
 
+## §二十九 Session 间消息传递机制 (Phase 30)
+
+### 29.1 问题描述
+
+subagent 完成后通过 `_announce_result()` 发 `InboundMessage(channel="system", chat_id="web:xxx")` 到 bus。存在三个问题：
+
+1. **session_key 不匹配**：`session_key` = `"system:web:xxx"`，跟 `active_sessions` 中的 `"web:xxx"` 不匹配，导致 gateway 模式下不会走 inject 而是创建新 session
+2. **web worker 消息丢失**：web worker 模式下 bus 没有 consumer，消息直接丢失
+3. **CLI 消息丢失**：CLI 单消息模式下同样丢失
+
+### 29.2 需求
+
+引入 `SessionMessenger` 机制：session 间可以互相发送消息。如果目标 session 正在执行则 inject，空闲则触发新一轮执行。
+
+### 29.3 设计方案
+
+#### 29.3.1 SessionMessenger Protocol (callbacks.py)
+
+新增 `SessionMessenger` Protocol，定义 `send_to_session(target_key, content, source_key)` 方法。
+
+#### 29.3.2 GatewaySessionMessenger (loop.py)
+
+Gateway 模式下的实现：持有 `active_sessions` 引用，running session → inject，idle → publish InboundMessage with `session_key_override`。
+
+#### 29.3.3 WorkerSessionMessenger (worker.py)
+
+Web worker 模式下的实现：running task → inject queue，idle → `_run_task_sdk()` 触发新任务。
+
+#### 29.3.4 SubagentManager 改造
+
+- 新增 `session_messenger` 参数
+- `_announce_result()` 优先使用 SessionMessenger，fallback 到 bus publish（加 `session_key_override`）
+- `spawn()` 的 `session_key`（父 session key）传递到 `_run_subagent` 和 `_announce_result`
+
+#### 29.3.5 Inject 前缀
+
+- Gateway/Worker inject 时加 `[Message from user during execution]` 前缀
+- SessionMessenger inject 时加 `[Message from session {source_key}]` 前缀
+- loop.py inject checkpoint 兜底：无前缀的消息加默认前缀
+
+### 29.4 影响范围
+
+| 文件 | 改动 |
+|------|------|
+| `agent/callbacks.py` | 新增 `SessionMessenger` Protocol |
+| `agent/subagent.py` | 新增 `session_messenger` 参数，改造 `_announce_result` |
+| `agent/loop.py` | 新增参数透传，inject 前缀兜底，`GatewaySessionMessenger` 实现 |
+| web-chat `worker.py` | `WorkerSessionMessenger` 实现，inject 前缀 |
+| `tests/test_session_messenger.py` | 8 个新测试 |
+
+### 29.5 不做什么
+
+- 不修改 `bus/events.py`（`session_key_override` 已存在）
+- 不修改 InboundMessage 数据结构
+- 不做跨进程消息传递（仅进程内）
+
+---
+
 ### 手动维护的 backlog
 
 **note** 这个部分手动添加需求 backlog。被激活后，更新前序需求文档章节，推进开发。

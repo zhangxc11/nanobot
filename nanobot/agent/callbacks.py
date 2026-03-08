@@ -37,6 +37,45 @@ class AgentResult:
 
 
 @runtime_checkable
+class SessionMessenger(Protocol):
+    """Protocol for inter-session message delivery.
+
+    Implementations decide how to deliver a message to a target session:
+    - If the target session is actively running → inject as pending input
+    - If the target session is idle → trigger a new execution round
+
+    Used by SubagentManager to announce results back to the parent session
+    without relying on the message bus (which may not have a consumer in
+    web-worker or CLI modes).
+    """
+
+    async def send_to_session(
+        self,
+        target_session_key: str,
+        content: str,
+        source_session_key: str | None = None,
+    ) -> bool:
+        """Send a message to the target session.
+
+        Parameters
+        ----------
+        target_session_key:
+            The session key of the recipient session.
+        content:
+            The message content to deliver.
+        source_session_key:
+            If provided, the content will be prefixed with
+            ``[Message from session {source_session_key}]``.
+
+        Returns
+        -------
+        bool
+            True if the message was delivered (injected or triggered).
+        """
+        ...
+
+
+@runtime_checkable
 class AgentCallbacks(Protocol):
     """Protocol for receiving agent loop events.
 
