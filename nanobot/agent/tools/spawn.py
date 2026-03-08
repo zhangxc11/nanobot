@@ -35,7 +35,14 @@ class SpawnTool(Tool):
         return (
             "Spawn a subagent to handle a task in the background. "
             "Use this for complex or time-consuming tasks that can run independently. "
-            "The subagent will complete the task and report back when done."
+            "The subagent has access to: read_file, write_file, edit_file, list_dir, "
+            "exec, web_search, web_fetch. It does NOT have spawn, message, or cron. "
+            "It runs non-interactively — you cannot send follow-up messages to it.\n\n"
+            "**Result reporting**: When the subagent finishes, its final text reply is "
+            "automatically delivered back to this session as a message (injected if this "
+            "session is still running, or triggers a new round if idle). The subagent "
+            "knows this — craft your task description so it knows what to include in "
+            "its final summary."
         )
 
     @property
@@ -45,7 +52,11 @@ class SpawnTool(Tool):
             "properties": {
                 "task": {
                     "type": "string",
-                    "description": "The task for the subagent to complete",
+                    "description": (
+                        "The task for the subagent to complete. Be specific about what "
+                        "the subagent should do AND what it should report back in its "
+                        "final reply (e.g. 'do X, then report the result summary')."
+                    ),
                 },
                 "label": {
                     "type": "string",
