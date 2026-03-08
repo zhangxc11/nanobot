@@ -19,7 +19,8 @@
 |------|------|------|
 | **nanobot** | 核心框架（含 gateway/CLI/agent） | [zhangxc11/nanobot](https://github.com/zhangxc11/nanobot) |
 | **nanobot-web-chat** | Web Chat UI（React 前端 + Python 后端） | [zhangxc11/nanobot-web-chat](https://github.com/zhangxc11/nanobot-web-chat) |
-| **nanobot-skills** | 辅助 Skill 集合（dev-workflow / restart-*） | [zhangxc11/nanobot-skills](https://github.com/zhangxc11/nanobot-skills) |
+| **nanobot-skills** | 辅助 Skill 集合（batch-orchestrator / dev-workflow / restart-* / web-subsession） | [zhangxc11/nanobot-skills](https://github.com/zhangxc11/nanobot-skills) |
+| **nanobot-eval-bench** | 评测框架 + 评测 Skill 集合（eval-session-scanner / eval-task-builder / eval-task-batch-builder / eval-framework-maintainer） | [zhangxc11/nanobot-eval-bench](https://github.com/zhangxc11/nanobot-eval-bench) |
 | **nanobot-feishu-docs** | 飞书文档操作 Skill | [zhangxc11/nanobot-feishu-docs](https://github.com/zhangxc11/nanobot-feishu-docs) |
 | **nanobot-feishu-messenger** | 飞书消息发送 Skill | [zhangxc11/nanobot-feishu-messenger](https://github.com/zhangxc11/nanobot-feishu-messenger) |
 | **nanobot-feishu-parser** | 飞书消息解析 Skill | [zhangxc11/nanobot-feishu-parser](https://github.com/zhangxc11/nanobot-feishu-parser) |
@@ -132,9 +133,21 @@ git clone git@github.com:zhangxc11/nanobot-skills.git _nanobot-skills
 
 # 软链接到 skills 目录
 cd skills
+ln -s ../_nanobot-skills/batch-orchestrator batch-orchestrator
 ln -s ../_nanobot-skills/dev-workflow dev-workflow
 ln -s ../_nanobot-skills/restart-gateway restart-gateway
 ln -s ../_nanobot-skills/restart-webchat restart-webchat
+ln -s ../_nanobot-skills/web-subsession web-subsession
+
+# ── 评测框架 + 评测 Skills（clone 到 workspace 根目录，软链接 skills 子目录）──
+cd ~/.nanobot/workspace
+git clone git@github.com:zhangxc11/nanobot-eval-bench.git eval-bench
+
+cd skills
+ln -s ../eval-bench/skills/eval-framework-maintainer eval-framework-maintainer
+ln -s ../eval-bench/skills/eval-session-scanner eval-session-scanner
+ln -s ../eval-bench/skills/eval-task-batch-builder eval-task-batch-builder
+ln -s ../eval-bench/skills/eval-task-builder eval-task-builder
 
 # ── 飞书 Skills（需要飞书应用凭证）──
 git clone git@github.com:zhangxc11/nanobot-feishu-docs.git feishu-docs
@@ -198,10 +211,17 @@ nohup nanobot gateway > ~/.nanobot/gateway.log 2>&1 &
 │   │   ├── worker.py              # Agent 执行器 (:8082)
 │   │   └── restart.sh             # 服务管理脚本
 │   ├── _nanobot-skills/           # nanobot-skills 仓库（被软链接引用）
+│   ├── eval-bench/                # nanobot-eval-bench 仓库（评测框架 + skills）
 │   └── skills/
+│       ├── batch-orchestrator/     # → ../_nanobot-skills/batch-orchestrator
 │       ├── dev-workflow/           # → ../_nanobot-skills/dev-workflow
 │       ├── restart-gateway/        # → ../_nanobot-skills/restart-gateway
 │       ├── restart-webchat/        # → ../_nanobot-skills/restart-webchat
+│       ├── web-subsession/         # → ../_nanobot-skills/web-subsession
+│       ├── eval-framework-maintainer/ # → ../eval-bench/skills/eval-framework-maintainer
+│       ├── eval-session-scanner/   # → ../eval-bench/skills/eval-session-scanner
+│       ├── eval-task-batch-builder/ # → ../eval-bench/skills/eval-task-batch-builder
+│       ├── eval-task-builder/      # → ../eval-bench/skills/eval-task-builder
 │       ├── feishu-docs/            # 飞书文档操作
 │       ├── feishu-messenger/       # 飞书消息发送
 │       └── feishu-parser/          # 飞书消息解析
@@ -255,6 +275,7 @@ git merge upstream/main    # 或 git rebase upstream/main
 
 ```bash
 cd ~/.nanobot/workspace/_nanobot-skills && git pull
+cd ~/.nanobot/workspace/eval-bench && git pull
 cd ~/.nanobot/workspace/skills/feishu-docs && git pull
 cd ~/.nanobot/workspace/skills/feishu-messenger && git pull
 cd ~/.nanobot/workspace/skills/feishu-parser && git pull
