@@ -1936,4 +1936,72 @@ SessionMessenger 当前**仅作为内部底层能力**，在受限场景（subag
 
 ---
 
+## 十三、Cache Control 策略与 Usage Cache 字段 (§32)
+
+### 13.1 Cache Control Breakpoint 策略
+
+Anthropic API 限制每次请求最多 4 个 `cache_control` breakpoint。旧实现对所有 `role: "system"` 消息加 breakpoint，spawn 多个 subagent 后（每个 subagent 结果注入为 system 消息）轻易超限。
+
+**新策略 — 精准 3 breakpoint**：
+
+```
+请求结构:
+  tools:     [..., tool_N {cache_control ← #1}]     ← 缓存 tool 定义
+  messages:  [system_prompt {cache_control ← #2},    ← 缓存 system prompt
+              ...中间消息（无 breakpoint）...,
+              last_msg {cache_control ← #3}]         ← 缓存对话历史
+```
+
+| Breakpoint | 位置 | 缓存效果 |
+|------------|------|----------|
+| #1 | `tools[-1]` | 跨 session 复用 tool 定义（tools 在所有 session 中相同） |
+| #2 | `messages[0]` | 跨 session 复用 system prompt（大量 skills/context 文本） |
+| #3 | `messages[-1]` | 同 session 多轮对话复用历史前缀 |
+
+中间 system 消息（subagent 结果、budget alert 等）**不加** breakpoint，确保总数 ≤ 3。
+
+### 13.2 Usage Cache 字段数据链路
+
+```
+LiteLLM Response
+  └─ _parse_response()
+      ├─ cache_creation_input_tokens  ← getattr(usage, field, 0) or 0
+      └─ cache_read_input_tokens
+          │
+          ▼
+  accumulated_usage (loop.py)
+          │
+          ├─── on_usage() callback → web-chat worker → SSE → frontend
+          │
+          └─── UsageRecorder.record() → SQLite token_usage 表
+                                          │
+                                          ▼
+                                    AnalyticsDB (web-chat)
+                                    ├── get_global_usage()
+                                    ├── get_session_usage()
+                                    ├── get_daily_usage()
+                                    └── by_model / by_session 聚合
+```
+
+### 13.3 SQLite Schema Migration
+
+两个独立的 migration 点（分别在 nanobot core 和 web-chat 中）：
+
+- **`UsageRecorder._migrate()`** (nanobot core `usage/recorder.py`)
+- **`AnalyticsDB._migrate()`** (web-chat `analytics.py`)
+
+Migration 策略：
+1. `PRAGMA table_info(token_usage)` 获取已有列名集合
+2. 遍历 `_MIGRATION_SQL` 列表，提取目标列名
+3. 列名不存在 → `ALTER TABLE ADD COLUMN ... DEFAULT 0`
+4. 已存在 → 跳过（幂等）
+5. `try/except OperationalError` 处理并发竞争
+
+此策略确保：
+- **全新部署**：`CREATE TABLE` 包含所有列，migration 无操作
+- **已有部署升级**：自动 ALTER TABLE，旧数据 cache 字段默认 0
+- **重复执行**：幂等，不报错
+
+---
+
 *本文档将随开发进展持续更新。*
