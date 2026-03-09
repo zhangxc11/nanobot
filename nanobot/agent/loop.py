@@ -505,7 +505,7 @@ class AgentLoop:
                             self.sessions.append_message(session, inject_msg)
                         await callbacks.on_message(inject_msg)
                         if _progress_fn:
-                            await _progress_fn(f"📝 User: {injected[:80]}")
+                            await _progress_fn(f"📝 User: {inject_msg['content'][:80]}")
             else:
                 clean = self._strip_think(response.content)
                 # Error responses: persist to JSONL for display but prefix

@@ -1871,6 +1871,35 @@ inject 时传 `{"role": "system", "content": prefixed}` 而非纯字符串。
 
 ---
 
+## §31 Bug Fix: unhashable type 'slice' on subagent result injection (Hotfix)
+
+### 31.1 问题描述
+
+当 subagent 完成后通过 `SessionMessenger` 注入结果到主 session 时，主 session 在 tool 执行后的 "User injection checkpoint" 处取出注入消息，执行 progress 回调时崩溃。
+
+**错误**：`TypeError: unhashable type: 'slice'`
+
+**根因**：`loop.py` 第 508 行（原始行号）：
+```python
+await _progress_fn(f"📝 User: {injected[:80]}")
+```
+
+Phase 30 引入 `SessionMessenger` 后，`injected` 可能是 `dict`（`{"role": "system", "content": "..."}`）而非字符串。对 dict 做 `[:80]` 切片操作触发 `TypeError`。
+
+**影响**：不丢数据（inject_msg 已正确持久化到 messages），但 progress 回调崩溃导致整个 task 报错退出，主 session 后续 LLM 调用被中断。
+
+### 31.2 修复
+
+将 `injected[:80]` 改为 `inject_msg['content'][:80]`。`inject_msg["content"]` 在 dict 和 string 两个分支中都已被赋值为字符串，安全可切片。
+
+### 31.3 影响范围
+
+| 文件 | 改动 |
+|------|------|
+| `agent/loop.py` | 1 行：`_progress_fn` 中 `injected[:80]` → `inject_msg['content'][:80]` |
+
+---
+
 ### 手动维护的 backlog
 
 **note** 这个部分手动添加需求 backlog。被激活后，更新前序需求文档章节，推进开发。
