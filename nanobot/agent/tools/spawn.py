@@ -43,6 +43,12 @@ class SpawnTool(Tool):
             "session is still running, or triggers a new round if idle). The subagent "
             "knows this — craft your task description so it knows what to include in "
             "its final summary."
+            "\n\n"
+            "**CLI limitation**: In CLI single-message mode (`-m`), the process exits "
+            "after the main agent responds, so subagent results may be lost. If you need "
+            "to wait for the subagent, use `exec` to sleep (e.g. `time.sleep(60)`) to "
+            "keep the session alive until the subagent finishes and its result is "
+            "delivered via the message bus."
         )
 
     @property

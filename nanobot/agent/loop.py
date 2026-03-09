@@ -627,6 +627,12 @@ class AgentLoop:
         active_sessions: dict[str, SessionWorker] = {}
 
         # ── Phase 30: Create GatewaySessionMessenger for subagent announce ──
+        # NOTE: GatewaySessionMessenger is defined inside run() because it
+        # needs a reference to the local `active_sessions` dict. If this
+        # class needs modification in the future, consider refactoring it
+        # to a module-level class first — the current test_session_messenger.py
+        # duplicates its implementation, so changes here won't automatically
+        # break tests. See ARCHITECTURE.md §12.3 for details.
         class GatewaySessionMessenger:
             """SessionMessenger for gateway mode — inject into running sessions or trigger new ones."""
 

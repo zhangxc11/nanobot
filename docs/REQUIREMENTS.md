@@ -1816,6 +1816,7 @@ Web worker 模式下的实现：running task → inject queue，idle → `_run_t
 - 不修改 `bus/events.py`（`session_key_override` 已存在）
 - 不修改 InboundMessage 数据结构
 - 不做跨进程消息传递（仅进程内）
+- **不将 SessionMessenger 暴露为 agent 可用的通用工具** — 跨 session 通信能力目前仅作为内部底层机制，在受限场景（subagent 回报）中使用。agent 自主跨 session 发送消息的行为不可控，暂不开放
 
 ---
 

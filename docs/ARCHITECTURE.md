@@ -1923,6 +1923,17 @@ Subagent task 完成
 | `agent/loop.py` | 修改 | `run()` 内定义 `GatewaySessionMessenger`；`_process_message()` 识别 `channel="session_messenger"` |
 | web-chat `worker.py` | 修改 | 定义 `WorkerSessionMessenger`，初始化时传入 `AgentLoop` |
 
+### 12.10 设计约束：不作为通用工具暴露
+
+SessionMessenger 当前**仅作为内部底层能力**，在受限场景（subagent 结果回报）中使用，**不提供为 agent 可调用的通用工具**。
+
+原因：agent 自主跨 session 发送消息的行为不可控 — 实际使用中观察到 agent 会在不恰当的时机向其他 session 发送消息，干扰正在进行的工作。在没有完善的权限控制和意图验证机制之前，跨 session 通信能力不应暴露给 agent 自主使用。
+
+后续如需开放，应先设计：
+- 目标 session 白名单/权限控制
+- 发送频率限制
+- 用户确认机制
+
 ---
 
 *本文档将随开发进展持续更新。*
