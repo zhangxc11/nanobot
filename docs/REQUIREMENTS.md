@@ -1969,6 +1969,38 @@ Phase 30 引入 `SessionMessenger` 后，`injected` 可能是 `dict`（`{"role":
 
 ---
 
+## §35 Subagent 回报消息 role 回归 user — Cache 友好改造
+
+### 35.1 问题描述
+
+§30 将 subagent 回报消息从 `role="user"` 改为 `role="system"`，目的是防止 agent 把回报当用户指令执行。但 Anthropic API 会将所有 `role="system"` 消息从对话流中抽走拼到 system prompt 中，导致：
+
+1. **Cache 失效**：system prompt 内容每次变化（subagent 结果不同），cache_control breakpoint #2 失效，所有缓存被迫重建
+2. **位置语义丢失**：消息被从对话流中抽走，长对话中 LLM 难以关联 spawn 调用和对应结果
+3. **§32 cache_control breakpoint 超限**：也与 system 消息过多有关
+
+### 35.2 方案
+
+**改回 `role="user"`**，通过 announce_content 末尾的 prompt 指导来避免 §30 最初担心的"agent 把回报当用户指令"问题。
+
+具体改动：
+1. `subagent.py` announce_content 末尾追加 prompt 指导，明确告知这是自动化通知而非用户请求
+2. `loop.py` GatewaySessionMessenger inject 从 `{"role": "system", ...}` 改为 `{"role": "user", ...}`
+3. `loop.py` `_process_message` 中 `msg.channel == "session_messenger"` 的 role="system" 覆盖逻辑删除
+
+### 35.3 配套说明
+
+web-chat 仓库的前端识别逻辑（如果有基于 role 判断的地方）需要改为通过内容前缀 `[Subagent Result Notification]` 或 `[Message from session` 来识别，而非依赖 role。
+
+### 35.4 影响范围
+
+| 文件 | 改动 |
+|------|------|
+| `agent/subagent.py` | announce_content 末尾追加 prompt 指导 |
+| `agent/loop.py` | GatewaySessionMessenger inject 改为 user role；删除 _process_message 中 session_messenger role 覆盖 |
+
+---
+
 ### 手动维护的 backlog
 
 **note** 这个部分手动添加需求 backlog。被激活后，更新前序需求文档章节，推进开发。
@@ -2024,6 +2056,40 @@ litellm.ServiceUnavailableError: AnthropicException - {
 - 不修改 `_RETRYABLE_CLASSES`（`ServiceUnavailableError` 大多数情况确实可重试）
 - 不修改重试次数或延迟策略
 - 不修改 provider 层或 loop 层逻辑
+
+---
+
+## §34 read_file 大文件保护（Backlog）
+
+> 来源：eval-bench 评测中 task-008 agent 直接 read_file 读取 6.7MB 的 session JSONL（含 5MB+ base64 图片），导致 6M tokens 撑爆上下文。
+
+### 34.1 问题描述
+
+`ReadFileTool.execute()` 直接调用 `file_path.read_text()` 返回全部内容，**没有任何大小限制**。当文件较大（如日志、session JSONL、数据 dump）时，会导致：
+
+1. 返回内容过大，LLM 上下文溢出或 token 消耗暴增
+2. Agent 无法有效处理超长内容，后续推理质量下降
+
+### 34.2 需求
+
+在 `ReadFileTool` 中增加大文件保护：
+
+- 设定阈值（如 512KB 或可配置）
+- 超过阈值时截断内容，并在返回结果末尾附加提示：
+  `[WARNING] File is {size}. Only first {threshold} shown. Use exec with head/tail/grep for large files.`
+- 阈值可通过配置或环境变量调整
+
+### 34.3 影响范围
+
+| 文件 | 改动 |
+|------|------|
+| `agent/tools/filesystem.py` | `ReadFileTool.execute()` 增加大小检查与截断 |
+| `config/schema.py` | 可选：新增 `read_file_max_size` 配置项 |
+| `tests/` | 新增大文件截断测试 |
+
+### 34.4 优先级
+
+Backlog — 日常使用中用户通常不会读取大文件，但 agent 自主运行场景（eval-bench、subagent）风险较高。
 
 ---
 

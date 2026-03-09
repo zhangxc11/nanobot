@@ -663,7 +663,7 @@ class AgentLoop:
                         # to "user", preventing the agent from treating subagent
                         # results as user instructions.
                         await worker.callbacks.inject({
-                            "role": "system",
+                            "role": "user",
                             "content": prefixed,
                         })
                         logger.debug("GatewaySessionMessenger: injected into running session {}",
@@ -1140,15 +1140,6 @@ class AgentLoop:
             media=msg.media if msg.media else None,
             channel=msg.channel, chat_id=msg.chat_id,
         )
-
-        # Session messenger messages (e.g. subagent results) should be
-        # injected as system role, not user role, to prevent the agent
-        # from treating them as new user instructions.
-        if msg.channel == "session_messenger":
-            initial_messages[-1] = {
-                **initial_messages[-1],
-                "role": "system",
-            }
 
         # Realtime persist: user/system message (last element of initial_messages)
         self.sessions.append_message(session, initial_messages[-1])

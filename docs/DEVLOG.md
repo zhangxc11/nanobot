@@ -41,6 +41,7 @@
 | Phase 30: Session 间消息传递机制 (SessionMessenger) | ✅ 已完成 | local |
 | Phase 31: Subagent 回报消息 role 修正 + announce 模板优化 | ✅ 已完成 | local |
 | §33 Hotfix: ServiceUnavailableError 误判为可重试错误 | ✅ 已完成 | local |
+| Phase 35: Subagent 回报消息 role 回归 user (§35) | ✅ 已完成 | local |
 
 ---
 
@@ -1559,6 +1560,25 @@ litellm.ServiceUnavailableError: AnthropicException - {"error":{"type":"model_no
 | `tests/test_retry.py` | 新增 18 个测试（`TestNonRetryablePatterns` 类） |
 | `docs/REQUIREMENTS.md` | §33 需求记录 |
 | `docs/ARCHITECTURE.md` | §7.8.1 排除策略说明 |
+
+---
+
+## Phase 35: Subagent 回报消息 role 回归 user — Cache 友好改造
+
+> 需求: REQUIREMENTS.md §35 | 分支: local
+> 开始时间: 2026-03-09
+
+### 背景
+
+§30 将 subagent 回报消息 role 从 user 改为 system，但 Anthropic API 将 system 消息抽走拼到 system prompt 中，导致 cache 失效、位置语义丢失、§32 breakpoint 超限。改回 user role + prompt 指导。
+
+### 任务清单
+
+- ✅ **T35.1** `subagent.py` — announce_content 末尾追加 prompt 指导
+- ✅ **T35.2** `loop.py` — GatewaySessionMessenger inject 改为 user role
+- ✅ **T35.3** `loop.py` — _process_message 移除 session_messenger role="system" 覆盖
+- ✅ **T35.4** 测试验证 — 422 passed (排除已知 flaky test_llm_retry + test_matrix_channel)
+- ✅ **T35.5** Git 提交 — commit `31c96a0`
 
 ---
 
