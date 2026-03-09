@@ -151,7 +151,7 @@ class TestChatWithRetry:
         result, mock_sleep = asyncio.run(_run())
         assert result is expected
         assert provider.chat.call_count == 2
-        mock_sleep.assert_called_once_with(10)  # first retry: 10s
+        mock_sleep.assert_called_once_with(5)  # first retry: 5s (slow: 5*2^0)
 
     def test_exponential_backoff_delays(self):
         loop, provider = _make_loop()
@@ -171,7 +171,7 @@ class TestChatWithRetry:
         assert result is expected
         assert provider.chat.call_count == 4
         delays = [call.args[0] for call in mock_sleep.call_args_list]
-        assert delays == [10, 20, 40]
+        assert delays == [5, 10, 20]
 
     def test_max_retries_exceeded(self):
         loop, provider = _make_loop()
@@ -188,7 +188,7 @@ class TestChatWithRetry:
         with pytest.raises(_RateLimitError, match="rate limit"):
             asyncio.run(_run())
 
-        assert provider.chat.call_count == 6  # 1 + 5 retries
+        assert provider.chat.call_count == 8  # 1 + 7 retries
 
     def test_non_retryable_error_raises_immediately(self):
         loop, provider = _make_loop()
@@ -222,8 +222,8 @@ class TestChatWithRetry:
         assert result is expected
         progress_fn.assert_called_once()
         call_msg = progress_fn.call_args[0][0]
-        assert "10s" in call_msg
-        assert "1/5" in call_msg
+        assert "5s" in call_msg
+        assert "1/7" in call_msg
 
     def test_progress_fn_error_does_not_break_retry(self):
         """Progress notification failure should not prevent retry."""

@@ -1661,3 +1661,34 @@ litellm.ServiceUnavailableError: AnthropicException - {"error":{"type":"model_no
 | `usage/recorder.py` | `record()` 新增参数 + schema + `_migrate()` |
 | `tests/test_cache_control_strategy.py` | 新增 10 个测试 |
 | `tests/test_usage_cache_fields.py` | 新增 6 个测试 |
+
+---
+
+## Phase 36: 测试修复 + REQUIREMENTS.md Backlog 区域整理
+
+> 需求: 维护性修复 | 分支: local
+> 开始时间: 2026-03-09
+
+### 改动
+
+#### 1. test_matrix_channel.py — 可选依赖跳过 (Bug Fix)
+- **问题**: `test_matrix_channel.py` 顶层 `import nanobot.channels.matrix` 导致 `nh3` 未安装时整个测试收集失败 (`ImportError`)，阻塞全部测试运行
+- **修复**: 在 import 前添加 `pytest.importorskip("nh3")` 优雅跳过
+
+#### 2. test_llm_retry.py — 对齐 Phase 28 retry 参数 (Bug Fix)
+- **问题**: 测试断言使用旧版 retry 参数（初始延迟 10s、max_retries=5），与 Phase 28 实际代码不一致（初始延迟 5s、max_retries=7）
+- **修复**:
+  - `test_retry_on_rate_limit_then_succeed`: `sleep(10)` → `sleep(5)`
+  - `test_exponential_backoff_delays`: `[10, 20, 40]` → `[5, 10, 20]`
+  - `test_max_retries_exceeded`: `call_count == 6` → `8` (1 + 7 retries)
+  - `test_progress_notification_on_retry`: `"10s"/"1/5"` → `"5s"/"1/7"`
+
+#### 3. REQUIREMENTS.md — Backlog 区域结构修复
+- Backlog 标题从 `###` 提升为 `## 📋`，防止被误认为某个 `§` 的子节
+- 添加 HTML 注释锚点（文件头尾），引导 AI 在 Backlog 之前插入新需求
+- `§33` 移到 Backlog 前（已完成的正式需求）
+- `§34` 保留在 Backlog 中（降级为 Backlog 条目格式）
+
+### 测试
+
+448 passed, 1 skipped (matrix channel — 可选依赖未安装)
