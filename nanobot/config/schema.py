@@ -322,6 +322,7 @@ class ToolsConfig(Base):
     web: WebToolsConfig = Field(default_factory=WebToolsConfig)
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
     restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
+    read_file_hard_limit: int = 1048576  # Hard limit for read_file tool in bytes (default 1MB)
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
 

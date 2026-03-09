@@ -105,6 +105,7 @@ class AgentRunner:
             exec_config=config.tools.exec,
             cron_service=cron,
             restrict_to_workspace=config.tools.restrict_to_workspace,
+            read_file_hard_limit=config.tools.read_file_hard_limit,
             session_manager=session_manager,
             mcp_servers=config.tools.mcp_servers,
             channels_config=config.channels,

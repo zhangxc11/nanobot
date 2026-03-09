@@ -74,6 +74,7 @@ class AgentLoop:
         audit_logger: AuditLogger | None = None,
         subagent_task_keeper: "Callable[[asyncio.Task], None] | None" = None,
         session_messenger: "Any | None" = None,
+        read_file_hard_limit: int | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         self.bus = bus
@@ -91,6 +92,7 @@ class AgentLoop:
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
+        self.read_file_hard_limit = read_file_hard_limit
         self.usage_recorder = usage_recorder
         self.detail_logger = detail_logger
         self.audit_logger = audit_logger
@@ -115,6 +117,7 @@ class AgentLoop:
             session_manager=self.sessions,
             task_keeper=subagent_task_keeper,
             session_messenger=session_messenger,
+            read_file_hard_limit=read_file_hard_limit,
         )
 
         self._running = False
@@ -134,7 +137,11 @@ class AgentLoop:
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
         allowed_dir = self.workspace if self.restrict_to_workspace else None
-        for cls in (ReadFileTool, WriteFileTool, EditFileTool, ListDirTool):
+        rf_kwargs: dict = dict(workspace=self.workspace, allowed_dir=allowed_dir)
+        if self.read_file_hard_limit is not None:
+            rf_kwargs["hard_limit"] = self.read_file_hard_limit
+        self.tools.register(ReadFileTool(**rf_kwargs))
+        for cls in (WriteFileTool, EditFileTool, ListDirTool):
             self.tools.register(cls(workspace=self.workspace, allowed_dir=allowed_dir))
         self.tools.register(ExecTool(
             working_dir=str(self.workspace),

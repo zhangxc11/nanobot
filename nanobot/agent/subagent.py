@@ -92,6 +92,8 @@ class SubagentManager:
         task_keeper: "Callable[[asyncio.Task], None] | None" = None,
         # Phase 30 addition
         session_messenger: "SessionMessenger | None" = None,
+        # §34 addition
+        read_file_hard_limit: int | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         self.provider = provider
@@ -105,6 +107,7 @@ class SubagentManager:
         self.web_proxy = web_proxy
         self.exec_config = exec_config or ExecToolConfig()
         self.restrict_to_workspace = restrict_to_workspace
+        self.read_file_hard_limit = read_file_hard_limit
         self.default_max_iterations = min(default_max_iterations, MAX_SUBAGENT_ITERATIONS)
         self.usage_recorder = usage_recorder
         self.session_manager = session_manager
@@ -213,7 +216,10 @@ class SubagentManager:
             # Build subagent tools (no message tool, no spawn tool, no cron tool)
             tools = ToolRegistry()
             allowed_dir = self.workspace if self.restrict_to_workspace else None
-            tools.register(ReadFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
+            rf_kwargs: dict = dict(workspace=self.workspace, allowed_dir=allowed_dir)
+            if self.read_file_hard_limit is not None:
+                rf_kwargs["hard_limit"] = self.read_file_hard_limit
+            tools.register(ReadFileTool(**rf_kwargs))
             tools.register(WriteFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
             tools.register(EditFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
             tools.register(ListDirTool(workspace=self.workspace, allowed_dir=allowed_dir))

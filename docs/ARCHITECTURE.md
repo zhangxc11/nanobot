@@ -2022,4 +2022,68 @@ Migration 策略：
 
 ---
 
+## 十四、read_file 大文件保护 (§34)
+
+### 14.1 概述
+
+`ReadFileTool` 新增双重默认限制（≤100 行 且 ≤20KB），防止 agent 自主运行时意外读取大文件导致 context 膨胀。
+
+### 14.2 保护机制
+
+```
+检查顺序:
+1. stat() 获取文件字节大小 → 超过硬上限(1MB) → 直接报错（不读文件）
+2. read_text() → 检查行数和字节数 → 任一超过软限制 → 报错（附建议）
+3. 两个软限制都满足 → 返回内容
+```
+
+### 14.3 参数设计
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `max_lines` | int (optional) | 100 | 最大行数限制，模型可自行扩大 |
+| `max_size` | int (optional) | 20000 (20KB) | 最大字节数限制，模型可自行扩大 |
+
+- `max_size` 会被 clamp 到硬上限（`config.tools.read_file_hard_limit`，默认 1MB）
+- `max_lines` 无硬上限（行数不影响内存安全）
+
+### 14.4 配置
+
+`config.json`:
+```json
+{
+  "tools": {
+    "readFileHardLimit": 1048576
+  }
+}
+```
+
+对应 `ToolsConfig.read_file_hard_limit: int = 1048576`（snake_case，alias generator 自动转 camelCase）。
+
+### 14.5 硬上限传递链路
+
+```
+config.json → Config.tools.read_file_hard_limit
+  → AgentLoop.__init__(read_file_hard_limit=...)
+    → _register_default_tools() → ReadFileTool(hard_limit=...)
+    → SubagentManager(read_file_hard_limit=...)
+      → _run_subagent() → ReadFileTool(hard_limit=...)
+  → cli/commands.py: 3 处 AgentLoop 实例化
+  → sdk/runner.py: 1 处 AgentLoop 实例化
+```
+
+### 14.6 文件变更清单
+
+| 文件 | 改动 |
+|------|------|
+| `config/schema.py` | `ToolsConfig` 新增 `read_file_hard_limit` 字段 |
+| `agent/tools/filesystem.py` | `ReadFileTool` 双重限制 + 参数扩展 + `_human_size()` 辅助函数 |
+| `agent/loop.py` | 构造函数新增参数 + `_register_default_tools` 传递硬上限 + SubagentManager 传递 |
+| `agent/subagent.py` | 构造函数新增参数 + `_run_subagent` 传递硬上限 |
+| `cli/commands.py` | 3 处 AgentLoop 实例化传递配置值 |
+| `sdk/runner.py` | 1 处 AgentLoop 实例化传递配置值 |
+| `tests/test_read_file_limit.py` | 39 项新测试 |
+
+---
+
 *本文档将随开发进展持续更新。*

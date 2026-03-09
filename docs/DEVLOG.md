@@ -42,6 +42,7 @@
 | Phase 31: Subagent 回报消息 role 修正 + announce 模板优化 | ✅ 已完成 | local |
 | §33 Hotfix: ServiceUnavailableError 误判为可重试错误 | ✅ 已完成 | local |
 | Phase 35: Subagent 回报消息 role 回归 user (§35) | ✅ 已完成 | local |
+| Phase 37: read_file 大文件保护 (§34) | ✅ 已完成 | local |
 
 ---
 
@@ -1692,3 +1693,62 @@ litellm.ServiceUnavailableError: AnthropicException - {"error":{"type":"model_no
 ### 测试
 
 448 passed, 1 skipped (matrix channel — 可选依赖未安装)
+
+---
+
+## Phase 37: read_file 大文件保护 (§34) ✅
+
+> 需求: REQUIREMENTS.md §34 | 分支: local
+> 完成时间: 2026-03-09
+
+### 背景
+
+agent 自主运行场景（eval-bench、subagent）中，`read_file` 可能意外读取大文件（如 node_modules、日志文件），导致 context 膨胀、token 浪费、甚至超出 API 限制。
+
+### 目标
+
+为 `read_file` 增加双重默认限制（≤100 行 且 ≤20KB），超限时报错并给出建议，模型可通过参数自行扩大限制。
+
+### 任务清单
+
+- ✅ **T37.1** `config/schema.py` — `ToolsConfig` 新增 `read_file_hard_limit: int = 1048576`
+- ✅ **T37.2** `agent/tools/filesystem.py` — `ReadFileTool` 改造
+  - `__init__` 新增 `hard_limit` 参数
+  - `description` 更新，让模型感知限制存在
+  - `parameters` 新增 `max_lines` 和 `max_size` 可选参数
+  - `execute()` 实现：stat 检查硬上限 → read + 双重软限制检查 → 报错或返回内容
+  - 新增 `_human_size()` 辅助函数
+- ✅ **T37.3** `agent/loop.py` — 构造函数新增 `read_file_hard_limit` + `_register_default_tools` 传递 + SubagentManager 传递
+- ✅ **T37.4** `agent/subagent.py` — 构造函数新增 `read_file_hard_limit` + `_run_subagent` 传递
+- ✅ **T37.5** `cli/commands.py` — 3 处 AgentLoop 实例化传递 `config.tools.read_file_hard_limit`
+- ✅ **T37.6** `sdk/runner.py` — 1 处 AgentLoop 实例化传递
+- ✅ **T37.7** `tests/test_read_file_limit.py` — 39 项测试全部通过
+  - _human_size: 7 项（bytes/KB/MB/边界）
+  - 小文件正常读取: 4 项（无参数/空文件/精确行数/精确大小）
+  - 超行数限制: 2 项（触发保护 + 建议内容）
+  - 超字节数限制: 1 项
+  - 两个都超: 1 项
+  - 参数扩大限制: 3 项（行数/字节数/两者）
+  - 参数 clamp 到硬上限: 3 项
+  - 硬上限: 4 项（超限/精确/默认值/自定义）
+  - 报错格式: 3 项（软限制/硬限制/实际值）
+  - Schema: 5 项（描述/参数定义/required）
+  - 边缘情况: 3 项（文件不存在/目录/单行无换行）
+  - Config 集成: 3 项（默认值/自定义/camelCase alias）
+- ✅ **T37.8** 全量回归: 487 passed, 1 skipped, 0 failed
+- ✅ **T37.9** ARCHITECTURE.md §十四 更新
+- ✅ **T37.10** DEVLOG.md 本条记录
+
+### 影响文件
+
+| 文件 | 改动 |
+|------|------|
+| `config/schema.py` | `ToolsConfig` 新增 `read_file_hard_limit` |
+| `agent/tools/filesystem.py` | `ReadFileTool` 双重限制 + 参数 + `_human_size()` |
+| `agent/loop.py` | 构造函数 + `_register_default_tools` + SubagentManager 传递 |
+| `agent/subagent.py` | 构造函数 + `_run_subagent` 传递 |
+| `cli/commands.py` | 3 处 AgentLoop 传递配置值 |
+| `sdk/runner.py` | 1 处 AgentLoop 传递配置值 |
+| `tests/test_read_file_limit.py` | 39 项新测试 |
+| `docs/ARCHITECTURE.md` | §十四 新增 |
+| `docs/DEVLOG.md` | Phase 37 记录 |
