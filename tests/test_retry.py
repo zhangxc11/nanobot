@@ -105,6 +105,96 @@ class TestIsRetryable:
 
 
 # ---------------------------------------------------------------------------
+# §33: Non-retryable message pattern tests
+# ---------------------------------------------------------------------------
+
+class TestNonRetryablePatterns:
+    """§33: Errors with config/auth messages should NOT be retried,
+    even when wrapped in retryable exception classes."""
+
+    def test_model_not_found_in_service_unavailable(self):
+        """The exact production error that triggered §33."""
+        e = ServiceUnavailableError(
+            'AnthropicException - {"error":{"type":"model_not_found",'
+            '"message":"分组 全模型纯官key 下模型 claude-opus-4-6 '
+            '无可用渠道（distributor）"}}'
+        )
+        assert not is_retryable(e)
+
+    def test_model_not_found_english(self):
+        e = ServiceUnavailableError("model not found: gpt-5-turbo")
+        assert not is_retryable(e)
+
+    def test_no_available_channel_chinese(self):
+        e = ServiceUnavailableError("无可用渠道 for model xyz")
+        assert not is_retryable(e)
+
+    def test_invalid_api_key_in_retryable_class(self):
+        e = ServiceUnavailableError("invalid_api_key: sk-xxx is not valid")
+        assert not is_retryable(e)
+
+    def test_invalid_api_key_space(self):
+        e = InternalServerError("Invalid API key provided")
+        assert not is_retryable(e)
+
+    def test_authentication_error(self):
+        e = ServiceUnavailableError("Authentication failed for user")
+        assert not is_retryable(e)
+
+    def test_unauthorized(self):
+        e = InternalServerError("Unauthorized access to model")
+        assert not is_retryable(e)
+
+    def test_permission_denied(self):
+        e = ServiceUnavailableError("Permission denied for this resource")
+        assert not is_retryable(e)
+
+    def test_access_denied(self):
+        e = InternalServerError("Access denied: insufficient permissions")
+        assert not is_retryable(e)
+
+    def test_does_not_exist(self):
+        e = ServiceUnavailableError("The model does not exist")
+        assert not is_retryable(e)
+
+    def test_not_supported(self):
+        e = InternalServerError("This operation is not supported")
+        assert not is_retryable(e)
+
+    def test_invalid_request_error(self):
+        e = ServiceUnavailableError("invalid_request_error: bad parameter")
+        assert not is_retryable(e)
+
+    def test_billing_error(self):
+        e = ServiceUnavailableError("billing account suspended")
+        assert not is_retryable(e)
+
+    def test_quota_exceeded(self):
+        e = ServiceUnavailableError("quota exceeded for this month")
+        assert not is_retryable(e)
+
+    def test_status_code_also_excluded(self):
+        """Non-retryable pattern takes priority over status code match."""
+        e = StatusCodeError("model_not_found: no such model", 503)
+        assert not is_retryable(e)
+
+    def test_genuine_service_unavailable_still_retryable(self):
+        """A real transient ServiceUnavailableError should still be retried."""
+        e = ServiceUnavailableError("Service temporarily unavailable, please try again later")
+        assert is_retryable(e)
+
+    def test_genuine_internal_server_error_still_retryable(self):
+        """A real transient InternalServerError should still be retried."""
+        e = InternalServerError("Internal server error")
+        assert is_retryable(e)
+
+    def test_rate_limit_not_affected(self):
+        """RateLimitError without non-retryable patterns should still be retried."""
+        e = RateLimitError("Rate limit exceeded, please slow down")
+        assert is_retryable(e)
+
+
+# ---------------------------------------------------------------------------
 # is_fast_retryable tests
 # ---------------------------------------------------------------------------
 

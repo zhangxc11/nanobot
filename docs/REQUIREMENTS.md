@@ -1977,4 +1977,54 @@ Phase 30 引入 `SessionMessenger` 后，`injected` 可能是 `dict`（`{"role":
 
 ---
 
+## §33 ServiceUnavailableError 误判为可重试错误 (Bug Fix)
+
+### 33.1 问题描述
+
+`litellm.ServiceUnavailableError` 被 `retry.py` 的 `_RETRYABLE_CLASSES` 无条件归为可重试错误。但某些 `ServiceUnavailableError`（和 `InternalServerError`）实际上包含的是**不可重试的配置/API 错误**，例如：
+
+```
+litellm.ServiceUnavailableError: AnthropicException - {
+  "error": {
+    "type": "model_not_found",
+    "message": "分组 全模型纯官key 下模型 claude-opus-4-6 无可用渠道（distributor）..."
+  }
+}
+```
+
+这类错误的语义是"模型不存在"或"API 配置错误"，重试 7 次（等待 5~60 秒）毫无意义，只会浪费时间和让用户等待。
+
+### 33.2 根因
+
+`retry.py` 的 `is_retryable()` 仅按异常类名判断，缺少**排除规则**：对于类名匹配可重试类的异常，如果错误消息表明是配置/认证/模型不存在类错误，应判定为不可重试。
+
+### 33.3 需求
+
+在 `is_retryable()` 中新增**不可重试消息模式**（deny list）：即使异常类名或状态码匹配可重试条件，如果错误消息包含以下模式之一，直接返回 `False`：
+
+- `model_not_found` — 模型不存在
+- `无可用渠道` — 代理/网关无可用渠道
+- `invalid_api_key` / `invalid api key` — API key 无效
+- `authentication` / `unauthorized` — 认证失败
+- `permission denied` / `access denied` — 权限不足
+- `invalid_request` / `invalid request` — 请求格式错误
+- `model not found` — 模型不存在（英文变体）
+- `does not exist` — 资源不存在
+- `not supported` — 不支持的操作
+
+### 33.4 影响范围
+
+| 文件 | 改动 |
+|------|------|
+| `agent/retry.py` | 新增 `_NON_RETRYABLE_MSG_PATTERNS` + `is_retryable()` 增加排除检查 |
+| `tests/test_retry.py` | 新增不可重试消息模式测试 |
+
+### 33.5 不做什么
+
+- 不修改 `_RETRYABLE_CLASSES`（`ServiceUnavailableError` 大多数情况确实可重试）
+- 不修改重试次数或延迟策略
+- 不修改 provider 层或 loop 层逻辑
+
+---
+
 *本文档将随需求迭代持续更新。*

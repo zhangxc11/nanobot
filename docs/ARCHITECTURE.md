@@ -1062,7 +1062,7 @@ nanobot/providers/
 | `agent/loop.py` | 修改 | 16 | `/provider` 斜杠命令处理；`self.model` 同步更新 |
 | `tests/test_provider_pool.py` | 新增 | 16 | ProviderPool 单元测试（switch、chat 路由、边界情况） |
 
-### 7.8 Provider 层错误传播策略（Hotfix §26）
+### 7.8 Provider 层错误传播策略（Hotfix §26, §33）
 
 `LiteLLMProvider.chat()` 的异常处理需区分可重试与不可重试错误：
 
@@ -1074,12 +1074,26 @@ LiteLLMProvider.chat()
         └── 优雅降级，错误信息写入 session
 ```
 
-`_is_retryable()` 在三处保持一致逻辑：
+`_is_retryable()` 在三处保持一致逻辑（全部委托给 `agent/retry.py` 共享模块）：
 - `AgentLoop._is_retryable()` — 主循环重试判断
 - `SubagentManager._is_retryable()` — 子 agent 重试判断
 - `LiteLLMProvider._is_retryable()` — provider 层错误分类
 
 > **设计约束**：provider 层必须让可重试异常穿透，否则上层 retry 机制无法感知错误。
+
+#### 7.8.1 不可重试消息模式排除（§33）
+
+某些异常类名匹配可重试类（如 `ServiceUnavailableError`），但错误消息内容表明是配置/认证类错误，不应重试。`is_retryable()` 在类名/状态码匹配**之前**先检查 `_NON_RETRYABLE_MSG_PATTERNS` 排除列表：
+
+```
+is_retryable(error)
+  ├── Step 1: 消息排除检查 — 匹配 "model_not_found"/"invalid_api_key" 等 → False
+  ├── Step 2: 类名匹配 — ServiceUnavailableError/RateLimitError 等 → True
+  ├── Step 3: 状态码匹配 — 429/5xx → True
+  └── Step 4: 消息模式匹配 — "rate limit"/"overloaded" 等 → True
+```
+
+排除检查的优先级高于所有可重试判断，确保配置错误不被无意义重试。
 
 ---
 
