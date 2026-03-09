@@ -342,6 +342,8 @@ class AgentLoop:
             "completion_tokens": 0,
             "total_tokens": 0,
             "llm_calls": 0,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
         }
 
         # Resolve progress callback: callbacks.on_progress takes precedence
@@ -385,7 +387,8 @@ class AgentLoop:
             # Record token usage from this LLM call — immediately to SQLite
             # so that a crash mid-turn does not lose usage data.
             if response.usage:
-                for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                for key in ("prompt_tokens", "completion_tokens", "total_tokens",
+                            "cache_creation_input_tokens", "cache_read_input_tokens"):
                     accumulated_usage[key] += response.usage.get(key, 0)
                 accumulated_usage["llm_calls"] += 1
 
@@ -402,6 +405,8 @@ class AgentLoop:
                         llm_calls=1,
                         started_at=call_ts,
                         finished_at=call_ts,
+                        cache_creation_input_tokens=response.usage.get("cache_creation_input_tokens", 0),
+                        cache_read_input_tokens=response.usage.get("cache_read_input_tokens", 0),
                     )
 
             # Log full LLM call details (messages + response) to JSONL
@@ -577,6 +582,8 @@ class AgentLoop:
                 "completion_tokens": accumulated_usage.get("completion_tokens", 0),
                 "total_tokens": accumulated_usage.get("total_tokens", 0),
                 "llm_calls": accumulated_usage.get("llm_calls", 0),
+                "cache_creation_input_tokens": accumulated_usage.get("cache_creation_input_tokens", 0),
+                "cache_read_input_tokens": accumulated_usage.get("cache_read_input_tokens", 0),
                 "started_at": loop_started_at,
                 "finished_at": finished_at,
             }

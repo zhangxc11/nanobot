@@ -139,24 +139,49 @@ class LiteLLMProvider(LLMProvider):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]] | None]:
-        """Return copies of messages and tools with cache_control injected."""
-        new_messages = []
-        for msg in messages:
-            if msg.get("role") == "system":
-                content = msg["content"]
-                if isinstance(content, str):
-                    new_content = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
-                else:
-                    new_content = list(content)
-                    new_content[-1] = {**new_content[-1], "cache_control": {"type": "ephemeral"}}
-                new_messages.append({**msg, "content": new_content})
-            else:
-                new_messages.append(msg)
+        """Return copies of messages and tools with cache_control injected.
 
+        Uses a precise 3-breakpoint strategy (max 4 allowed by Anthropic):
+          #1  tools[-1]      — cache tool definitions (stable across sessions)
+          #2  messages[0]    — cache system prompt (stable across sessions)
+          #3  messages[-1]   — cache conversation history (reused within session)
+
+        Other system messages (subagent results, budget alerts) do NOT get
+        breakpoints, which fixes the "max 4 cache_control blocks" error when
+        multiple subagents inject system messages.
+        """
+        _CACHE_CTRL = {"type": "ephemeral"}
+
+        new_messages = list(messages)  # shallow copy
+
+        # Breakpoint #2: first message (system prompt) only
+        if new_messages and new_messages[0].get("role") == "system":
+            msg = new_messages[0]
+            content = msg["content"]
+            if isinstance(content, str):
+                new_content = [{"type": "text", "text": content, "cache_control": _CACHE_CTRL}]
+            else:
+                new_content = list(content)
+                new_content[-1] = {**new_content[-1], "cache_control": _CACHE_CTRL}
+            new_messages[0] = {**msg, "content": new_content}
+
+        # Breakpoint #3: last message's last content block (conversation tail)
+        if len(new_messages) > 1:
+            last_msg = new_messages[-1]
+            content = last_msg.get("content")
+            if isinstance(content, str) and content:
+                new_content = [{"type": "text", "text": content, "cache_control": _CACHE_CTRL}]
+                new_messages[-1] = {**last_msg, "content": new_content}
+            elif isinstance(content, list) and content:
+                new_content = list(content)
+                new_content[-1] = {**new_content[-1], "cache_control": _CACHE_CTRL}
+                new_messages[-1] = {**last_msg, "content": new_content}
+
+        # Breakpoint #1: last tool definition
         new_tools = tools
         if tools:
             new_tools = list(tools)
-            new_tools[-1] = {**new_tools[-1], "cache_control": {"type": "ephemeral"}}
+            new_tools[-1] = {**new_tools[-1], "cache_control": _CACHE_CTRL}
 
         return new_messages, new_tools
 
@@ -308,6 +333,10 @@ class LiteLLMProvider(LLMProvider):
                 "prompt_tokens": response.usage.prompt_tokens,
                 "completion_tokens": response.usage.completion_tokens,
                 "total_tokens": response.usage.total_tokens,
+                # Cache-specific fields (Anthropic prompt caching).
+                # Stored in Pydantic model_extra; getattr returns 0 when absent.
+                "cache_creation_input_tokens": getattr(response.usage, "cache_creation_input_tokens", 0) or 0,
+                "cache_read_input_tokens": getattr(response.usage, "cache_read_input_tokens", 0) or 0,
             }
 
         reasoning_content = getattr(message, "reasoning_content", None) or None

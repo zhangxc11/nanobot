@@ -1900,6 +1900,75 @@ Phase 30 引入 `SessionMessenger` 后，`injected` 可能是 `dict`（`{"role":
 
 ---
 
+## §32 Cache Control 策略优化 + Usage Cache 字段 (Phase 32)
+
+### 32.1 问题描述
+
+当前 cache control 和 usage 记录存在三个问题：
+
+1. **cache_control breakpoint 超限**：`_apply_cache_control()` 对所有 `role: "system"` 的消息注入 breakpoint，但 nanobot 中 system 消息不止一条（subagent 回报、budget alert 等均以 system 注入）。spawn 3+ subagent 后容易超过 Anthropic 的 **4 breakpoint 上限**，导致 API 报错或静默丢弃多余 breakpoint。
+2. **cache usage 字段丢失**：`_parse_response()` 只提取 `prompt_tokens` / `completion_tokens` / `total_tokens`，Anthropic 返回的 `cache_creation_input_tokens` 和 `cache_read_input_tokens` 被丢弃，无法追踪缓存命中率。
+3. **前端无缓存信息**：数据链路中缺少 cache 字段，前端无法展示缓存命中情况（前端改造在 web-chat 仓库实施，此处只记录 nanobot core 的改动需求）。
+
+### 32.2 目标
+
+1. **cache_control 策略重写**：从"所有 system 消息加 breakpoint"改为精准 3 breakpoint，最大化缓存复用且不超限
+2. **全链路增加 cache usage 字段**：provider → loop → subagent → SQLite，完整传递 cache 统计
+3. **前端展示增强**（web-chat 仓库实施，此处仅记录 nanobot core 侧的数据支撑需求）
+
+### 32.3 子需求
+
+#### 32.3.1 cache_control 策略重写
+
+新策略使用精准 3 breakpoint：
+
+| Breakpoint | 位置 | 用途 | 复用范围 |
+|-----------|------|------|---------|
+| **#1** | `tools[-1]` | 缓存 tool 定义 | 跨 session（tools 几乎不变） |
+| **#2** | `messages[0]`（首条 system prompt） | 缓存 system prompt | 跨 session（system prompt 几乎不变） |
+| **#3** | `messages[-1]` 最后一个 content block | 缓存已有对话历史 | 同 session 内多轮迭代 |
+
+设计要求：
+- **其他 system 消息不加 breakpoint**：subagent 回报、budget alert 等 system 消息不注入 `cache_control`
+- **仅对支持 cache 的 provider 生效**：`_supports_cache_control()` 返回 True 时才执行策略
+- **边界安全**：消息只有 1 条时不加 #3；没有 tools 时不加 #1；content 为空或非标准格式时跳过，不报错
+
+#### 32.3.2 Usage cache 字段全链路传递
+
+**Provider 层**（`litellm_provider.py`）：
+- `_parse_response()` 提取 `cache_creation_input_tokens` + `cache_read_input_tokens`
+- 使用 `getattr(response.usage, field, 0) or 0` 兼容非 Anthropic provider
+
+**Loop 层**（`loop.py`）：
+- `accumulated_usage` 增加 `cache_creation_input_tokens` 和 `cache_read_input_tokens` 字段累加
+- `usage_recorder.record()` 传递 cache 字段
+
+**Subagent 层**（`subagent.py`）：
+- 同步增加 cache 字段累加和 `usage_recorder.record()` 传递
+
+**SQLite schema**（`recorder.py`）：
+- `record()` 方法新增 `cache_creation_input_tokens=0` 和 `cache_read_input_tokens=0` 参数
+- Schema migration：`ALTER TABLE token_usage ADD COLUMN cache_creation_input_tokens INTEGER DEFAULT 0`（同理 `cache_read_input_tokens`）
+- 检测列是否存在，不存在则 ALTER TABLE（向后兼容）
+
+### 32.4 影响范围
+
+| 文件 | 改动 |
+|------|------|
+| `providers/litellm_provider.py` | `_apply_cache_control()` 策略重写 + `_parse_response()` 增加 cache 字段提取 |
+| `agent/loop.py` | `accumulated_usage` 增加 cache 字段 + `usage_recorder.record()` 传递 cache 字段 |
+| `agent/subagent.py` | `usage_recorder.record()` 传递 cache 字段 |
+| `usage/recorder.py` | `record()` 新增参数 + schema migration |
+
+### 32.5 不做什么
+
+- 不修改 `providers/base.py`（`usage: dict[str, int]` 已足够灵活，无需改类型）
+- 不修改 `providers/registry.py`
+- 前端展示改造（UsageIndicator、UsagePage、MessageItem）在 web-chat 仓库独立实施
+- 不做 cache 命中率的自动告警或策略自适应
+
+---
+
 ### 手动维护的 backlog
 
 **note** 这个部分手动添加需求 backlog。被激活后，更新前序需求文档章节，推进开发。

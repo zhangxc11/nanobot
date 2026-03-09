@@ -29,7 +29,9 @@ CREATE TABLE IF NOT EXISTS token_usage (
     total_tokens      INTEGER DEFAULT 0,
     llm_calls         INTEGER DEFAULT 0,
     started_at        TEXT NOT NULL,
-    finished_at       TEXT NOT NULL
+    finished_at       TEXT NOT NULL,
+    cache_creation_input_tokens INTEGER DEFAULT 0,
+    cache_read_input_tokens     INTEGER DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_usage_session  ON token_usage(session_key);
@@ -37,6 +39,12 @@ CREATE INDEX IF NOT EXISTS idx_usage_started  ON token_usage(started_at);
 CREATE INDEX IF NOT EXISTS idx_usage_finished ON token_usage(finished_at);
 CREATE INDEX IF NOT EXISTS idx_usage_model    ON token_usage(model);
 """
+
+# Migration SQL for existing databases that lack cache columns.
+_MIGRATION_SQL = [
+    "ALTER TABLE token_usage ADD COLUMN cache_creation_input_tokens INTEGER DEFAULT 0",
+    "ALTER TABLE token_usage ADD COLUMN cache_read_input_tokens INTEGER DEFAULT 0",
+]
 
 
 class UsageRecorder:
@@ -77,6 +85,21 @@ class UsageRecorder:
     def _ensure_schema(self) -> None:
         with self._connect() as conn:
             conn.executescript(SCHEMA_SQL)
+            self._migrate(conn)
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        """Apply schema migrations for existing databases."""
+        # Check which columns already exist
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(token_usage)")}
+        for sql in _MIGRATION_SQL:
+            # Extract column name from "ALTER TABLE ... ADD COLUMN <name> ..."
+            col_name = sql.split("ADD COLUMN")[1].strip().split()[0]
+            if col_name not in existing:
+                try:
+                    conn.execute(sql)
+                except sqlite3.OperationalError:
+                    pass  # Column already exists (race condition)
 
     # ── Write ──
 
@@ -90,6 +113,8 @@ class UsageRecorder:
         llm_calls: int = 0,
         started_at: str = "",
         finished_at: str = "",
+        cache_creation_input_tokens: int = 0,
+        cache_read_input_tokens: int = 0,
     ) -> int:
         """Insert a usage record.  Returns the new row id.
 
@@ -102,16 +127,19 @@ class UsageRecorder:
                     """
                     INSERT INTO token_usage
                         (session_key, model, prompt_tokens, completion_tokens,
-                         total_tokens, llm_calls, started_at, finished_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                         total_tokens, llm_calls, started_at, finished_at,
+                         cache_creation_input_tokens, cache_read_input_tokens)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (session_key, model, prompt_tokens, completion_tokens,
-                     total_tokens, llm_calls, started_at, finished_at),
+                     total_tokens, llm_calls, started_at, finished_at,
+                     cache_creation_input_tokens, cache_read_input_tokens),
                 )
                 row_id = cur.lastrowid
                 logger.debug(
-                    "Recorded usage: session={} model={} tokens={} (row {})",
-                    session_key, model, total_tokens, row_id,
+                    "Recorded usage: session={} model={} tokens={} cache_create={} cache_read={} (row {})",
+                    session_key, model, total_tokens,
+                    cache_creation_input_tokens, cache_read_input_tokens, row_id,
                 )
                 return row_id
         except Exception:

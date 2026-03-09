@@ -280,6 +280,8 @@ class SubagentManager:
                             llm_calls=1,
                             started_at=now,
                             finished_at=now,
+                            cache_creation_input_tokens=response.usage.get("cache_creation_input_tokens", 0),
+                            cache_read_input_tokens=response.usage.get("cache_read_input_tokens", 0),
                         )
                     except Exception as e:
                         logger.warning("Subagent [{}] usage recording failed: {}", task_id, e)

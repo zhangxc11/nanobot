@@ -1511,6 +1511,20 @@ webchat session 走的是 Worker 模式，所以 inject 和 trigger 两条路径
 
 ---
 
+## §31 Hotfix: unhashable type 'slice' on subagent injection
+
+**需求**: §31 | **状态**: ✅ 已完成 | **Commit**: `1bef577`
+
+### 问题
+
+Phase 30 引入 `SessionMessenger` 后，subagent 完成时通过 inject queue 注入 dict 消息到主 session。`loop.py` 的 progress 回调中 `injected[:80]` 对 dict 做切片触发 `TypeError: unhashable type: 'slice'`，导致主 session task 崩溃中断。
+
+### 修复
+
+`injected[:80]` → `inject_msg['content'][:80]`（1 行改动，`inject_msg['content']` 在两个分支中都是字符串）。
+
+---
+
 *本文件随开发进展持续更新。*
 
 ---
@@ -1535,3 +1549,58 @@ webchat session 走的是 Worker 模式，所以 inject 和 trigger 两条路径
 ### 影响范围
 
 2 个文件，改动 3 行代码。向后兼容（`session_key` 参数有默认值，不传则 fallback 到原逻辑）。
+
+---
+
+## Phase 32: Cache Control 策略优化 + Usage Cache 字段
+
+**需求**: §32 | **状态**: ✅ 已完成 | **Commit**: (pending)
+
+### 问题
+
+1. `_apply_cache_control()` 对所有 system 消息加 breakpoint → spawn 3+ subagent 后超 Anthropic 4 breakpoint 上限
+2. `_parse_response()` 丢弃 `cache_creation_input_tokens` / `cache_read_input_tokens`
+3. 数据链路缺少 cache 字段，无法追踪缓存命中率
+
+### 改动
+
+#### 1. cache_control 策略重写 (`litellm_provider.py`)
+- **旧策略**: 遍历所有 `role: "system"` 消息注入 breakpoint
+- **新策略**: 精准 3 breakpoint —
+  - `#1 tools[-1]` (缓存 tool 定义，跨 session 复用)
+  - `#2 messages[0]` (缓存 system prompt，跨 session 复用)
+  - `#3 messages[-1]` (缓存对话历史，同 session 多轮复用)
+- 中间 system 消息 (subagent 结果、budget alert) **不加** breakpoint
+
+#### 2. _parse_response() 增加 cache 字段 (`litellm_provider.py`)
+- 使用 `getattr(response.usage, field, 0) or 0` 提取 cache 字段
+- LiteLLM Usage 是 Pydantic 模型，cache 字段存于 `model_extra`
+
+#### 3. Loop 层累加 (`loop.py`)
+- `accumulated_usage` 增加 `cache_creation_input_tokens` / `cache_read_input_tokens`
+- 累加逻辑和 `usage_recorder.record()` 调用同步传递
+- `__usage__` stderr JSON 输出增加两个字段
+
+#### 4. Subagent 层 (`subagent.py`)
+- `usage_recorder.record()` 调用增加 cache 字段传递
+
+#### 5. SQLite schema + migration (`recorder.py`)
+- Schema 新增 `cache_creation_input_tokens` / `cache_read_input_tokens` 列 (DEFAULT 0)
+- `_migrate()` 方法检测列是否存在，不存在则 ALTER TABLE
+- `record()` 方法新增两个参数
+
+### 测试
+
+- `test_cache_control_strategy.py`: 10 个测试覆盖 3-breakpoint 策略各种边界
+- `test_usage_cache_fields.py`: 6 个测试覆盖 recorder 写入/迁移/parse_response 提取
+
+### 影响范围
+
+| 文件 | 改动 |
+|------|------|
+| `providers/litellm_provider.py` | `_apply_cache_control()` 重写 + `_parse_response()` 增加 cache 字段 |
+| `agent/loop.py` | `accumulated_usage` + `usage_recorder.record()` + `__usage__` 输出 |
+| `agent/subagent.py` | `usage_recorder.record()` 传递 cache 字段 |
+| `usage/recorder.py` | `record()` 新增参数 + schema + `_migrate()` |
+| `tests/test_cache_control_strategy.py` | 新增 10 个测试 |
+| `tests/test_usage_cache_fields.py` | 新增 6 个测试 |
