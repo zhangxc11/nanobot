@@ -1733,4 +1733,196 @@ async def _chat_with_retry(self, messages, tools, max_retries=3):
 
 ---
 
+## 十二、SessionMessenger — 跨 Session 消息投递协议（Phase 30）
+
+### 12.1 概述
+
+Subagent 完成任务后需要将结果回报给父 session。在 Phase 30 之前，回报依赖 `MessageBus.publish_inbound()` 发布一条 `InboundMessage`，由 `run()` 调度循环消费。这在 Gateway 模式下工作正常，但在 Web Worker 模式下存在问题：Worker 进程通过 `process_direct()` 调用 agent，**没有 `run()` 循环消费 bus**，导致 subagent 回报消息无人接收。
+
+`SessionMessenger` 协议解决了这个问题：它抽象了"向目标 session 投递消息"的能力，由不同运行模式提供各自的实现。
+
+### 12.2 Protocol 定义
+
+```python
+# nanobot/agent/callbacks.py
+
+@runtime_checkable
+class SessionMessenger(Protocol):
+    async def send_to_session(
+        self,
+        target_session_key: str,
+        content: str,
+        source_session_key: str | None = None,
+    ) -> bool: ...
+```
+
+**职责**：将 `content` 投递到 `target_session_key` 对应的 session。如果提供了 `source_session_key`，内容会被加上 `[Message from session {source_session_key}]` 前缀以便溯源。
+
+**返回值**：`True` 表示消息已投递（注入或触发），`False` 表示投递失败。
+
+### 12.3 三种运行模式的实现
+
+| 模式 | 实现类 | 定义位置 | 投递方式 |
+|------|--------|----------|----------|
+| Gateway（IM 渠道） | `GatewaySessionMessenger` | `agent/loop.py` — `run()` 内部 | inject 或 trigger（见 §12.4） |
+| Web Worker | `WorkerSessionMessenger` | web-chat `worker.py` | HTTP 调用 Gateway API 触发父 session |
+| CLI / Cron | 无实现 | — | fallback 到 bus publish（见 §12.5） |
+
+### 12.4 Gateway 模式：inject 与 trigger 两条路径
+
+`GatewaySessionMessenger` 在 `run()` 方法内部定义，持有 `active_sessions` 字典的引用，因此能判断目标 session 是否正在运行：
+
+```
+subagent._announce_result()
+    │
+    └── session_messenger.send_to_session(parent_key, content)
+            │
+            ├── 父 session 正在运行（active_sessions 中有对应 task 且未完成）
+            │       │
+            │       └── inject 路径：
+            │           worker.callbacks.inject({"role": "system", "content": prefixed})
+            │           → 消息进入 GatewayCallbacks._inject_queue
+            │           → _run_agent_loop 在下一个 tool round 后通过
+            │             check_user_input() 取出
+            │           → 作为 system role 消息追加到 messages 列表
+            │
+            └── 父 session 空闲（不在 active_sessions 中，或 task 已完成）
+                    │
+                    └── trigger 路径：
+                        bus.publish_inbound(InboundMessage(
+                            channel="session_messenger",
+                            sender_id=source_session_key,
+                            chat_id=target_session_key,
+                            content=prefixed,
+                            session_key_override=target_session_key,
+                        ))
+                        → 消息进入 bus inbound 队列
+                        → run() 调度循环消费后启动新 task 处理
+```
+
+### 12.5 与 `_announce_result()` 的关系
+
+`SubagentManager._announce_result()` 是 subagent 完成后的统一出口，采用**优先 messenger、fallback bus** 策略：
+
+```python
+# agent/subagent.py — _announce_result()
+
+async def _announce_result(self, ..., parent_session_key):
+    # 1. 优先使用 SessionMessenger
+    if self.session_messenger and parent_session_key:
+        try:
+            await self.session_messenger.send_to_session(
+                target_session_key=parent_session_key,
+                content=announce_content,
+                source_session_key=subagent_session_key,
+            )
+            return  # 成功，直接返回
+        except Exception:
+            pass  # 失败，降级到 bus
+
+    # 2. Fallback: 通过 bus 发布（CLI 模式、或 messenger 失败时）
+    msg = InboundMessage(
+        channel="system",
+        sender_id="subagent",
+        chat_id=f"{origin['channel']}:{origin['chat_id']}",
+        content=announce_content,
+        session_key_override=parent_session_key,
+    )
+    await self.bus.publish_inbound(msg)
+```
+
+### 12.6 Role 处理策略
+
+subagent 回报消息应被父 session 视为**系统通知**（`role="system"`），而非用户指令（`role="user"`）。两条路径通过不同机制实现 role 判定：
+
+| 路径 | 判定机制 | 最终 role |
+|------|---------|-----------|
+| **inject**（父 session 运行中） | `inject()` 传入 `dict`（含 `"role": "system"`）；`_run_agent_loop` 的 inject checkpoint 检测 `isinstance(injected, dict)` 后使用 dict 中的 role | `"system"` |
+| **trigger**（父 session 空闲） | `InboundMessage.channel = "session_messenger"`；`_process_message()` 检测 `msg.channel == "session_messenger"` 后将 `initial_messages[-1]` 的 role 改为 `"system"` | `"system"` |
+| 用户消息 inject | `inject()` 传入 `str`；inject checkpoint 检测 `isinstance(injected, str)` | `"user"` |
+| 用户消息 trigger | `msg.channel != "session_messenger"`（如 `"feishu"`、`"telegram"` 等） | `"user"` |
+
+**关键代码**（`_run_agent_loop` inject checkpoint）：
+
+```python
+injected = await callbacks.check_user_input()
+if injected:
+    if isinstance(injected, dict):
+        # 结构化注入（来自 SessionMessenger）
+        inject_msg = {"role": injected.get("role", "user"), "content": injected["content"], ...}
+    else:
+        # 纯字符串注入（用户消息）
+        inject_msg = {"role": "user", "content": injected, ...}
+```
+
+**关键代码**（`_process_message` trigger 路径）：
+
+```python
+if msg.channel == "session_messenger":
+    initial_messages[-1] = {**initial_messages[-1], "role": "system"}
+```
+
+### 12.7 初始化与注入
+
+`SessionMessenger` 实例通过依赖注入传递到 `SubagentManager`：
+
+```
+AgentLoop.__init__(session_messenger=...)
+    │
+    └── SubagentManager.__init__(session_messenger=session_messenger)
+            │
+            └── self.session_messenger = session_messenger
+                    │ （subagent 完成时）
+                    └── _announce_result() 调用 self.session_messenger.send_to_session()
+```
+
+**Gateway 模式**：`GatewaySessionMessenger` 在 `run()` 内部创建后，通过 `self.subagents.session_messenger = messenger` 动态注入（因为它依赖 `active_sessions` 字典，该字典在 `run()` 内才创建）。
+
+**Web Worker 模式**：`WorkerSessionMessenger` 在 worker 初始化 `AgentLoop` 时传入。
+
+**CLI 模式**：不传入 `session_messenger`（默认 `None`），subagent 回报走 bus fallback。
+
+### 12.8 消息流转全景图
+
+```
+Subagent task 完成
+    │
+    └── _announce_result(parent_session_key="feishu:group_123")
+            │
+            ├── [SessionMessenger 可用]
+            │       │
+            │       └── messenger.send_to_session("feishu:group_123", result)
+            │               │
+            │               ├── [Gateway] 父 session 运行中
+            │               │       └── inject({"role":"system", "content":...})
+            │               │               └── check_user_input() 取出
+            │               │                       └── messages.append(system msg)
+            │               │                               └── 下一轮 LLM 调用看到 subagent 结果
+            │               │
+            │               ├── [Gateway] 父 session 空闲
+            │               │       └── bus.publish_inbound(channel="session_messenger")
+            │               │               └── run() 消费 → 启动新 task
+            │               │                       └── _process_message() 识别 channel
+            │               │                               └── role 改为 "system"
+            │               │
+            │               └── [Worker] HTTP 触发父 session
+            │                       └── Gateway 收到请求 → 处理
+            │
+            └── [SessionMessenger 不可用 / 失败]
+                    │
+                    └── bus.publish_inbound(channel="system", session_key_override=...)
+                            └── run() 消费 → _process_message() 处理
+```
+
+### 12.9 文件变更清单
+
+| 文件 | 改动类型 | 说明 |
+|------|----------|------|
+| `agent/callbacks.py` | 新增 | `SessionMessenger` Protocol 定义 |
+| `agent/subagent.py` | 修改 | `__init__` 接受 `session_messenger` 参数；`_announce_result()` 优先使用 messenger |
+| `agent/loop.py` | 修改 | `run()` 内定义 `GatewaySessionMessenger`；`_process_message()` 识别 `channel="session_messenger"` |
+| web-chat `worker.py` | 修改 | 定义 `WorkerSessionMessenger`，初始化时传入 `AgentLoop` |
+
+---
+
 *本文档将随开发进展持续更新。*
