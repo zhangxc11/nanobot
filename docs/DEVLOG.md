@@ -1824,3 +1824,21 @@ spawn subagent 当前是"发射后不管"模式。需要支持向已有 subagent
   - SpawnToolStop: 5 项（参数 schema / description / 路由 stop / 空 task / 互斥检查 / 正常 spawn）
 - [x] **T39.6** 全量回归: 532 passed, 1 skipped, 0 failed
 - [x] **T39.7** Git commit: `0fd78a4`
+
+---
+
+## Phase 40: Spawn status — 查询 subagent 执行状态 (§38)
+
+> 需求：§38 | 架构：§十七 | 日期：2026-03-10
+
+### 任务清单
+
+- [ ] **T40.1** `agent/subagent.py` — SubagentMeta 新增 4 字段：`created_at`, `finished_at`, `current_iteration`, `last_tool_name`
+- [ ] **T40.2** `agent/subagent.py` — `spawn()` 中设置 `created_at`；`_run_subagent()` 中同步 `current_iteration`、`last_tool_name`；状态变更时设置 `finished_at`
+- [ ] **T40.3** `agent/subagent.py` — 新增 `get_status()` 和 `list_subagents()` 方法
+- [ ] **T40.4** `agent/tools/spawn.py` — 新增 `status` 参数，`execute()` 路由，互斥检查扩展，`parameters` / `description` 更新
+- [ ] **T40.5** `tests/test_spawn_status.py` — 新增测试
+- [ ] **T40.6** 全量回归测试
+- [ ] **T40.7** Git commit
+- [ ] **T40.8** Backlog §39: `validate_params()` 未知参数检查
+- [ ] **T40.9** 全量回归 + Git commit (§39)

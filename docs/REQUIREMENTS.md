@@ -2154,6 +2154,92 @@ Phase 39
 
 ---
 
+## §38 Spawn status — 查询 subagent 执行状态 (Phase 40)
+
+### 背景
+
+spawn subagent 当前支持新建、follow_up、stop 三种操作，但主 session 在发起任务后**无法查询 subagent 的执行状态**。只能被动等待 subagent 完成后的 announce 消息，或盲目地 follow_up/stop。缺少一个轻量的"查看"操作。
+
+### 需求
+
+新增 `status` 参数，允许主 session 查询 subagent 执行状态：
+
+1. **查询单个 subagent**：`status="<task_id>"` 返回详细状态
+2. **列出全部 subagent**：`status="list"` 返回当前 session 下所有 subagent 的摘要
+3. **安全鉴权**：复用 `_check_ownership()`，只能查看自己 spawn 的 subagent
+4. **只读操作**：不改变任何 subagent 状态
+
+### 接口
+
+```python
+# 查询单个 subagent 详细状态
+spawn(task="", status="<task_id>")
+
+# 列出当前 session 所有 subagent
+spawn(task="", status="list")
+```
+
+- `status` 与 `follow_up`、`stop` **互斥** — 同时设置时报错
+- `status` 设置时，`task` 必选但忽略其内容（与 stop 模式一致）
+
+### 返回信息
+
+#### 单个查询（`status="<task_id>"`）
+
+| 字段 | 来源 | 说明 |
+|------|------|------|
+| task_id | SubagentMeta.task_id | 唯一标识 |
+| label | SubagentMeta.label | 任务短标签 |
+| status | SubagentMeta.status | running / completed / failed / max_iterations / stopped |
+| iteration | SubagentMeta.current_iteration | 当前迭代轮次 |
+| max_iterations | SubagentMeta.max_iterations | 最大迭代数 |
+| created_at | SubagentMeta.created_at | 创建时间（ISO 格式） |
+| finished_at | SubagentMeta.finished_at | 完成时间（仅已结束时有值） |
+| last_tool | SubagentMeta.last_tool_name | 最后一次工具调用名称（可观察 subagent 正在做什么） |
+
+#### 列表查询（`status="list"`）
+
+返回当前 session 下所有 subagent 的摘要表格，每条包含：task_id, label, status, iteration/max_iterations, created_at, last_tool。
+
+无 subagent 时返回 `"No subagents found for this session."`。
+
+### SubagentMeta 新增字段
+
+`SubagentMeta` 需新增以下字段（§38）：
+
+| 字段 | 类型 | 默认值 | 更新时机 |
+|------|------|--------|----------|
+| `created_at` | `str` | spawn 时设置 | 创建时 |
+| `finished_at` | `str \| None` | `None` | status 变更为终态时 |
+| `current_iteration` | `int` | `0` | `_run_subagent` 每次 iteration += 1 时同步更新 |
+| `last_tool_name` | `str \| None` | `None` | `_run_subagent` 每次执行工具后更新 |
+
+### 参数优先级
+
+spawn 的四种模式通过参数组合区分：
+
+| 模式 | 参数 | 行为 |
+|------|------|------|
+| 新建 | `task` only | 创建新 subagent |
+| 追加 | `task` + `follow_up` | 向已有 subagent 追加消息 |
+| 停止 | `task` + `stop` | 停止指定 subagent |
+| 查询 | `task` + `status` | 查询 subagent 状态（只读） |
+
+### 影响范围
+
+| 文件 | 改动 |
+|------|------|
+| `agent/subagent.py` | SubagentMeta 新增 4 字段；`_run_subagent()` 中同步更新 `current_iteration` 和 `last_tool_name`；spawn() 中设置 `created_at`；状态变更时设置 `finished_at`；新增 `get_status()` 和 `list_subagents()` 方法 |
+| `agent/tools/spawn.py` | 新增 `status` 参数；`execute()` 路由；`parameters` 和 `description` 更新；互斥检查扩展 |
+| `tests/` | 新增测试：单个查询/列表查询/鉴权检查/互斥检查/无 subagent 时的空列表/新增字段更新验证 |
+| 文档 | ARCHITECTURE.md 新增章节；DEVLOG.md 任务清单 |
+
+### 优先级
+
+Phase 40
+
+---
+
 <!-- ═══════════════════════════════════════════════════════════════════════
   ⚠️ BACKLOG 区域 — 必须始终位于本文件最末尾！
   
@@ -2249,5 +2335,17 @@ parameters to increase, or use exec with head/tail/grep.
 #### 优先级
 
 Backlog — 日常使用中用户通常不会读取大文件，但 agent 自主运行场景（eval-bench、subagent）风险较高。
+
+### Backlog: §39 Tool 未知参数检查 — 防止 LLM 幻觉参数被静默忽略
+
+> 来源：§38 开发过程中发现，`stop` 参数在代码未上线时，LLM 查阅文档后调用 `spawn(task="", stop="xxx")`，`stop` 被 `**kwargs` 吞掉，静默启动了一个新 subagent 而非报错。
+
+**问题描述**：`Tool.execute()` 使用 `**kwargs` 接收参数，`validate_params()` 只校验 required 和已知 property 的类型，**不检查未知属性**。当 LLM 传入 schema 中不存在的参数时，参数被静默忽略，可能导致意外行为（如本应 stop 却变成 spawn 新任务）。
+
+**修复方案**：在 `validate_params()` 中增加 `additionalProperties` 检查。如果 params 中包含 schema properties 中未定义的 key，返回错误信息而非静默忽略。
+
+**影响范围**：`agent/tools/base.py` 的 `validate_params()` 方法。所有 Tool 子类受益。
+
+**优先级**：Backlog — 与 §38 一起开发（§38 完成后立即修复）。
 
 <!-- ⚠️ BACKLOG 结束 — 此行之后不得追加任何内容 -->

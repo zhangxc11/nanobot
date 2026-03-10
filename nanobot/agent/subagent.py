@@ -63,6 +63,7 @@ class SubagentMeta:
     """Metadata for a spawned subagent, retained after completion for follow_up.
 
     §36: Created at spawn time, persists in memory until process restart.
+    §38: Added created_at, finished_at, current_iteration, last_tool_name.
     """
     task_id: str
     subagent_session_key: str
@@ -73,6 +74,11 @@ class SubagentMeta:
     status: str = "running"           # running | completed | failed | max_iterations | stopped
     max_iterations: int = DEFAULT_SUBAGENT_ITERATIONS
     persist: bool = True
+    # §38: Status tracking fields
+    created_at: str = ""                    # ISO timestamp, set at spawn time
+    finished_at: str | None = None          # ISO timestamp, set when reaching terminal status
+    current_iteration: int = 0              # Updated each iteration in _run_subagent
+    last_tool_name: str | None = None       # Updated after each tool execution
 
 
 def _budget_alert_threshold(max_iterations: int) -> int:
@@ -203,6 +209,7 @@ class SubagentManager:
             status="running",
             max_iterations=effective_max,
             persist=persist,
+            created_at=datetime.now().isoformat(),  # §38
         )
         self._task_meta[task_id] = meta
 
@@ -310,6 +317,10 @@ class SubagentManager:
             while iteration < max_iterations:
                 iteration += 1
 
+                # §38: Sync current_iteration to meta for status queries
+                if task_id in self._task_meta:
+                    self._task_meta[task_id].current_iteration = iteration
+
                 # Budget alert injection (once, when remaining == threshold)
                 remaining = max_iterations - iteration
                 if remaining == threshold:
@@ -376,6 +387,11 @@ class SubagentManager:
                         logger.debug("Subagent [{}] executing: {} with arguments: {}",
                                      task_id, tool_call.name, args_str)
                         result = await tools.execute(tool_call.name, tool_call.arguments)
+
+                        # §38: Sync last_tool_name to meta for status queries
+                        if task_id in self._task_meta:
+                            self._task_meta[task_id].last_tool_name = tool_call.name
+
                         tool_msg = {
                             "role": "tool",
                             "tool_call_id": tool_call.id,
@@ -431,10 +447,12 @@ class SubagentManager:
                 # §36: Update meta status
                 if task_id in self._task_meta:
                     self._task_meta[task_id].status = "max_iterations"
+                    self._task_meta[task_id].finished_at = datetime.now().isoformat()  # §38
             else:
                 # §36: Update meta status
                 if task_id in self._task_meta:
                     self._task_meta[task_id].status = "completed"
+                    self._task_meta[task_id].finished_at = datetime.now().isoformat()  # §38
 
             logger.info("Subagent [{}] completed successfully (iterations: {}/{})",
                          task_id, iteration, max_iterations)
@@ -449,11 +467,13 @@ class SubagentManager:
                 self._stop_flags.discard(task_id)
                 if task_id in self._task_meta:
                     self._task_meta[task_id].status = "stopped"
+                    self._task_meta[task_id].finished_at = datetime.now().isoformat()  # §38
                 logger.info("Subagent [{}] stopped by parent session", task_id)
             else:
                 # Other cancellation (e.g. cancel_by_session) — announce error
                 if task_id in self._task_meta:
                     self._task_meta[task_id].status = "failed"
+                    self._task_meta[task_id].finished_at = datetime.now().isoformat()  # §38
                 logger.warning("Subagent [{}] cancelled", task_id)
                 try:
                     await self._announce_result(
@@ -468,6 +488,7 @@ class SubagentManager:
             # §36: Update meta status
             if task_id in self._task_meta:
                 self._task_meta[task_id].status = "failed"
+                self._task_meta[task_id].finished_at = datetime.now().isoformat()  # §38
             error_msg = f"Error: {str(e)}"
             logger.error("Subagent [{}] failed: {}", task_id, e)
             await self._announce_result(task_id, label, task, error_msg, origin, "error",
@@ -529,6 +550,74 @@ class SubagentManager:
         if meta.parent_session_key != parent_session_key:
             raise ValueError(f"Subagent {target_task_id} does not belong to this session")
         return meta
+
+    # ── §38: Status query support ──
+
+    def get_status(self, task_id: str, parent_session_key: str) -> str:
+        """Get detailed status of a single subagent.
+
+        Parameters
+        ----------
+        task_id:
+            The target subagent's task_id.
+        parent_session_key:
+            The caller's session key (for ownership verification).
+
+        Returns
+        -------
+        str
+            Formatted status information.
+        """
+        meta = self._check_ownership(parent_session_key, task_id)
+        lines = [
+            f"**Subagent Status: {meta.label}**",
+            f"- **task_id**: `{meta.task_id}`",
+            f"- **status**: {meta.status}",
+            f"- **iteration**: {meta.current_iteration}/{meta.max_iterations}",
+            f"- **created_at**: {meta.created_at}",
+        ]
+        if meta.finished_at:
+            lines.append(f"- **finished_at**: {meta.finished_at}")
+        if meta.last_tool_name:
+            lines.append(f"- **last_tool**: {meta.last_tool_name}")
+        return "\n".join(lines)
+
+    def list_subagents(self, parent_session_key: str) -> str:
+        """List all subagents belonging to the given session.
+
+        Parameters
+        ----------
+        parent_session_key:
+            The caller's session key (filter by ownership).
+
+        Returns
+        -------
+        str
+            Formatted summary table, or a message if no subagents exist.
+        """
+        matches = [
+            meta for meta in self._task_meta.values()
+            if meta.parent_session_key == parent_session_key
+        ]
+        if not matches:
+            return "No subagents found for this session."
+
+        # Sort by created_at (most recent first)
+        matches.sort(key=lambda m: m.created_at, reverse=True)
+
+        lines = [f"**Subagents ({len(matches)} total)**\n"]
+        lines.append("| task_id | label | status | iteration | created_at | last_tool |")
+        lines.append("|---------|-------|--------|-----------|------------|-----------|")
+        for m in matches:
+            last_tool = m.last_tool_name or "-"
+            # Truncate label to 30 chars for table readability
+            label = m.label if len(m.label) <= 30 else m.label[:27] + "..."
+            lines.append(
+                f"| `{m.task_id}` | {label} | {m.status} "
+                f"| {m.current_iteration}/{m.max_iterations} "
+                f"| {m.created_at} | {last_tool} |"
+            )
+        return "\n".join(lines)
 
     async def follow_up(
         self,
@@ -621,6 +710,10 @@ class SubagentManager:
             # Reset inject_queue (create fresh one for the new turn)
             meta.inject_queue = asyncio.Queue()
             meta.status = "running"
+            meta.max_iterations = effective_max  # §38: track new budget
+            meta.finished_at = None              # §38: reset for new run
+            meta.current_iteration = 0           # §38: reset iteration counter
+            meta.last_tool_name = None           # §38: reset last tool
 
             # Start new background task
             bg_task = asyncio.create_task(

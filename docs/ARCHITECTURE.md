@@ -2297,4 +2297,74 @@ except asyncio.CancelledError:
 
 ---
 
+## 十七、Spawn status — 查询 subagent 执行状态 (§38)
+
+> Phase 40
+
+为 spawn 工具增加 `status` 参数，允许主 session 查询 subagent 的执行状态。支持查询单个 subagent 详情和列出当前 session 下所有 subagent 摘要。只读操作，不改变任何状态。
+
+### SubagentMeta 新增字段
+
+```python
+@dataclass
+class SubagentMeta:
+    # ... 现有字段 ...
+    # §38 新增
+    created_at: str = ""                  # ISO 时间，spawn 时设置
+    finished_at: str | None = None        # ISO 时间，状态变更为终态时设置
+    current_iteration: int = 0            # _run_subagent 每次 iteration 时同步更新
+    last_tool_name: str | None = None     # 每次执行工具后更新
+```
+
+更新时机：
+- `created_at`：`spawn()` 创建 SubagentMeta 时设置
+- `finished_at`：`_run_subagent()` 中 status 变更为 completed/failed/max_iterations/stopped 时设置
+- `current_iteration`：`_run_subagent()` while 循环中 `iteration += 1` 后同步 `meta.current_iteration = iteration`
+- `last_tool_name`：`_run_subagent()` 执行工具后同步 `meta.last_tool_name = tool_call.name`
+
+### SubagentManager 新增方法
+
+```python
+def get_status(self, task_id: str, parent_session_key: str) -> str:
+    """查询单个 subagent 状态，返回格式化文本。"""
+    meta = self._check_ownership(parent_session_key, task_id)
+    # 格式化返回 meta 中的所有关键字段
+
+def list_subagents(self, parent_session_key: str) -> str:
+    """列出当前 session 下所有 subagent，返回摘要表格。"""
+    # 遍历 _task_meta，过滤 parent_session_key 匹配的
+```
+
+### SpawnTool 路由
+
+```python
+async def execute(self, task, ..., status=None, ...):
+    # 互斥检查：status 与 follow_up、stop 互斥
+    if status:
+        if status == "list":
+            return self._manager.list_subagents(self._session_key)
+        else:
+            return self._manager.get_status(status, self._session_key)
+```
+
+### 参数优先级（更新）
+
+| 模式 | 参数 | 行为 |
+|------|------|------|
+| 新建 | `task` only | 创建新 subagent |
+| 追加 | `task` + `follow_up` | 向已有 subagent 追加消息 |
+| 停止 | `task` + `stop` | 停止指定 subagent |
+| 查询 | `task` + `status` | 查询 subagent 状态（只读） |
+| ❌ | 任意两个 `follow_up`/`stop`/`status` 同时设置 | 报错 |
+
+### 影响文件
+
+| 文件 | 改动 |
+|------|------|
+| `agent/subagent.py` | SubagentMeta 新增 4 字段；`_run_subagent()` 同步更新字段；新增 `get_status()` / `list_subagents()`；状态变更时设置 `finished_at` |
+| `agent/tools/spawn.py` | `status` 参数；`execute()` 路由；互斥检查扩展；`parameters` / `description` 更新 |
+| `tests/test_spawn_status.py` | 新增测试 |
+
+---
+
 *本文档将随开发进展持续更新。*

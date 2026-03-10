@@ -3,6 +3,7 @@
 Phase 26: Added max_iterations and persist parameters.
 §36: Added follow_up parameter for appending messages to existing subagents.
 §37: Added stop parameter for stopping running subagents.
+§38: Added status parameter for querying subagent execution status.
 """
 
 from typing import TYPE_CHECKING, Any
@@ -55,6 +56,10 @@ class SpawnTool(Tool):
             "**Stop**: Set `stop` to a subagent's task_id to stop it. The subagent's "
             "execution is cancelled immediately. Stopped subagents can be resumed later "
             "via `follow_up`. You can only stop subagents spawned by this session."
+            "\n\n"
+            "**Status**: Set `status` to a subagent's task_id to query its execution "
+            "status (iteration, last tool, timing). Set `status` to `\"list\"` to see "
+            "all subagents spawned by this session."
             "\n\n"
             "**CLI limitation**: In CLI single-message mode (`-m`), the process exits "
             "after the main agent responds, so subagent results may be lost. If you need "
@@ -114,6 +119,14 @@ class SpawnTool(Tool):
                         "via follow_up. Only works for subagents spawned by this session."
                     ),
                 },
+                "status": {
+                    "type": "string",
+                    "description": (
+                        "Query subagent status. Set to a task_id to get detailed status "
+                        "of a specific subagent, or set to \"list\" to see all subagents "
+                        "spawned by this session. Read-only, does not change any state."
+                    ),
+                },
             },
             "required": ["task"],
         }
@@ -126,12 +139,25 @@ class SpawnTool(Tool):
         persist: bool = True,
         follow_up: str | None = None,
         stop: str | None = None,
+        status: str | None = None,
         **kwargs: Any,
     ) -> str:
-        """Spawn a subagent, send a follow-up, or stop an existing one."""
-        # §37: Mutual exclusion check
-        if follow_up and stop:
-            return "Error: `follow_up` and `stop` are mutually exclusive. Use one at a time."
+        """Spawn a subagent, send a follow-up, stop, or query status."""
+        # §38: Mutual exclusion check for all operation modes
+        ops = {"follow_up": follow_up, "stop": stop, "status": status}
+        active_ops = [name for name, val in ops.items() if val]
+        if len(active_ops) > 1:
+            return f"Error: `{'` and `'.join(active_ops)}` are mutually exclusive. Use one at a time."
+
+        if status:
+            # §38: Status query
+            try:
+                if status == "list":
+                    return self._manager.list_subagents(self._session_key)
+                else:
+                    return self._manager.get_status(status, self._session_key)
+            except ValueError as e:
+                return f"Error: {e}"
 
         if stop:
             # §37: Stop existing subagent
