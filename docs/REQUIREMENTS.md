@@ -2051,6 +2051,93 @@ litellm.ServiceUnavailableError: AnthropicException - {
 
 ---
 
+## §34 read_file 大文件保护 — 双重默认限制 + 模型自主扩限 (Phase 34)
+
+> 来源：eval-bench 评测中 task-008 agent 直接 read_file 读取 6.7MB 的 session JSONL（含 5MB+ base64 图片），导致 6M tokens 撑爆上下文。
+
+### 34.1 问题描述
+
+`ReadFileTool.execute()` 直接调用 `file_path.read_text()` 返回全部内容，没有任何大小限制。当文件较大（如日志、session JSONL、数据 dump）时：
+
+1. 返回内容过大，LLM 上下文溢出或 token 消耗暴增
+2. Agent 无法有效处理超长内容，后续推理质量下降
+
+### 34.2 方案设计
+
+#### 1. 双重默认限制（行数 + 字节数）
+
+默认限制：**≤100 行** 且 **≤20KB**。两个条件必须**同时满足**才允许读取，任一超过即触发保护。
+
+- 行数限制：防止超长文件（如日志、JSONL）即使单行不大也一次性灌入上下文
+- 字节数限制：防止单行超大内容（如 minified JSON、base64 内嵌数据）
+
+#### 2. 超限行为：报错 + 建议（非截断）
+
+超过限制时**不截断、不返回部分内容**，而是返回错误信息 + 操作建议：
+
+```
+Error: File exceeds default read limit (actual: 2,847 lines / 156KB; limit: 100 lines / 20KB).
+
+Suggestions:
+  1. Use exec with head/tail/grep to read specific parts of the file
+  2. Increase limit with parameters: read_file(path, max_lines=3000, max_size=200000)
+
+Note: Hard limit is 1MB (configurable in config.json).
+```
+
+**为什么报错而非截断**：截断后模型可能不知道信息不完整，或截断位置破坏数据结构（JSON/XML 断在中间），导致后续推理出错。报错让模型主动选择更精准的获取方式。
+
+#### 3. 工具参数：模型自主扩限
+
+在 `read_file` 工具中新增两个可选参数，让模型根据实际需要自行扩大限制：
+
+```python
+read_file(
+    path: str,                    # 必填：文件路径
+    max_lines: int = 100,         # 可选：最大行数限制（默认 100）
+    max_size: int = 20000,        # 可选：最大字节数限制（默认 20KB）
+)
+```
+
+模型看到报错后可以自行判断：
+- "这个文件 50KB，我确实需要全部内容" → `read_file(path, max_size=50000)`
+- "这个文件 500 行的配置，我需要全部看" → `read_file(path, max_lines=500)`
+- "这个文件太大了，我只需要看开头" → `exec("head -20 {path}")`
+
+#### 4. 硬上限：1MB
+
+无论参数怎么设置，单次 read_file 返回内容不超过 **1MB**（对齐主流模型上下文极限）。
+
+- 硬上限通过 `config.json` 配置，字段名 `read_file_hard_limit`，默认 `1048576`（1MB）
+- 模型传入的 `max_lines` / `max_size` 不得超过硬上限，超过时自动 clamp 到硬上限
+- 文件实际大小超过硬上限时，即使参数放大也会报错，必须用 `exec` + `head/tail/grep` 等方式分段读取
+
+#### 5. 工具描述更新
+
+`read_file` 的 description 需更新，让模型感知到限制的存在：
+
+```
+Read the contents of a file at the given path.
+Default limit: 100 lines / 20KB. For larger files, use max_lines/max_size
+parameters to increase, or use exec with head/tail/grep.
+```
+
+### 34.3 影响范围
+
+| 文件 | 改动 |
+|------|------|
+| `agent/tools/filesystem.py` | `ReadFileTool`：新增 `max_lines`/`max_size` 参数，execute() 增加双重检查 + 报错逻辑 + 硬上限 clamp |
+| `agent/tools/filesystem.py` | `ReadFileTool.description` 更新，说明默认限制和扩展方式 |
+| `config/schema.py` | 新增 `read_file_hard_limit` 配置项（默认 1048576） |
+| `tests/` | 新增测试：默认限制触发、参数扩限、硬上限 clamp、报错信息格式 |
+| 文档 | 更新 `TOOLS.md` 中 read_file 说明 |
+
+### 优先级
+
+Phase 34
+
+---
+
 ## §36 Spawn follow_up — 向 subagent 追加消息 (Phase 38)
 
 ### 背景
@@ -2293,17 +2380,6 @@ Phase 40
 > 只记录问题描述和初步思路，不写完整设计方案。
 > 决定开发时分配 §编号，转为正式需求挪到上方 `---` 分隔线之前。
 
-### Backlog #1: read_file 大文件保护
-
-> 来源：eval-bench 评测中 task-008 agent 直接 read_file 读取 6.7MB 的 session JSONL（含 5MB+ base64 图片），导致 6M tokens 撑爆上下文。
-
-**问题描述**：`ReadFileTool.execute()` 直接调用 `file_path.read_text()` 返回全部内容，没有任何大小限制。大文件会导致 LLM 上下文溢出或 token 消耗暴增。
-
-**初步思路**：
-- 双重默认限制（≤100 行 且 ≤20KB），超限报错 + 建议（非截断）
-- 新增 `max_lines`/`max_size` 可选参数，让模型自主扩限
-- 硬上限 1MB，通过 `config.json` 配置
-
-**优先级**：低 — 日常使用风险不高，agent 自主运行场景（eval-bench、subagent）风险较高。
+（当前无 Backlog 条目）
 
 <!-- ⚠️ BACKLOG 结束 — 此行之后不得追加任何内容 -->
