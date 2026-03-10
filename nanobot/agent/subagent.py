@@ -9,6 +9,9 @@ web worker where each request creates a short-lived AgentLoop).
 
 §36: Added follow_up capability — append messages to existing subagents.
 Auto-detects state: inject into running subagent, or resume finished one.
+
+§37: Added stop capability — parent session can stop a running subagent.
+Stopped subagents skip announce and can be resumed via follow_up.
 """
 
 import asyncio
@@ -67,7 +70,7 @@ class SubagentMeta:
     label: str
     origin: dict[str, str]
     inject_queue: asyncio.Queue[str] = field(default_factory=asyncio.Queue)
-    status: str = "running"           # running | completed | failed | max_iterations
+    status: str = "running"           # running | completed | failed | max_iterations | stopped
     max_iterations: int = DEFAULT_SUBAGENT_ITERATIONS
     persist: bool = True
 
@@ -137,6 +140,7 @@ class SubagentManager:
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
         self._task_meta: dict[str, SubagentMeta] = {}   # task_id -> metadata (§36)
+        self._stop_flags: set[str] = set()               # §37: task_ids being stopped
 
     async def spawn(
         self,
@@ -438,6 +442,28 @@ class SubagentManager:
                                         subagent_session_key=subagent_session_key,
                                         parent_session_key=parent_session_key)
 
+        except asyncio.CancelledError:
+            # §37: Distinguish stop (explicit) vs other cancellation
+            if task_id in self._stop_flags:
+                # Stopped by parent session — no announce
+                self._stop_flags.discard(task_id)
+                if task_id in self._task_meta:
+                    self._task_meta[task_id].status = "stopped"
+                logger.info("Subagent [{}] stopped by parent session", task_id)
+            else:
+                # Other cancellation (e.g. cancel_by_session) — announce error
+                if task_id in self._task_meta:
+                    self._task_meta[task_id].status = "failed"
+                logger.warning("Subagent [{}] cancelled", task_id)
+                try:
+                    await self._announce_result(
+                        task_id, label, task, "Error: Task was cancelled", origin, "error",
+                        subagent_session_key=subagent_session_key,
+                        parent_session_key=parent_session_key,
+                    )
+                except Exception:
+                    pass  # Best-effort announce during cancellation
+
         except Exception as e:
             # §36: Update meta status
             if task_id in self._task_meta:
@@ -630,6 +656,69 @@ class SubagentManager:
                 f"Subagent [{meta.label}] resumed (id: {task_id}, max_iterations={effective_max}). "
                 f"I'll notify you when it completes."
             )
+
+    # ── §37: Stop support ──
+
+    async def stop_subagent(
+        self,
+        task_id: str,
+        parent_session_key: str,
+        reason: str = "",
+    ) -> str:
+        """Stop a running subagent.
+
+        Parameters
+        ----------
+        task_id:
+            The target subagent's task_id.
+        parent_session_key:
+            The caller's session key (for ownership verification).
+        reason:
+            Optional reason for stopping (persisted to session if persist=True).
+
+        Returns
+        -------
+        str
+            Human-readable result message.
+        """
+        # 1. Ownership check
+        meta = self._check_ownership(parent_session_key, task_id)
+
+        # 2. Check if actually running
+        task = self._running_tasks.get(task_id)
+        is_running = task is not None and not task.done()
+
+        if not is_running:
+            return (
+                f"Subagent [{meta.label}] (id: {task_id}) is already {meta.status}, "
+                f"no need to stop."
+            )
+
+        # 3. Set stop flag BEFORE cancel so _run_subagent can detect it
+        self._stop_flags.add(task_id)
+
+        # 4. Persist stop message to session
+        if meta.persist and self.session_manager:
+            session_obj = self.session_manager.get_or_create(meta.subagent_session_key)
+            stop_msg = {
+                "role": "user",
+                "content": f"[Stopped by parent session]{' ' + reason if reason else ''}",
+                "timestamp": datetime.now().isoformat(),
+            }
+            self.session_manager.append_message(session_obj, stop_msg)
+
+        # 5. Cancel the asyncio task
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass  # Expected — _run_subagent handles status update
+
+        logger.info("Stopped subagent [{}] (id: {}){}", meta.label, task_id,
+                     f": {reason}" if reason else "")
+        return (
+            f"Subagent [{meta.label}] (id: {task_id}) has been stopped."
+        )
 
     async def _announce_result(
         self,

@@ -2098,6 +2098,62 @@ Phase 38 — 已实现
 
 ---
 
+## §37 Spawn stop — 主动停止 subagent (Phase 39)
+
+### 背景
+
+spawn subagent 当前有 `follow_up` 可追加消息，但**没有途径让主 session 主动停止一个正在运行的 subagent**。现有的 `cancel_by_session()` 是内部方法（被 `/stop` 命令调用，批量取消某 session 下的所有 subagent），LLM 无法通过 spawn 工具精确停止某一个 subagent。
+
+### 需求
+
+新增 `stop` 参数，允许主 session 精确停止指定的 subagent：
+
+1. **安全鉴权**：复用 `_check_ownership()`，只能停止自己 spawn 的 subagent
+2. **状态判断**：
+   - subagent **运行中** → `asyncio.Task.cancel()` 取消执行，更新 `meta.status = "stopped"`
+   - subagent **已结束**（completed / failed）→ 返回提示"subagent 已经完成/失败，无需停止"
+3. **announce 行为**：被 stop 的 subagent **不发送 announce**（因为 subagent 已无轮次来准备 announce 内容）
+4. **后续 follow_up**：被 stop 的 subagent 允许通过 `follow_up` resume（status 从 "stopped" 回到 "running"）
+5. **Session 持久化**：如果 persist=True，在 session 中追加一条记录标识被停止
+
+### 接口
+
+```python
+# 停止指定 subagent
+spawn(task="不再需要这个任务", stop="<task_id>")
+
+# task 可传空字符串
+spawn(task="", stop="<task_id>")
+```
+
+- `stop` 与 `follow_up` **互斥** — 同时设置时报错
+- `stop` 设置时，`task` 作为停止原因/备注（可传空字符串），不启动新 subagent
+
+### 参数优先级
+
+spawn 的三种模式通过参数组合区分：
+
+| 模式 | 参数 | 行为 |
+|------|------|------|
+| 新建 | `task` only | 创建新 subagent |
+| 追加 | `task` + `follow_up` | 向已有 subagent 追加消息 |
+| 停止 | `task` + `stop` | 停止指定 subagent |
+
+### 影响范围
+
+| 文件 | 改动 |
+|------|------|
+| `agent/subagent.py` | 新增 `stop_subagent()` 方法；`_run_subagent()` 处理 CancelledError 时区分"被 stop"和"其他 cancel"，被 stop 时跳过 announce |
+| `agent/tools/spawn.py` | 新增 `stop` 参数；`execute()` 路由；`parameters` 和 `description` 更新 |
+| `tests/` | 新增测试：stop 运行中/已结束/已停止的 subagent；stop + follow_up 互斥；鉴权检查 |
+| 文档 | ARCHITECTURE.md 新增章节；DEVLOG.md 任务清单 |
+
+### 优先级
+
+Phase 39
+
+---
+
 <!-- ═══════════════════════════════════════════════════════════════════════
   ⚠️ BACKLOG 区域 — 必须始终位于本文件最末尾！
   

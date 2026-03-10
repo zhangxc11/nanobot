@@ -2185,4 +2185,116 @@ Resume 复用 `_run_subagent()`，通过 `resume_messages` 参数区分：
 
 ---
 
+## 十六、Spawn stop — 主动停止 subagent (§37)
+
+### 概述
+
+为 spawn 工具增加 `stop` 参数，允许主 session 精确停止指定的正在运行的 subagent。与 `follow_up` 互斥。
+
+### 数据结构变更
+
+```python
+@dataclass
+class SubagentMeta:
+    # 已有字段不变
+    status: str    # 新增 "stopped" 状态值
+    # running | completed | failed | max_iterations | stopped
+```
+
+`SubagentManager` 新增方法：
+
+```python
+async def stop_subagent(self, parent_session_key: str, task_id: str, reason: str = "") -> str:
+    """停止指定 subagent。返回结果描述字符串。"""
+```
+
+### 停止流程
+
+```
+主 session → spawn(task="原因", stop="<task_id>")
+           → SpawnTool.execute() 路由到 stop 分支
+           → SubagentManager.stop_subagent()
+           → _check_ownership() 鉴权
+           → 检查 meta.status
+              ├── "running" → _stop_flag 标记 + task.cancel() + 返回成功
+              └── 其他 → 返回提示"已结束，无需停止"
+```
+
+### 关键实现细节
+
+#### 1. 停止标记 `_stop_flags`
+
+```python
+class SubagentManager:
+    _stop_flags: set[str]    # 新增：被 stop 的 task_id 集合
+```
+
+`stop_subagent()` 先将 task_id 加入 `_stop_flags`，再调用 `task.cancel()`。
+
+`_run_subagent()` 在 CancelledError 处理中检查此标记：
+
+```python
+except asyncio.CancelledError:
+    if task_id in self._stop_flags:
+        # 被主 session stop — 不 announce，状态设为 stopped
+        meta.status = "stopped"
+        self._stop_flags.discard(task_id)
+    else:
+        # 其他原因 cancel（如 cancel_by_session）— 保持原有行为
+        meta.status = "failed"
+        # announce error
+```
+
+#### 2. Announce 抑制
+
+被 stop 的 subagent **不发送 announce**，因为：
+- subagent 已无轮次来准备 announce 内容
+- stop 方法本身的返回值已告知主 session 结果
+
+#### 3. Session 持久化
+
+如果 `persist=True`，在 stop 时向 session 追加一条消息：
+
+```python
+{
+    "role": "user",
+    "content": "[Stopped by parent session] {reason}",
+    "timestamp": "..."
+}
+```
+
+#### 4. 后续 follow_up resume
+
+被 stop 的 subagent（status="stopped"）允许通过 `follow_up` resume：
+- `follow_up()` 中 `_running_tasks` 已不存在该 task → 走 resume 路径
+- resume 从 session 历史恢复，启动全新 turn
+
+### SpawnTool 接口
+
+```json
+{
+    "task": "停止原因（可为空字符串）",
+    "stop": "a1b2c3d4"           // 目标 subagent task_id
+}
+```
+
+三种模式互斥：
+
+| 参数组合 | 模式 |
+|----------|------|
+| `task` only | 新建 subagent |
+| `task` + `follow_up` | 追加消息 |
+| `task` + `stop` | 停止 subagent |
+| `follow_up` + `stop` | ❌ 报错 |
+
+### 影响文件
+
+| 文件 | 改动 |
+|------|------|
+| `agent/subagent.py` | `_stop_flags` 集合；`stop_subagent()` 方法；`_run_subagent()` CancelledError 分支 |
+| `agent/tools/spawn.py` | `stop` 参数；`execute()` 路由；`parameters` / `description` 更新 |
+| `tests/test_spawn_stop.py` | 新增测试 |
+
+---
+
 *本文档将随开发进展持续更新。*

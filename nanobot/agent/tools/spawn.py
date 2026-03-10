@@ -2,6 +2,7 @@
 
 Phase 26: Added max_iterations and persist parameters.
 §36: Added follow_up parameter for appending messages to existing subagents.
+§37: Added stop parameter for stopping running subagents.
 """
 
 from typing import TYPE_CHECKING, Any
@@ -50,6 +51,10 @@ class SpawnTool(Tool):
             "the message is injected into its execution flow; if finished, it resumes "
             "the subagent with a new turn. You can only follow up on subagents spawned "
             "by this session."
+            "\n\n"
+            "**Stop**: Set `stop` to a subagent's task_id to stop it. The subagent's "
+            "execution is cancelled immediately. Stopped subagents can be resumed later "
+            "via `follow_up`. You can only stop subagents spawned by this session."
             "\n\n"
             "**CLI limitation**: In CLI single-message mode (`-m`), the process exits "
             "after the main agent responds, so subagent results may be lost. If you need "
@@ -101,6 +106,14 @@ class SpawnTool(Tool):
                         "by this session."
                     ),
                 },
+                "stop": {
+                    "type": "string",
+                    "description": (
+                        "Target subagent's task_id to stop. The subagent's execution is "
+                        "cancelled immediately. Stopped subagents can be resumed later "
+                        "via follow_up. Only works for subagents spawned by this session."
+                    ),
+                },
             },
             "required": ["task"],
         }
@@ -112,9 +125,22 @@ class SpawnTool(Tool):
         max_iterations: int | None = None,
         persist: bool = True,
         follow_up: str | None = None,
+        stop: str | None = None,
         **kwargs: Any,
     ) -> str:
-        """Spawn a subagent or send a follow-up message to an existing one."""
+        """Spawn a subagent, send a follow-up, or stop an existing one."""
+        # §37: Mutual exclusion check
+        if follow_up and stop:
+            return "Error: `follow_up` and `stop` are mutually exclusive. Use one at a time."
+
+        if stop:
+            # §37: Stop existing subagent
+            return await self._manager.stop_subagent(
+                task_id=stop,
+                parent_session_key=self._session_key,
+                reason=task,
+            )
+
         if follow_up:
             # §36: Follow-up to existing subagent
             return await self._manager.follow_up(

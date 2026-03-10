@@ -1800,3 +1800,27 @@ spawn subagent 当前是"发射后不管"模式。需要支持向已有 subagent
 | `docs/REQUIREMENTS.md` | §36 章节 |
 | `docs/ARCHITECTURE.md` | §十五 章节 |
 | `docs/DEVLOG.md` | Phase 38 记录 |
+
+---
+
+## Phase 39: §37 Spawn stop — 主动停止 subagent
+
+> 需求：§37 | 架构：§十六 | 日期：2026-03-10
+
+### 任务清单
+
+- [x] **T39.1** `agent/subagent.py` — 新增 `_stop_flags: set[str]`，在 `__init__` 初始化
+- [x] **T39.2** `agent/subagent.py` — 新增 `stop_subagent()` 方法（鉴权 + 状态判断 + cancel + 持久化）
+- [x] **T39.3** `agent/subagent.py` — `_run_subagent()` CancelledError 处理中区分 stop vs 其他 cancel，stop 时跳过 announce
+- [x] **T39.4** `agent/tools/spawn.py` — 新增 `stop` 参数，`execute()` 路由，`parameters` / `description` 更新
+- [x] **T39.5** `tests/test_spawn_stop.py` — 19 项测试全部通过
+  - StopRunning: 2 项（运行中 stop / 空 reason）
+  - StopAlreadyFinished: 3 项（completed / failed / already stopped）
+  - StopOwnership: 2 项（错误 session / 未知 task_id）
+  - StopNoAnnounce: 2 项（stop 不 announce / 普通 cancel 仍 announce）
+  - StopThenResume: 1 项（stop 后 follow_up resume）
+  - StopPersistence: 2 项（persist=True 写入 / persist=False 不写入）
+  - StopFlagsCleanup: 1 项（flag 清理）
+  - SpawnToolStop: 5 项（参数 schema / description / 路由 stop / 空 task / 互斥检查 / 正常 spawn）
+- [x] **T39.6** 全量回归: 532 passed, 1 skipped, 0 failed
+- [x] **T39.7** Git commit: `0fd78a4`
