@@ -636,3 +636,64 @@ class TestSpawnToolStatus:
 
         result = await tool.execute(task="do something")
         assert "started" in result
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 7. Unknown parameter rejection (§39)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestUnknownParamRejection:
+    """Test that unknown parameters are rejected instead of silently ignored."""
+
+    @pytest.mark.asyncio
+    async def test_unknown_single_param(self):
+        """Single unknown parameter returns error."""
+        mgr = _make_manager()
+        tool = SpawnTool(manager=mgr)
+        tool.set_context("web", "123", "web:123")
+
+        result = await tool.execute(task="do something", bogus="value")
+        assert "Error" in result
+        assert "Unknown parameter" in result
+        assert "bogus" in result
+
+    @pytest.mark.asyncio
+    async def test_unknown_multiple_params(self):
+        """Multiple unknown parameters all listed in error."""
+        mgr = _make_manager()
+        tool = SpawnTool(manager=mgr)
+        tool.set_context("web", "123", "web:123")
+
+        result = await tool.execute(task="do something", foo="1", bar="2")
+        assert "Error" in result
+        assert "bar" in result
+        assert "foo" in result
+
+    @pytest.mark.asyncio
+    async def test_unknown_param_does_not_spawn(self):
+        """Unknown parameter prevents subagent creation."""
+        mgr = _make_manager()
+        tool = SpawnTool(manager=mgr)
+        tool.set_context("web", "123", "web:123")
+
+        result = await tool.execute(task="do something", nonexistent="val")
+        assert "Error" in result
+        # No subagent should have been created
+        assert len(mgr._task_meta) == 0
+
+    @pytest.mark.asyncio
+    async def test_known_params_still_work(self):
+        """Known parameters are not rejected."""
+        mgr = _make_manager()
+        mgr.provider.chat.return_value = FakeLLMResponse(content="Done")
+        tool = SpawnTool(manager=mgr)
+        tool.set_context("web", "123", "web:123")
+
+        result = await tool.execute(
+            task="do something",
+            label="test",
+            max_iterations=10,
+            persist=False,
+        )
+        assert "started" in result

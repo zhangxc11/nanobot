@@ -2336,16 +2336,12 @@ parameters to increase, or use exec with head/tail/grep.
 
 Backlog — 日常使用中用户通常不会读取大文件，但 agent 自主运行场景（eval-bench、subagent）风险较高。
 
-### Backlog: §39 Tool 未知参数检查 — 防止 LLM 幻觉参数被静默忽略
+### Backlog: §39 Tool 未知参数检查 — 防止 LLM 幻觉参数被静默忽略 ✅ 已修复
 
 > 来源：§38 开发过程中发现，`stop` 参数在代码未上线时，LLM 查阅文档后调用 `spawn(task="", stop="xxx")`，`stop` 被 `**kwargs` 吞掉，静默启动了一个新 subagent 而非报错。
 
-**问题描述**：`Tool.execute()` 使用 `**kwargs` 接收参数，`validate_params()` 只校验 required 和已知 property 的类型，**不检查未知属性**。当 LLM 传入 schema 中不存在的参数时，参数被静默忽略，可能导致意外行为（如本应 stop 却变成 spawn 新任务）。
+**修复方案**：在 `SpawnTool.execute()` 开头检查 `**kwargs`，非空时返回错误。未采用全局 `validate_params` 方案，因为 `MessageTool` 等工具的 `execute()` 接受 schema 外参数（如 `channel`/`chat_id`，内部使用但不暴露给 LLM），全局检查会误伤。
 
-**修复方案**：在 `validate_params()` 中增加 `additionalProperties` 检查。如果 params 中包含 schema properties 中未定义的 key，返回错误信息而非静默忽略。
-
-**影响范围**：`agent/tools/base.py` 的 `validate_params()` 方法。所有 Tool 子类受益。
-
-**优先级**：Backlog — 与 §38 一起开发（§38 完成后立即修复）。
+**影响范围**：`agent/tools/spawn.py` 的 `execute()` 方法。Phase 40 一并修复。
 
 <!-- ⚠️ BACKLOG 结束 — 此行之后不得追加任何内容 -->

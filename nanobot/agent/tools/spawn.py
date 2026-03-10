@@ -143,6 +143,11 @@ class SpawnTool(Tool):
         **kwargs: Any,
     ) -> str:
         """Spawn a subagent, send a follow-up, stop, or query status."""
+        # §39: Reject unknown parameters to prevent silent misrouting
+        # (e.g. LLM passes a param from docs that isn't implemented yet)
+        if kwargs:
+            unknown = ", ".join(sorted(kwargs.keys()))
+            return f"Error: Unknown parameter(s): {unknown}. Valid parameters: task, label, max_iterations, persist, follow_up, stop, status."
         # §38: Mutual exclusion check for all operation modes
         ops = {"follow_up": follow_up, "stop": stop, "status": status}
         active_ops = [name for name, val in ops.items() if val]

@@ -1833,12 +1833,19 @@ spawn subagent 当前是"发射后不管"模式。需要支持向已有 subagent
 
 ### 任务清单
 
-- [ ] **T40.1** `agent/subagent.py` — SubagentMeta 新增 4 字段：`created_at`, `finished_at`, `current_iteration`, `last_tool_name`
-- [ ] **T40.2** `agent/subagent.py` — `spawn()` 中设置 `created_at`；`_run_subagent()` 中同步 `current_iteration`、`last_tool_name`；状态变更时设置 `finished_at`
-- [ ] **T40.3** `agent/subagent.py` — 新增 `get_status()` 和 `list_subagents()` 方法
-- [ ] **T40.4** `agent/tools/spawn.py` — 新增 `status` 参数，`execute()` 路由，互斥检查扩展，`parameters` / `description` 更新
-- [ ] **T40.5** `tests/test_spawn_status.py` — 新增测试
-- [ ] **T40.6** 全量回归测试
-- [ ] **T40.7** Git commit
-- [ ] **T40.8** Backlog §39: `validate_params()` 未知参数检查
-- [ ] **T40.9** 全量回归 + Git commit (§39)
+- [x] **T40.1** `agent/subagent.py` — SubagentMeta 新增 4 字段：`created_at`, `finished_at`, `current_iteration`, `last_tool_name`
+- [x] **T40.2** `agent/subagent.py` — `spawn()` 中设置 `created_at`；`_run_subagent()` 中同步 `current_iteration`、`last_tool_name`；状态变更时设置 `finished_at`
+- [x] **T40.3** `agent/subagent.py` — 新增 `get_status()` 和 `list_subagents()` 方法
+- [x] **T40.4** `agent/tools/spawn.py` — 新增 `status` 参数，`execute()` 路由，互斥检查扩展，`parameters` / `description` 更新
+- [x] **T40.5** `tests/test_spawn_status.py` — 34 项测试全部通过
+  - SubagentMeta: 2 项（默认值/自定义值）
+  - get_status: 5 项（运行中/已完成/无 last_tool/鉴权错误 session/未知 task_id）
+  - list_subagents: 5 项（空列表/单个/多个排序/过滤 session/无 last_tool/长 label 截断）
+  - FieldUpdates: 6 项（created_at/iteration+last_tool/completed/failed/max_iterations/stopped 的 finished_at）
+  - ResumeResets: 1 项（resume 重置 §38 字段）
+  - SpawnToolStatus: 9 项（schema/description/路由 list/路由 task_id/未知 id/错误 session/互斥×3/正常 spawn）
+  - UnknownParamRejection: 4 项（单个/多个/阻止 spawn/已知参数正常）
+- [x] **T40.6** 全量回归: 566 passed, 1 skipped, 0 failed
+- [x] **T40.7** Git commit: `16a4c96` (§38) + `15b1c7d` (§39)
+- [x] **T40.8** Backlog §39: SpawnTool.execute() 未知参数检查（`**kwargs` 非空时报错）
+- [x] **T40.9** 全量回归: 566 passed, 1 skipped, 0 failed; Git commit
