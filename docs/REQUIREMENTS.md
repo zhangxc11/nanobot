@@ -82,6 +82,7 @@ local    ← 本地自定义改动（基于 main）
 | §37 | Spawn stop | ✅ | [requirements/s31-s39.md](requirements/s31-s39.md) |
 | §38 | Spawn status | ✅ | [requirements/s31-s39.md](requirements/s31-s39.md) |
 | §39 | SpawnTool 未知参数检查 | ✅ | [requirements/s31-s39.md](requirements/s31-s39.md) |
+| §40 | SubagentManager 单例化 + 跨进程恢复 | 🔜 | [requirements/s40-s49.md](requirements/s40-s49.md) |
 
 ---
 
