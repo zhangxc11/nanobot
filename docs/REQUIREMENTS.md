@@ -2238,110 +2238,72 @@ spawn 的四种模式通过参数组合区分：
 
 Phase 40
 
+
+## §39 SpawnTool 未知参数检查 — 防止 LLM 幻觉参数被静默忽略 (Phase 40)
+
+> 来源：§38 开发过程中发现，`stop` 参数在代码未上线时，LLM 查阅文档后调用 `spawn(task="", stop="xxx")`，`stop` 被 `**kwargs` 吞掉，静默启动了一个新 subagent 而非报错。
+
+### 39.1 问题描述
+
+`SpawnTool.execute()` 使用 `**kwargs` 接收参数。当 LLM 传入 schema 中不存在的参数时，参数被静默忽略，可能导致意外行为（如本应 stop 却变成 spawn 新任务）。
+
+### 39.2 修复方案
+
+在 `SpawnTool.execute()` 开头检查 `**kwargs`，非空时返回错误信息列出未知参数名。
+
+未采用全局 `validate_params` 方案，因为 `MessageTool` 等工具的 `execute()` 接受 schema 外参数（如 `channel`/`chat_id`，内部使用但不暴露给 LLM），全局检查会误伤。
+
+### 39.3 影响范围
+
+| 文件 | 改动 |
+|------|------|
+| `agent/tools/spawn.py` | `execute()` 增加 `**kwargs` 非空检查 |
+| `tests/test_spawn_status.py` | 4 项新测试（单个/多个未知参数、阻止 spawn、已知参数正常） |
+
 ---
 
 <!-- ═══════════════════════════════════════════════════════════════════════
   ⚠️ BACKLOG 区域 — 必须始终位于本文件最末尾！
-  
-  AI 注意：新增正式需求章节（## 标题）时，请插入到本 BACKLOG 区域 **之前**，
-  不要在 BACKLOG 之后追加任何内容。BACKLOG 是文件的终止锚点。
+
+  ── 格式规范 ──
+  - Backlog 条目使用 **三级标题**：`### Backlog #N: 标题`
+  - 使用 `Backlog #N` 编号（非 §编号），N 从 1 递增
+  - 条目内容只写：来源、问题描述、初步方案思路、优先级判断
+  - **不写**完整的设计方案、影响范围表格、子需求拆解（这些属于正式需求）
+
+  ── 生命周期 ──
+  1. 新发现的待办 → 在此追加 `### Backlog #N: 标题`
+  2. 决定开发 → 分配 §编号，写成 `## §xx 标题` 正式需求章节，
+     插入到本 BACKLOG 区域 **之前** 的 `---` 分隔线上方，
+     然后从 BACKLOG 中删除该条目
+  3. 开发完成 → 正式需求章节已在 BACKLOG 之前，无需再动
+
+  ── 禁止事项 ──
+  - ❌ 不要在 BACKLOG 条目中使用 §编号（避免与正式需求混淆）
+  - ❌ 不要在 BACKLOG 之后追加任何正式需求章节
+  - ❌ 不要在 BACKLOG 中原地修改条目为正式需求（应挪出去）
+  - ❌ 已完成的条目不要留在 BACKLOG 中（应已挪出或删除）
   ═══════════════════════════════════════════════════════════════════════ -->
 
 ## 📋 Backlog（手动维护）
 
-> **⚠️ 本区域必须始终位于文件最末尾。新增正式需求章节请插入到本区域之前的 `---` 分隔线上方。**
+> **⚠️ 本区域必须始终位于文件最末尾。**
 >
-> 这里手动添加需求 backlog。被激活后，更新前序需求文档章节，推进开发。完成后从 backlog 中移除。
+> Backlog 条目格式：`### Backlog #N: 标题`（三级标题 + 序号，不使用 §编号）。
+> 只记录问题描述和初步思路，不写完整设计方案。
+> 决定开发时分配 §编号，转为正式需求挪到上方 `---` 分隔线之前。
 
-### Backlog: §34 read_file 大文件保护
+### Backlog #1: read_file 大文件保护
 
 > 来源：eval-bench 评测中 task-008 agent 直接 read_file 读取 6.7MB 的 session JSONL（含 5MB+ base64 图片），导致 6M tokens 撑爆上下文。
 
-**问题描述**：`ReadFileTool.execute()` 直接调用 `file_path.read_text()` 返回全部内容，**没有任何大小限制**。当文件较大（如日志、session JSONL、数据 dump）时，会导致：
+**问题描述**：`ReadFileTool.execute()` 直接调用 `file_path.read_text()` 返回全部内容，没有任何大小限制。大文件会导致 LLM 上下文溢出或 token 消耗暴增。
 
-1. 返回内容过大，LLM 上下文溢出或 token 消耗暴增
-2. Agent 无法有效处理超长内容，后续推理质量下降
+**初步思路**：
+- 双重默认限制（≤100 行 且 ≤20KB），超限报错 + 建议（非截断）
+- 新增 `max_lines`/`max_size` 可选参数，让模型自主扩限
+- 硬上限 1MB，通过 `config.json` 配置
 
-#### 方案设计
-
-##### 1. 双重默认限制（行数 + 字节数）
-
-默认限制：**≤100 行** 且 **≤20KB**。两个条件必须**同时满足**才允许读取，任一超过即触发保护。
-
-- 行数限制：防止超长文件（如日志、JSONL）即使单行不大也一次性灌入上下文
-- 字节数限制：防止单行超大内容（如 minified JSON、base64 内嵌数据）
-
-##### 2. 超限行为：报错 + 建议（非截断）
-
-超过限制时**不截断、不返回部分内容**，而是返回错误信息 + 操作建议：
-
-```
-Error: File exceeds default read limit (actual: 2,847 lines / 156KB; limit: 100 lines / 20KB).
-
-Suggestions:
-  1. Use exec with head/tail/grep to read specific parts of the file
-  2. Increase limit with parameters: read_file(path, max_lines=3000, max_size=200000)
-
-Note: Hard limit is 1MB (configurable in config.json).
-```
-
-**为什么报错而非截断**：截断后模型可能不知道信息不完整，或截断位置破坏数据结构（JSON/XML 断在中间），导致后续推理出错。报错让模型主动选择更精准的获取方式。
-
-##### 3. 工具参数：模型自主扩限
-
-在 `read_file` 工具中新增两个可选参数，让模型根据实际需要自行扩大限制：
-
-```python
-read_file(
-    path: str,                    # 必填：文件路径
-    max_lines: int = 100,         # 可选：最大行数限制（默认 100）
-    max_size: int = 20000,        # 可选：最大字节数限制（默认 20KB）
-)
-```
-
-模型看到报错后可以自行判断：
-- "这个文件 50KB，我确实需要全部内容" → `read_file(path, max_size=50000)`
-- "这个文件 500 行的配置，我需要全部看" → `read_file(path, max_lines=500)`
-- "这个文件太大了，我只需要看开头" → `exec("head -20 {path}")`
-
-##### 4. 硬上限：1MB
-
-无论参数怎么设置，单次 read_file 返回内容不超过 **1MB**（对齐主流模型上下文极限）。
-
-- 硬上限通过 `config.json` 配置，字段名 `read_file_hard_limit`，默认 `1048576`（1MB）
-- 模型传入的 `max_lines` / `max_size` 不得超过硬上限，超过时自动 clamp 到硬上限
-- 文件实际大小超过硬上限时，即使参数放大也会报错，必须用 `exec` + `head/tail/grep` 等方式分段读取
-
-##### 5. 工具描述更新
-
-`read_file` 的 description 需更新，让模型感知到限制的存在：
-
-```
-Read the contents of a file at the given path.
-Default limit: 100 lines / 20KB. For larger files, use max_lines/max_size
-parameters to increase, or use exec with head/tail/grep.
-```
-
-#### 影响范围
-
-| 文件 | 改动 |
-|------|------|
-| `agent/tools/filesystem.py` | `ReadFileTool`：新增 `max_lines`/`max_size` 参数，execute() 增加双重检查 + 报错逻辑 + 硬上限 clamp |
-| `agent/tools/filesystem.py` | `ReadFileTool.description` 更新，说明默认限制和扩展方式 |
-| `config/schema.py` | 新增 `read_file_hard_limit` 配置项（默认 1048576） |
-| `tests/` | 新增测试：默认限制触发、参数扩限、硬上限 clamp、报错信息格式 |
-| 文档 | 更新 `TOOLS.md` 中 read_file 说明 |
-
-#### 优先级
-
-Backlog — 日常使用中用户通常不会读取大文件，但 agent 自主运行场景（eval-bench、subagent）风险较高。
-
-### Backlog: §39 Tool 未知参数检查 — 防止 LLM 幻觉参数被静默忽略 ✅ 已修复
-
-> 来源：§38 开发过程中发现，`stop` 参数在代码未上线时，LLM 查阅文档后调用 `spawn(task="", stop="xxx")`，`stop` 被 `**kwargs` 吞掉，静默启动了一个新 subagent 而非报错。
-
-**修复方案**：在 `SpawnTool.execute()` 开头检查 `**kwargs`，非空时返回错误。未采用全局 `validate_params` 方案，因为 `MessageTool` 等工具的 `execute()` 接受 schema 外参数（如 `channel`/`chat_id`，内部使用但不暴露给 LLM），全局检查会误伤。
-
-**影响范围**：`agent/tools/spawn.py` 的 `execute()` 方法。Phase 40 一并修复。
+**优先级**：低 — 日常使用风险不高，agent 自主运行场景（eval-bench、subagent）风险较高。
 
 <!-- ⚠️ BACKLOG 结束 — 此行之后不得追加任何内容 -->
