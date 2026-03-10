@@ -12,6 +12,12 @@ Auto-detects state: inject into running subagent, or resume finished one.
 
 §37: Added stop capability — parent session can stop a running subagent.
 Stopped subagents skip announce and can be resumed via follow_up.
+
+§40: SubagentManager singleton + cross-process follow_up recovery.
+- AgentLoop accepts external SubagentManager (for web worker singleton).
+- _recover_meta: deterministic session key → O(1) file stat recovery.
+- _load_disk_subagents: glob-based batch recovery for list_subagents.
+- _check_ownership: disk fallback when task_id not in memory.
 """
 
 import asyncio
@@ -538,13 +544,87 @@ class SubagentManager:
         raise last_error
 
     # ── §36: Follow-up support ──
+    # ── §40: Cross-process recovery ──
+
+    def _recover_meta(self, task_id: str, parent_session_key: str) -> "SubagentMeta | None":
+        """Recover SubagentMeta from disk by deterministic naming convention.
+
+        §40: When a SubagentManager instance doesn't have a task_id in memory
+        (e.g. after process restart), try to recover it by checking if the
+        corresponding session file exists on disk.
+
+        Returns None if session file doesn't exist or session_manager is unavailable.
+        Recovered meta is cached in memory for subsequent lookups.
+        """
+        # Already cached? Return from memory.
+        if task_id in self._task_meta:
+            return self._task_meta[task_id]
+
+        if not self.session_manager:
+            return None
+
+        # Construct deterministic session path
+        parent_sanitized = parent_session_key.replace(":", "_")
+        subagent_key = f"subagent:{parent_sanitized}_{task_id}"
+        session_path = self.workspace / "sessions" / f"subagent_{parent_sanitized}_{task_id}.jsonl"
+
+        if not session_path.exists():
+            return None
+
+        # Build minimal SubagentMeta for follow_up/status/stop recovery
+        meta = SubagentMeta(
+            task_id=task_id,
+            subagent_session_key=subagent_key,
+            parent_session_key=parent_session_key,
+            label="(recovered)",
+            origin={"channel": "unknown", "chat_id": "unknown"},
+            status="unknown",
+            max_iterations=DEFAULT_SUBAGENT_ITERATIONS,
+            persist=True,
+        )
+
+        # Cache to memory
+        self._task_meta[task_id] = meta
+        self._session_tasks.setdefault(parent_session_key, set()).add(task_id)
+
+        logger.debug("Recovered subagent meta from disk: task_id={}, session={}",
+                      task_id, subagent_key)
+        return meta
+
+    def _load_disk_subagents(self, parent_session_key: str) -> None:
+        """Load all subagent session files for a parent session from disk.
+
+        §40: Used by list_subagents() to populate memory with subagents
+        that were spawned in previous process lifetimes.
+        Only loads task_ids not already in memory (avoids overwriting live state).
+        """
+        parent_sanitized = parent_session_key.replace(":", "_")
+        prefix = f"subagent_{parent_sanitized}_"
+        sessions_dir = self.workspace / "sessions"
+
+        if not sessions_dir.exists():
+            return
+
+        for path in sessions_dir.glob(f"{prefix}*.jsonl"):
+            # Extract task_id from filename: subagent_{parent_sanitized}_{task_id}.jsonl
+            stem = path.stem  # e.g. "subagent_webchat_1773141981_a1b2c3d4"
+            # task_id is everything after the prefix
+            task_id = stem[len(prefix):]
+            if not task_id:
+                continue
+            if task_id not in self._task_meta:
+                self._recover_meta(task_id, parent_session_key)
 
     def _check_ownership(self, parent_session_key: str, target_task_id: str) -> SubagentMeta:
         """Verify that the caller owns the target subagent.
 
+        §40: Falls back to disk recovery when task_id is not in memory.
         Raises ValueError if the task_id is unknown or belongs to another session.
         """
         meta = self._task_meta.get(target_task_id)
+        if meta is None:
+            # §40: Try to recover from disk
+            meta = self._recover_meta(target_task_id, parent_session_key)
         if meta is None:
             raise ValueError(f"Unknown subagent task_id: {target_task_id}")
         if meta.parent_session_key != parent_session_key:
@@ -585,6 +665,9 @@ class SubagentManager:
     def list_subagents(self, parent_session_key: str) -> str:
         """List all subagents belonging to the given session.
 
+        §40: Loads subagent metadata from disk before querying memory,
+        so subagents from previous process lifetimes are also listed.
+
         Parameters
         ----------
         parent_session_key:
@@ -595,6 +678,9 @@ class SubagentManager:
         str
             Formatted summary table, or a message if no subagents exist.
         """
+        # §40: Supplement memory from disk session files
+        self._load_disk_subagents(parent_session_key)
+
         matches = [
             meta for meta in self._task_meta.values()
             if meta.parent_session_key == parent_session_key

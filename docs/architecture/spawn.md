@@ -11,6 +11,7 @@
 | §十五 | Spawn follow_up — 向 subagent 追加消息 |
 | §十六 | Spawn stop — 主动停止 subagent |
 | §十七 | Spawn status — 查询 subagent 执行状态 |
+| §十八 | SubagentManager 单例化 + 跨进程恢复 |
 
 ---
 
@@ -752,6 +753,131 @@ async def execute(self, task, ..., status=None, ...):
 | `agent/subagent.py` | SubagentMeta 新增 4 字段；`_run_subagent()` 同步更新字段；新增 `get_status()` / `list_subagents()`；状态变更时设置 `finished_at` |
 | `agent/tools/spawn.py` | `status` 参数；`execute()` 路由；互斥检查扩展；`parameters` / `description` 更新 |
 | `tests/test_spawn_status.py` | 新增测试 |
+
+---
+
+## §十八 SubagentManager 单例化 + 跨进程恢复
+
+> 需求：§40（`requirements/s40-s49.md`）
+
+### 18.1 问题描述
+
+在 web worker 模式下，每个 HTTP 请求通过 `_create_runner()` 创建一个新的 `AgentLoop` 实例，`SubagentManager` 随之创建并在请求结束后被 GC 回收。这导致：
+
+1. **进程内跨请求丢失**：同一进程中，请求 A spawn 了 subagent，请求 B 无法通过 `follow_up` 找到它（`_task_meta` 已清空）。
+2. **进程重启后丢失**：即使 subagent session 文件已持久化到磁盘，重启后内存中没有对应的 `SubagentMeta`，`_check_ownership` 直接抛 `ValueError`。
+
+### 18.2 解决方案概述
+
+两层方案：
+
+**层一：进程内单例化（web worker）**
+
+在 `worker.py` 中将 `SubagentManager` 提升为模块级单例，所有请求共享同一个实例。`AgentLoop.__init__` 新增可选参数 `subagent_manager`，允许外部注入已有实例。
+
+**层二：跨进程按规则恢复（disk fallback）**
+
+`SubagentManager` 新增两个方法：
+- `_recover_meta(task_id, parent_session_key)` — 按确定性命名规则构造 session key，O(1) 文件 stat 检查，恢复单个 `SubagentMeta`
+- `_load_disk_subagents(parent_session_key)` — glob 匹配前缀，批量恢复，用于 `list_subagents`
+
+`_check_ownership` 在内存未命中时调用 `_recover_meta` 作为 fallback。
+
+### 18.3 _recover_meta 设计
+
+```python
+def _recover_meta(self, task_id: str, parent_session_key: str) -> SubagentMeta | None:
+    """按确定性命名规则从磁盘恢复 SubagentMeta。
+
+    命名规则（与 spawn() 一致）：
+      parent_sanitized = parent_session_key.replace(":", "_")
+      subagent_key     = f"subagent:{parent_sanitized}_{task_id}"
+      session_path     = workspace/sessions/subagent_{parent_sanitized}_{task_id}.jsonl
+
+    O(1) 文件 stat — 不读取文件内容，只检查文件是否存在。
+    恢复的 meta 使用保守默认值：status="unknown", label="(recovered)"。
+    """
+```
+
+**关键设计决策**：
+- 不读取 session 文件内容（避免 I/O 开销），只做 `Path.exists()` 检查
+- 恢复后立即缓存到 `_task_meta` 和 `_session_tasks`，后续访问走内存
+- `status="unknown"` 表示进程重启后状态未知，`follow_up` 仍可正常 resume（因为 session 文件存在）
+
+### 18.4 _load_disk_subagents 设计
+
+```python
+def _load_disk_subagents(self, parent_session_key: str) -> None:
+    """glob 匹配前缀，批量恢复磁盘上的 subagent session 文件。
+
+    用于 list_subagents() 在查询前补全内存状态。
+    跳过已在内存中的 task_id（避免覆盖运行中的 meta）。
+    sessions 目录不存在时静默返回。
+    """
+```
+
+glob 模式：`subagent_{parent_sanitized}_*.jsonl`，从文件名提取 `task_id`（最后一个 `_` 后的部分，去掉 `.jsonl`）。
+
+### 18.5 _check_ownership 增强
+
+```python
+def _check_ownership(self, parent_session_key: str, target_task_id: str) -> SubagentMeta:
+    meta = self._task_meta.get(target_task_id)
+    if meta is None:
+        # Disk fallback: try to recover from session file
+        meta = self._recover_meta(target_task_id, parent_session_key)
+    if meta is None:
+        raise ValueError(f"Unknown subagent task_id: {target_task_id}")
+    if meta.parent_session_key != parent_session_key:
+        raise ValueError(f"Subagent {target_task_id} does not belong to this session")
+    return meta
+```
+
+### 18.6 AgentLoop 参数透传
+
+```python
+class AgentLoop:
+    def __init__(self, ..., subagent_manager: SubagentManager | None = None):
+        ...
+        if subagent_manager is not None:
+            self.subagents = subagent_manager
+        else:
+            self.subagents = SubagentManager(...)  # 原有逻辑
+```
+
+### 18.7 web worker 单例化
+
+```python
+# worker.py — 模块级单例
+_subagent_manager: "SubagentManager | None" = None
+_subagent_manager_lock = threading.Lock()
+
+def _get_subagent_manager() -> "SubagentManager":
+    global _subagent_manager
+    if _subagent_manager is not None:
+        return _subagent_manager
+    with _subagent_manager_lock:
+        if _subagent_manager is not None:
+            return _subagent_manager
+        _subagent_manager = SubagentManager(...)  # 与 AgentLoop 创建时参数一致
+        return _subagent_manager
+
+def _create_runner():
+    ...
+    agent_loop = AgentLoop(..., subagent_manager=_get_subagent_manager())
+    ...
+```
+
+**注意**：单例 `SubagentManager` 使用进程启动时的 `config.workspace_path` 和 `session_manager`，与各请求的 `AgentLoop` 共享同一个 `SubagentManager` 实例，确保跨请求的 `_task_meta` 持久化。
+
+### 18.8 影响文件
+
+| 文件 | 改动 |
+|------|------|
+| `nanobot/agent/subagent.py` | `_recover_meta`, `_load_disk_subagents`, `_check_ownership` 增强, `list_subagents` 增强 |
+| `nanobot/agent/loop.py` | `__init__` 新增 `subagent_manager` 参数 |
+| `web-chat/worker.py` | SubagentManager 单例 + `_create_runner` 透传 |
+| `tests/test_spawn_singleton.py` | 新测试文件（14 项测试） |
 
 ---
 

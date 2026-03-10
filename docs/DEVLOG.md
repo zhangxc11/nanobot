@@ -128,6 +128,41 @@
 | 38 | Spawn follow_up — 向 subagent 追加消息 (§36) | ✅ | *主文件* |
 | 39 | Spawn stop — 主动停止 subagent (§37) | ✅ | *主文件* |
 | 40 | Spawn status — 查询 subagent 执行状态 (§38) | ✅ | *主文件* |
+| 41 | §40 SubagentManager 单例化 + 跨进程 follow_up 恢复 | ✅ | *主文件* |
+
+---
+
+## Phase 41: §40 SubagentManager 单例化 + 跨进程 follow_up 恢复 ✅
+
+**日期**: 2026-03-11
+**需求**: §40（`requirements/s40-s49.md`）
+
+### 任务清单
+
+- [x] 子需求 1: AgentLoop.__init__ 新增 `subagent_manager` 可选参数
+- [x] 子需求 2: web-chat worker.py SubagentManager 单例化（`_get_subagent_manager()`）
+- [x] 子需求 3: `_recover_meta` + `_check_ownership` disk fallback
+- [x] 子需求 4: `_load_disk_subagents` + `list_subagents` 增强
+- [x] 测试: `test_spawn_singleton.py` — 25 项全通过
+- [x] 全量回归通过: 591 passed, 1 skipped
+
+### 改动文件
+
+| 文件 | 改动 |
+|------|------|
+| `nanobot/agent/subagent.py` | `_recover_meta()`, `_load_disk_subagents()`, `_check_ownership()` disk fallback, `list_subagents()` 增强 |
+| `nanobot/agent/loop.py` | `__init__` 新增 `subagent_manager: SubagentManager | None = None` 参数 |
+| `web-chat/worker.py` | `_get_subagent_manager()` 单例 + `_create_runner()` 透传 |
+| `tests/test_spawn_singleton.py` | 新测试文件（25 项测试） |
+| `docs/architecture/spawn.md` | §十八 SubagentManager 单例化 + 跨进程恢复 |
+| `docs/ARCHITECTURE.md` | 章节索引更新 |
+
+### 设计要点
+
+- **进程内单例化**: web worker 中 `SubagentManager` 提升为模块级单例，跨 HTTP 请求共享 `_task_meta`
+- **跨进程恢复**: `_recover_meta()` 按确定性命名规则构造 session key，O(1) 文件 stat 检查
+- **批量恢复**: `_load_disk_subagents()` glob 匹配前缀，用于 `list_subagents()`
+- **Gateway 模式不受影响**: `subagent_manager=None`（默认）走原有路径
 
 ---
 

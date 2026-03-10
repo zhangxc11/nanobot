@@ -75,6 +75,7 @@ class AgentLoop:
         subagent_task_keeper: "Callable[[asyncio.Task], None] | None" = None,
         session_messenger: "Any | None" = None,
         read_file_hard_limit: int | None = None,
+        subagent_manager: "SubagentManager | None" = None,  # §40: external singleton
     ):
         from nanobot.config.schema import ExecToolConfig
         self.bus = bus
@@ -101,24 +102,29 @@ class AgentLoop:
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
-        self.subagents = SubagentManager(
-            provider=provider,
-            workspace=workspace,
-            bus=bus,
-            model=self.model,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
-            reasoning_effort=reasoning_effort,
-            brave_api_key=brave_api_key,
-            web_proxy=web_proxy,
-            exec_config=self.exec_config,
-            restrict_to_workspace=restrict_to_workspace,
-            usage_recorder=usage_recorder,
-            session_manager=self.sessions,
-            task_keeper=subagent_task_keeper,
-            session_messenger=session_messenger,
-            read_file_hard_limit=read_file_hard_limit,
-        )
+        # §40: Use external SubagentManager if provided (web worker singleton),
+        # otherwise create a new one (gateway mode, default behavior).
+        if subagent_manager is not None:
+            self.subagents = subagent_manager
+        else:
+            self.subagents = SubagentManager(
+                provider=provider,
+                workspace=workspace,
+                bus=bus,
+                model=self.model,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                reasoning_effort=reasoning_effort,
+                brave_api_key=brave_api_key,
+                web_proxy=web_proxy,
+                exec_config=self.exec_config,
+                restrict_to_workspace=restrict_to_workspace,
+                usage_recorder=usage_recorder,
+                session_manager=self.sessions,
+                task_keeper=subagent_task_keeper,
+                session_messenger=session_messenger,
+                read_file_hard_limit=read_file_hard_limit,
+            )
 
         self._running = False
         self._mcp_servers = mcp_servers or {}

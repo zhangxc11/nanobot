@@ -54,7 +54,7 @@ nanobot 核心是一个可嵌入的 AI Agent 框架，支持多 channel（CLI/We
 | 核心循环 | [architecture/core-loop.md](architecture/core-loop.md) | §一~§五 | ~685 | AgentLoop/EventCallback/Session持久化/Token/SDK |
 | Provider | [architecture/provider.md](architecture/provider.md) | §七+§十三 | ~300 | ProviderPool 动态切换 + Cache Control 策略 |
 | Gateway | [architecture/gateway.md](architecture/gateway.md) | §八 | ~205 | Gateway 并发执行/Dispatcher/Tool Context 隔离 |
-| Spawn | [architecture/spawn.md](architecture/spawn.md) | §十一+§十二+§十五~§十七 | ~737 | Spawn/follow_up/stop/status + SessionMessenger |
+| Spawn | [architecture/spawn.md](architecture/spawn.md) | §十一+§十二+§十五~§十八 | ~850 | Spawn/follow_up/stop/status/单例化+跨进程恢复 + SessionMessenger |
 | 工具 | [architecture/tools.md](architecture/tools.md) | §六+§九+§十+§十四 | ~435 | 审计日志/session命令/exec超时/read_file保护 |
 
 ---
@@ -81,6 +81,7 @@ nanobot 核心是一个可嵌入的 AI Agent 框架，支持多 channel（CLI/We
 | §十五 | Spawn follow_up | spawn.md |
 | §十六 | Spawn stop | spawn.md |
 | §十七 | Spawn status | spawn.md |
+| §十八 | SubagentManager 单例化 + 跨进程恢复 | spawn.md |
 
 ---
 
