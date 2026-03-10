@@ -2051,6 +2051,53 @@ litellm.ServiceUnavailableError: AnthropicException - {
 
 ---
 
+## §36 Spawn follow_up — 向 subagent 追加消息 (Phase 38)
+
+### 背景
+
+spawn subagent 当前是"发射后不管"模式，无法在运行中补充信息，也无法恢复中断的 subagent。
+
+### 需求
+
+新增 `follow_up` 参数，允许主 session 向已有 subagent 追加消息：
+
+1. **调用者无需区分状态**：spawn 内部自动判断
+   - subagent 运行中 → **inject**：消息注入执行流，不触发新 turn
+   - subagent 已结束 → **resume**：从 session 历史恢复，启动全新 turn（全新 max_iterations 配额）
+
+2. **安全约束**：只能操作自己 spawn 的 subagent
+
+### 接口
+
+```python
+# 新 spawn（不变）
+spawn(task="做某件事")
+
+# 向已有 subagent 追加消息
+spawn(task="请继续", follow_up="<task_id>")
+spawn(task="补充信息：xxx", follow_up="<task_id>", max_iterations=50)
+```
+
+### 设计决策
+
+- 标识用 task_id（8 字符 hex）
+- Resume 复用原 task_id
+- Inject 多条消息一次全部 drain
+- Resume 的 max_iterations 是全新配额，inject 不影响当前轮次
+
+### 影响范围
+
+| 文件 | 改动 |
+|------|------|
+| `agent/subagent.py` | SubagentMeta、_task_meta、inject checkpoint、follow_up()、_check_ownership() |
+| `agent/tools/spawn.py` | follow_up 参数、execute() 路由 |
+
+#### 优先级
+
+Phase 38 — 已实现
+
+---
+
 <!-- ═══════════════════════════════════════════════════════════════════════
   ⚠️ BACKLOG 区域 — 必须始终位于本文件最末尾！
   

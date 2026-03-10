@@ -6,11 +6,15 @@ budget alerts, LLM retry, and usage recording.
 Phase 26 fix: Added ``task_keeper`` callback to prevent asyncio.Task GC
 when the host AgentLoop/SubagentManager is garbage collected (critical for
 web worker where each request creates a short-lived AgentLoop).
+
+§36: Added follow_up capability — append messages to existing subagents.
+Auto-detects state: inject into running subagent, or resume finished one.
 """
 
 import asyncio
 import json
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -49,6 +53,23 @@ def _is_retryable(error: Exception) -> bool:
     Delegates to shared ``agent.retry.is_retryable()`` (Phase 28).
     """
     return _is_retryable_shared(error)
+
+
+@dataclass
+class SubagentMeta:
+    """Metadata for a spawned subagent, retained after completion for follow_up.
+
+    §36: Created at spawn time, persists in memory until process restart.
+    """
+    task_id: str
+    subagent_session_key: str
+    parent_session_key: str | None
+    label: str
+    origin: dict[str, str]
+    inject_queue: asyncio.Queue[str] = field(default_factory=asyncio.Queue)
+    status: str = "running"           # running | completed | failed | max_iterations
+    max_iterations: int = DEFAULT_SUBAGENT_ITERATIONS
+    persist: bool = True
 
 
 def _budget_alert_threshold(max_iterations: int) -> int:
@@ -115,6 +136,7 @@ class SubagentManager:
         self.session_messenger = session_messenger
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
+        self._task_meta: dict[str, SubagentMeta] = {}   # task_id -> metadata (§36)
 
     async def spawn(
         self,
@@ -167,10 +189,24 @@ class SubagentManager:
             MAX_SUBAGENT_ITERATIONS,
         )
 
+        # §36: Create metadata for follow_up support
+        meta = SubagentMeta(
+            task_id=task_id,
+            subagent_session_key=subagent_key,
+            parent_session_key=session_key,
+            label=display_label,
+            origin=origin,
+            status="running",
+            max_iterations=effective_max,
+            persist=persist,
+        )
+        self._task_meta[task_id] = meta
+
         bg_task = asyncio.create_task(
             self._run_subagent(task_id, task, display_label, origin,
                                effective_max, persist, subagent_key,
-                               parent_session_key=session_key)
+                               parent_session_key=session_key,
+                               inject_queue=meta.inject_queue)
         )
         self._running_tasks[task_id] = bg_task
         if session_key:
@@ -184,12 +220,10 @@ class SubagentManager:
             except Exception as e:
                 logger.warning("task_keeper registration failed: {}", e)
 
-        def _cleanup(_: asyncio.Task) -> None:
+        def _cleanup(_task: asyncio.Task) -> None:
             self._running_tasks.pop(task_id, None)
-            if session_key and (ids := self._session_tasks.get(session_key)):
-                ids.discard(task_id)
-                if not ids:
-                    del self._session_tasks[session_key]
+            # §36: Do NOT remove from _session_tasks or _task_meta —
+            # they are needed for follow_up ownership checks and resume.
 
         bg_task.add_done_callback(_cleanup)
 
@@ -207,10 +241,17 @@ class SubagentManager:
         persist: bool,
         subagent_session_key: str,
         parent_session_key: str | None = None,
+        inject_queue: asyncio.Queue[str] | None = None,
+        resume_messages: list[dict[str, Any]] | None = None,
     ) -> None:
-        """Execute the subagent task and announce the result."""
-        logger.info("Subagent [{}] starting task: {} (max_iterations={})",
-                     task_id, label, max_iterations)
+        """Execute the subagent task and announce the result.
+
+        §36: Added inject_queue for mid-execution message injection,
+        and resume_messages for resuming from session history.
+        """
+        logger.info("Subagent [{}] starting task: {} (max_iterations={}{})",
+                     task_id, label, max_iterations,
+                     ", resumed" if resume_messages else "")
 
         try:
             # Build subagent tools (no message tool, no spawn tool, no cron tool)
@@ -233,21 +274,29 @@ class SubagentManager:
             tools.register(WebFetchTool(proxy=self.web_proxy))
 
             system_prompt = self._build_subagent_prompt()
-            messages: list[dict[str, Any]] = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": task},
-            ]
+
+            # §36: Resume from history or start fresh
+            if resume_messages is not None:
+                messages = resume_messages
+            else:
+                messages: list[dict[str, Any]] = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": task},
+                ]
 
             # ── Session persistence setup ──
             session = None
             if persist and self.session_manager:
                 session = self.session_manager.get_or_create(subagent_session_key)
-                user_msg = {
-                    "role": "user",
-                    "content": task,
-                    "timestamp": datetime.now().isoformat(),
-                }
-                self.session_manager.append_message(session, user_msg)
+                if resume_messages is None:
+                    # Only persist initial user message for fresh spawns;
+                    # resume messages are already in the session history.
+                    user_msg = {
+                        "role": "user",
+                        "content": task,
+                        "timestamp": datetime.now().isoformat(),
+                    }
+                    self.session_manager.append_message(session, user_msg)
 
             # ── Main agent loop ──
             iteration = 0
@@ -335,6 +384,26 @@ class SubagentManager:
                         # Persist tool message
                         if session and self.session_manager:
                             self.session_manager.append_message(session, tool_msg)
+
+                    # ── §36: Inject checkpoint ──
+                    # After all tools in this round complete, drain any messages
+                    # injected by the parent session via follow_up.
+                    if inject_queue is not None:
+                        while not inject_queue.empty():
+                            try:
+                                injected_text = inject_queue.get_nowait()
+                                inject_msg = {
+                                    "role": "user",
+                                    "content": f"[Message from parent session during execution]\n{injected_text}",
+                                    "timestamp": datetime.now().isoformat(),
+                                }
+                                messages.append(inject_msg)
+                                if session and self.session_manager:
+                                    self.session_manager.append_message(session, inject_msg)
+                                logger.info("Subagent [{}] injected message: {}",
+                                            task_id, injected_text[:120])
+                            except asyncio.QueueEmpty:
+                                break
                 else:
                     # Final response (no tool calls)
                     final_result = response.content
@@ -355,6 +424,13 @@ class SubagentManager:
                     f"({max_iterations}) before completing the task. "
                     f"Partial progress may have been made."
                 )
+                # §36: Update meta status
+                if task_id in self._task_meta:
+                    self._task_meta[task_id].status = "max_iterations"
+            else:
+                # §36: Update meta status
+                if task_id in self._task_meta:
+                    self._task_meta[task_id].status = "completed"
 
             logger.info("Subagent [{}] completed successfully (iterations: {}/{})",
                          task_id, iteration, max_iterations)
@@ -363,6 +439,9 @@ class SubagentManager:
                                         parent_session_key=parent_session_key)
 
         except Exception as e:
+            # §36: Update meta status
+            if task_id in self._task_meta:
+                self._task_meta[task_id].status = "failed"
             error_msg = f"Error: {str(e)}"
             logger.error("Subagent [{}] failed: {}", task_id, e)
             await self._announce_result(task_id, label, task, error_msg, origin, "error",
@@ -410,6 +489,147 @@ class SubagentManager:
         # Should not reach here, but satisfy type checker
         assert last_error is not None
         raise last_error
+
+    # ── §36: Follow-up support ──
+
+    def _check_ownership(self, parent_session_key: str, target_task_id: str) -> SubagentMeta:
+        """Verify that the caller owns the target subagent.
+
+        Raises ValueError if the task_id is unknown or belongs to another session.
+        """
+        meta = self._task_meta.get(target_task_id)
+        if meta is None:
+            raise ValueError(f"Unknown subagent task_id: {target_task_id}")
+        if meta.parent_session_key != parent_session_key:
+            raise ValueError(f"Subagent {target_task_id} does not belong to this session")
+        return meta
+
+    async def follow_up(
+        self,
+        task_id: str,
+        message: str,
+        parent_session_key: str,
+        max_iterations: int | None = None,
+    ) -> str:
+        """Send a follow-up message to an existing subagent.
+
+        Auto-detects the subagent's state:
+        - Running → inject message into its execution flow (no new turn)
+        - Finished → resume from session history with a new turn
+
+        Parameters
+        ----------
+        task_id:
+            The target subagent's task_id.
+        message:
+            The message content to send.
+        parent_session_key:
+            The caller's session key (for ownership verification).
+        max_iterations:
+            For resume: fresh iteration budget for the new turn.
+            For inject: ignored (does not affect current turn).
+        """
+        # 1. Ownership check
+        meta = self._check_ownership(parent_session_key, task_id)
+
+        # 2. Determine state
+        task = self._running_tasks.get(task_id)
+        is_running = task is not None and not task.done()
+
+        if is_running:
+            # ── Inject: put into queue, no new turn ──
+            meta.inject_queue.put_nowait(message)
+            logger.info("Follow-up injected into running subagent [{}] (id: {}): {}",
+                        meta.label, task_id, message[:120])
+            return (
+                f"Message injected into running subagent [{meta.label}] (id: {task_id}). "
+                f"It will be read before the next LLM call."
+            )
+        else:
+            # ── Resume: load history, append message, start new turn ──
+            if not meta.persist:
+                raise ValueError(
+                    f"Cannot resume subagent {task_id}: session was not persisted "
+                    f"(persist=False). No history to resume from."
+                )
+            if not self.session_manager:
+                raise ValueError(
+                    f"Cannot resume subagent {task_id}: no SessionManager available."
+                )
+
+            # Load session history
+            session_obj = self.session_manager.get_or_create(meta.subagent_session_key)
+            history = session_obj.get_history()
+            if not history:
+                raise ValueError(
+                    f"Cannot resume subagent {task_id}: session history is empty."
+                )
+
+            # Rebuild messages: system prompt + history + new user message
+            system_prompt = self._build_subagent_prompt()
+            resume_msgs: list[dict[str, Any]] = [
+                {"role": "system", "content": system_prompt},
+            ]
+            # Add history (skip system messages from history to avoid duplication)
+            for msg in history:
+                if msg.get("role") != "system":
+                    resume_msgs.append(msg)
+
+            # Append the follow-up message
+            follow_up_msg = {
+                "role": "user",
+                "content": message,
+                "timestamp": datetime.now().isoformat(),
+            }
+            resume_msgs.append(follow_up_msg)
+
+            # Persist the follow-up message
+            self.session_manager.append_message(session_obj, follow_up_msg)
+
+            # Fresh iteration budget for the new turn
+            effective_max = min(
+                max_iterations if max_iterations is not None else meta.max_iterations,
+                MAX_SUBAGENT_ITERATIONS,
+            )
+
+            # Reset inject_queue (create fresh one for the new turn)
+            meta.inject_queue = asyncio.Queue()
+            meta.status = "running"
+
+            # Start new background task
+            bg_task = asyncio.create_task(
+                self._run_subagent(
+                    task_id=task_id,
+                    task=message,  # For announce: show the follow-up message
+                    label=meta.label,
+                    origin=meta.origin,
+                    max_iterations=effective_max,
+                    persist=meta.persist,
+                    subagent_session_key=meta.subagent_session_key,
+                    parent_session_key=meta.parent_session_key,
+                    inject_queue=meta.inject_queue,
+                    resume_messages=resume_msgs,
+                )
+            )
+            self._running_tasks[task_id] = bg_task
+
+            if self._task_keeper is not None:
+                try:
+                    self._task_keeper(bg_task)
+                except Exception as e:
+                    logger.warning("task_keeper registration failed: {}", e)
+
+            def _cleanup(_t: asyncio.Task) -> None:
+                self._running_tasks.pop(task_id, None)
+
+            bg_task.add_done_callback(_cleanup)
+
+            logger.info("Follow-up resumed subagent [{}] (id: {}, max_iterations={}): {}",
+                        meta.label, task_id, effective_max, message[:120])
+            return (
+                f"Subagent [{meta.label}] resumed (id: {task_id}, max_iterations={effective_max}). "
+                f"I'll notify you when it completes."
+            )
 
     async def _announce_result(
         self,

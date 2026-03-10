@@ -2086,4 +2086,103 @@ config.json → Config.tools.read_file_hard_limit
 
 ---
 
+## 十五、Spawn follow_up — 向 subagent 追加消息 (§36)
+
+### 概述
+
+为 spawn 工具增加 `follow_up` 参数，允许主 session 向已有 subagent 追加消息。系统根据 subagent 状态自动选择 inject（运行中）或 resume（已结束）。
+
+### 数据结构
+
+```python
+@dataclass
+class SubagentMeta:
+    """subagent 元数据，spawn 时创建，完成后保留供 follow_up 使用。"""
+    task_id: str
+    subagent_session_key: str
+    parent_session_key: str | None
+    label: str
+    origin: dict[str, str]
+    inject_queue: asyncio.Queue[str]      # 运行中注入通道
+    status: str                           # running | completed | failed | max_iterations
+    max_iterations: int
+    persist: bool
+
+class SubagentManager:
+    _running_tasks: dict[str, asyncio.Task]       # task_id -> asyncio.Task
+    _session_tasks: dict[str, set[str]]            # parent_session_key -> {task_id}
+    _task_meta: dict[str, SubagentMeta]            # task_id -> 元数据 (§36 新增)
+```
+
+### 生命周期
+
+- `_task_meta` 在 `spawn()` 时创建，subagent 完成后**不删除**
+- `_session_tasks` 同样不再在 task 完成时清理（用于鉴权）
+- `_running_tasks` 仍在 task 完成时清理（用于判断运行状态）
+- 进程重启后内存状态丢失，follow_up 不可用
+
+### Inject 流程
+
+```
+主 session → spawn(task="补充信息", follow_up="<id>")
+           → SubagentManager.follow_up()
+           → 检查 _running_tasks[id] 存在且未完成
+           → inject_queue.put_nowait(message)
+           → subagent 在下一轮 tool 执行后的 checkpoint drain 读取
+```
+
+inject checkpoint 位于 `_run_subagent()` 的 tool 执行循环之后，与主 agent loop 的 `check_user_input()` 对齐。注入的消息格式：
+
+```python
+{
+    "role": "user",
+    "content": "[Message from parent session during execution]\n{message}",
+    "timestamp": "..."
+}
+```
+
+### Resume 流程
+
+```
+主 session → spawn(task="请继续", follow_up="<id>")
+           → SubagentManager.follow_up()
+           → 检查 _running_tasks[id] 不存在或已完成
+           → 从 SessionManager 加载历史 messages
+           → 构建 resume_messages: system_prompt + history + follow_up_msg
+           → 创建新 asyncio.Task → _run_subagent(resume_messages=...)
+           → 全新 max_iterations 配额
+```
+
+Resume 复用 `_run_subagent()`，通过 `resume_messages` 参数区分：
+- `resume_messages=None` → 正常 spawn，构建 system + user 消息
+- `resume_messages=[...]` → resume，直接使用传入的消息列表
+
+### 安全鉴权
+
+`_check_ownership(parent_session_key, task_id)` 验证：
+1. `task_id` 存在于 `_task_meta`
+2. `meta.parent_session_key == parent_session_key`
+
+### SpawnTool 接口
+
+```json
+{
+    "task": "消息内容",
+    "follow_up": "a1b2c3d4"    // 可选：目标 subagent task_id
+}
+```
+
+- `follow_up` 未设置 → 原有 spawn 行为
+- `follow_up` 设置 → 调用 `SubagentManager.follow_up()`
+
+### 影响文件
+
+| 文件 | 改动 |
+|------|------|
+| `agent/subagent.py` | SubagentMeta、_task_meta、inject checkpoint、follow_up()、_check_ownership() |
+| `agent/tools/spawn.py` | follow_up 参数、execute() 路由、description 更新 |
+| `tests/test_spawn_follow_up.py` | 26 项新测试 |
+
+---
+
 *本文档将随开发进展持续更新。*

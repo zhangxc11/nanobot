@@ -1,6 +1,7 @@
 """Spawn tool for creating background subagents.
 
 Phase 26: Added max_iterations and persist parameters.
+§36: Added follow_up parameter for appending messages to existing subagents.
 """
 
 from typing import TYPE_CHECKING, Any
@@ -44,6 +45,12 @@ class SpawnTool(Tool):
             "knows this — craft your task description so it knows what to include in "
             "its final summary."
             "\n\n"
+            "**Follow-up**: Set `follow_up` to a subagent's task_id and `task` to your "
+            "message. The system auto-detects the subagent's state: if still running, "
+            "the message is injected into its execution flow; if finished, it resumes "
+            "the subagent with a new turn. You can only follow up on subagents spawned "
+            "by this session."
+            "\n\n"
             "**CLI limitation**: In CLI single-message mode (`-m`), the process exits "
             "after the main agent responds, so subagent results may be lost. If you need "
             "to wait for the subagent, use `exec` to sleep (e.g. `time.sleep(60)`) to "
@@ -61,7 +68,9 @@ class SpawnTool(Tool):
                     "description": (
                         "The task for the subagent to complete. Be specific about what "
                         "the subagent should do AND what it should report back in its "
-                        "final reply (e.g. 'do X, then report the result summary')."
+                        "final reply (e.g. 'do X, then report the result summary'). "
+                        "When used with follow_up, this is the message to send to the "
+                        "existing subagent."
                     ),
                 },
                 "label": {
@@ -82,6 +91,16 @@ class SpawnTool(Tool):
                         "Default true. Only set to false for trivial throwaway tasks."
                     ),
                 },
+                "follow_up": {
+                    "type": "string",
+                    "description": (
+                        "Target subagent's task_id to send a follow-up message. "
+                        "If the subagent is still running, the message (from `task`) is "
+                        "injected into its execution flow. If it has finished, the subagent "
+                        "is resumed with a fresh turn. Only works for subagents spawned "
+                        "by this session."
+                    ),
+                },
             },
             "required": ["task"],
         }
@@ -92,9 +111,20 @@ class SpawnTool(Tool):
         label: str | None = None,
         max_iterations: int | None = None,
         persist: bool = True,
+        follow_up: str | None = None,
         **kwargs: Any,
     ) -> str:
-        """Spawn a subagent to execute the given task."""
+        """Spawn a subagent or send a follow-up message to an existing one."""
+        if follow_up:
+            # §36: Follow-up to existing subagent
+            return await self._manager.follow_up(
+                task_id=follow_up,
+                message=task,
+                parent_session_key=self._session_key,
+                max_iterations=max_iterations,
+            )
+
+        # Original behavior: spawn new subagent
         return await self._manager.spawn(
             task=task,
             label=label,
