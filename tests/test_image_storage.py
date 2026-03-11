@@ -292,7 +292,7 @@ class TestPrepareEntryIntegration:
     def test_tool_result_truncation_still_works(self, tmp_workspace):
         """Tool result truncation should still work."""
         sm = SessionManager(tmp_workspace)
-        long_content = "x" * 1000
+        long_content = "x" * 3000
         message = {"role": "tool", "content": long_content, "tool_call_id": "tc1", "name": "test"}
         entry = sm._prepare_entry(message)
         assert len(entry["content"]) < len(long_content)

@@ -450,7 +450,7 @@ class SessionManager:
         entry.setdefault("timestamp", datetime.now().isoformat())
         return entry
 
-    _TOOL_RESULT_MAX_CHARS = 500
+    _TOOL_RESULT_MAX_CHARS = 2000
 
     def append_message(self, session: Session, message: dict[str, Any]) -> None:
         """Append a single message to the session JSONL file (incremental write).
