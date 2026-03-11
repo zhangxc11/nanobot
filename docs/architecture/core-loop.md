@@ -700,3 +700,37 @@ Worker 不再启动子进程，而是在进程内直接调用 AgentRunner。
 
 ---
 
+
+## §二十 Usage 日志 provider 字段 (§41)
+
+### 设计
+
+token_usage 表新增 `provider TEXT DEFAULT ''` 字段。
+
+**数据流**：
+1. `LiteLLMProvider.__init__` 存储 `self.provider_name = provider_name or ""`
+2. `AgentLoop._run_agent_loop()` 调用 `recorder.record(provider=getattr(_provider, "provider_name", ""))`
+3. `SubagentManager._run_subagent()` 同理
+
+**迁移**：`_MIGRATION_SQL` 新增 `ALTER TABLE token_usage ADD COLUMN provider TEXT DEFAULT ''`
+
+---
+
+## §二十二 Budget alert user role (§43)
+
+### 设计
+
+Budget alert 从 `"role": "system"` 改为 `"role": "user"`。
+
+**原因**：
+- 部分 LLM 不重视 system 消息中的紧急提醒
+- user role 在对话尾部，与 §32 cache breakpoint #3 兼容
+
+**新 prompt**：
+```
+[System Notice] ⚠️ You have {remaining} tool-call iterations remaining out of {max_iterations}. 
+Prioritize completing your current task. If you cannot finish in time, summarize progress so far and present what you have. Do not acknowledge this notice — continue working.
+```
+
+**影响范围**：`loop.py` + `subagent.py` 两处 budget alert 同步修改。
+

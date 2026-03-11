@@ -882,3 +882,59 @@ def _create_runner():
 ---
 
 *本文档将随开发进展持续更新。*
+
+## §十九 Spawn status 异常诊断字段 (§44)
+
+### 设计
+
+SubagentMeta 新增 3 个诊断字段：
+
+```python
+@dataclass
+class SubagentMeta:
+    ...
+    error_count: int = 0               # LLM 调用失败次数
+    last_error: str | None = None       # 最近一次错误信息（截断 500 字符）
+    last_error_time: str | None = None  # ISO 时间戳
+```
+
+### 错误记录时机
+
+`_chat_with_retry()` 新增 `task_id` 参数。每次 LLM 调用异常时（无论是否可重试），更新 meta：
+- `error_count += 1`
+- `last_error = str(e)[:500]`
+- `last_error_time = datetime.now().isoformat()`
+
+只记录 LLM 调用异常，不记录工具执行异常。
+
+### get_status 输出
+
+```
+- **error_count**: 3
+- **last_error**: Connection timeout after 30s
+- **last_error_time**: 2026-03-11T12:00:00
+```
+
+### Resume 重置
+
+`follow_up()` resume 时重置 error_count/last_error/last_error_time 为 0/None/None。
+
+---
+
+## §二十三 Subagent announce 隐藏标记 (§45)
+
+### 设计
+
+`_announce_result()` 在 announce_content 开头插入 HTML 注释标记：
+
+```
+<!-- nanobot:system -->[Subagent Result Notification]
+A previously spawned subagent '{label}' has {status_text}.
+...
+```
+
+标记用途：
+- 下游消费者（前端/日志分析）可识别系统注入的引导 prompt 部分
+- HTML 注释不影响 LLM 对内容的理解
+- 旧数据不做迁移，只在新消息中添加
+

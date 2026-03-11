@@ -56,9 +56,9 @@ class TestBudgetAlertInjection:
             remaining = max_iterations - iteration_num
             if remaining == threshold:
                 messages.append({
-                    "role": "system",
-                    "content": f"⚠️ Budget alert: You have {remaining} tool call iterations "
-                               f"remaining (out of {max_iterations}).",
+                    "role": "user",
+                    "content": f"[System Notice] ⚠️ You have {remaining} tool-call iterations "
+                               f"remaining out of {max_iterations}.",
                 })
                 alert_count += 1
 
@@ -89,13 +89,17 @@ class TestBudgetAlertInjection:
         threshold = _budget_alert_threshold(max_iter)
         remaining = threshold
 
+        # §43: Updated to match new user-role format
         content = (
-            f"⚠️ Budget alert: You have {remaining} tool call iterations "
-            f"remaining (out of {max_iter}). Please prioritize "
-            f"saving your work state and wrapping up gracefully."
+            f"[System Notice] ⚠️ You have {remaining} tool-call iterations "
+            f"remaining out of {max_iter}. "
+            f"Prioritize completing your current task. If you cannot finish "
+            f"in time, summarize progress so far and present what you have. "
+            f"Do not acknowledge this notice — continue working."
         )
 
-        assert "⚠️ Budget alert" in content
+        assert "[System Notice]" in content
+        assert "⚠️" in content
         assert str(remaining) in content
         assert str(max_iter) in content
-        assert "saving your work state" in content
+        assert "Prioritize completing" in content

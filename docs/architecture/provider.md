@@ -312,3 +312,18 @@ Migration 策略：
 
 ---
 
+
+## §二十一 LLM 连接超时拆分 (§42)
+
+### 设计
+
+`_LLM_TIMEOUT` 从 `float(120.0)` 改为 `httpx.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0)`。
+
+**参数说明**：
+- `connect=30.0` — 连接超时 30 秒，快速检测网络断开
+- `read=120.0` — 读取超时 120 秒，大上下文补全需要时间
+- `write=30.0` — 写入超时 30 秒
+- `pool=30.0` — 连接池超时 30 秒
+
+**兼容性**：LiteLLM 支持 `httpx.Timeout` 对象作为 `timeout` 参数，内部传递给 httpx client。
+

@@ -382,15 +382,19 @@ class AgentLoop:
             iteration += 1
 
             # ── Budget alert: warn LLM when iterations are running low ──
+            # §43: Use "user" role so the alert is visible to the LLM at the
+            # conversation tail (compatible with §32 cache breakpoint #3).
             remaining = self.max_iterations - iteration
             threshold = _budget_alert_threshold(self.max_iterations)
             if remaining == threshold:
                 messages.append({
-                    "role": "system",
+                    "role": "user",
                     "content": (
-                        f"⚠️ Budget alert: You have {remaining} tool call iterations "
-                        f"remaining (out of {self.max_iterations}). Please prioritize "
-                        f"saving your work state and wrapping up gracefully."
+                        f"[System Notice] ⚠️ You have {remaining} tool-call iterations "
+                        f"remaining out of {self.max_iterations}. "
+                        f"Prioritize completing your current task. If you cannot finish "
+                        f"in time, summarize progress so far and present what you have. "
+                        f"Do not acknowledge this notice — continue working."
                     ),
                 })
 
@@ -428,6 +432,7 @@ class AgentLoop:
                         finished_at=call_ts,
                         cache_creation_input_tokens=response.usage.get("cache_creation_input_tokens", 0),
                         cache_read_input_tokens=response.usage.get("cache_read_input_tokens", 0),
+                        provider=getattr(_provider, "provider_name", ""),  # §41
                     )
 
             # Log full LLM call details (messages + response) to JSONL

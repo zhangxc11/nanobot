@@ -5,6 +5,7 @@ import secrets
 import string
 from typing import Any
 
+import httpx
 import json_repair
 import litellm
 from litellm import acompletion
@@ -13,16 +14,10 @@ from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from nanobot.providers.registry import find_by_model, find_gateway
 
 # Phase 28: Weak-network resilience — timeout + litellm-level retries
-# litellm converts httpx.Timeout to float for providers that don't support it,
-# so we use a simple float timeout.
-#
-# Phase 28.1: Reduced from 300s → 120s.  300s was still too long for
-# disconnected-network scenarios — the first retry wouldn't fire for
-# 300s × (1 + num_retries) = up to 15 minutes.  120s is long enough for
-# large-context completions while keeping the failure-detection fast.
-# litellm num_retries set to 0 so that our own _chat_with_retry() manages
-# all retry logic with smart delays (fast vs slow).
-_LLM_TIMEOUT = 120.0  # seconds — connect + read combined
+# §42: Split connect/read timeout for faster failure detection on
+# connection-level issues while preserving generous read timeout for
+# large-context completions.
+_LLM_TIMEOUT = httpx.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0)
 _LLM_NUM_RETRIES = 0  # let _chat_with_retry() handle retries
 
 # Standard chat-completion message keys.
@@ -55,6 +50,7 @@ class LiteLLMProvider(LLMProvider):
         super().__init__(api_key, api_base)
         self.default_model = default_model
         self.extra_headers = extra_headers or {}
+        self.provider_name = provider_name or ""  # §41: expose for usage recording
 
         # Detect gateway / local deployment.
         # provider_name (from config key) is the primary signal;

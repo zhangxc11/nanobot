@@ -66,6 +66,7 @@
 | §33 Hotfix: ServiceUnavailableError 误判为可重试错误 | ✅ 已完成 | local |
 | Phase 35: Subagent 回报消息 role 回归 user (§35) | ✅ 已完成 | local |
 | Phase 37: read_file 大文件保护 (§34) | ✅ 已完成 | local |
+| Phase 42: 核心层基础改动 (§41-§45) | ✅ 已完成 | local |
 
 ---
 
@@ -125,10 +126,11 @@
 | 32 | Cache Control 策略优化 + Usage Cache 字段 | ✅ | [devlog/phase-31-40.md](devlog/phase-31-40.md) |
 | 36 | 测试修复 + REQUIREMENTS.md Backlog 区域整理 | ✅ | [devlog/phase-31-40.md](devlog/phase-31-40.md) |
 | 37 | read_file 大文件保护 (§34) | ✅ | [devlog/phase-31-40.md](devlog/phase-31-40.md) |
-| 38 | Spawn follow_up — 向 subagent 追加消息 (§36) | ✅ | *主文件* |
-| 39 | Spawn stop — 主动停止 subagent (§37) | ✅ | *主文件* |
-| 40 | Spawn status — 查询 subagent 执行状态 (§38) | ✅ | *主文件* |
+| 38 | Spawn follow_up — 向 subagent 追加消息 (§36) | ✅ | [devlog/phase-31-40.md](devlog/phase-31-40.md) |
+| 39 | Spawn stop — 主动停止 subagent (§37) | ✅ | [devlog/phase-31-40.md](devlog/phase-31-40.md) |
+| 40 | Spawn status — 查询 subagent 执行状态 (§38) | ✅ | [devlog/phase-31-40.md](devlog/phase-31-40.md) |
 | 41 | §40 SubagentManager 单例化 + 跨进程 follow_up 恢复 | ✅ | *主文件* |
+| 42 | §41-§45 核心层基础改动 (Phase 42) | ✅ | *主文件* |
 
 ---
 
@@ -178,80 +180,6 @@
    - `test_default_no_usage_recorder` — 默认模式无 recorder 时 subagents.usage_recorder=None
 4. 全量回归: 595 passed, 1 skipped
 
----
-
-## Phase 38: Spawn follow_up — 向 subagent 追加消息 (§36) ✅
-
-> 需求: DESIGN_SPAWN_FOLLOWUP.md | 分支: local
-> 开始时间: 2026-03-10 | 完成时间: 2026-03-10
-
-### 背景
-
-spawn subagent 当前是"发射后不管"模式。需要支持向已有 subagent 追加消息：
-- 运行中的 subagent → inject（注入到执行流，不触发新 turn）
-- 已结束的 subagent → resume（从 session 历史恢复，启动新 turn）
-- 调用者无需区分，spawn 内部自动判断
-
-### 任务清单
-
-- ✅ **T38.1** `agent/subagent.py` — 新增 `SubagentMeta` dataclass + `_task_meta` 字典
-- ✅ **T38.2** `agent/subagent.py` — `spawn()` 创建 meta，`_cleanup` 保留 meta 和 `_session_tasks`
-- ✅ **T38.3** `agent/subagent.py` — `_run_subagent()` 增加 `inject_queue` + `resume_messages` 参数，inject checkpoint
-- ✅ **T38.4** `agent/subagent.py` — `_run_subagent()` 结束时更新 `meta.status`
-- ✅ **T38.5** `agent/subagent.py` — 新增 `_check_ownership()` + `follow_up()` 方法
-- ✅ **T38.6** `agent/tools/spawn.py` — 新增 `follow_up` 参数，`execute()` 路由
-- ✅ **T38.7** `tests/test_spawn_follow_up.py` — 26 项测试全部通过
-  - SubagentMeta: 2 项（默认值/自定义值）
-  - 生命周期: 6 项（meta 创建/保留/session_tasks 保留/status completed/max_iterations/failed）
-  - 鉴权: 3 项（合法/错误 session/未知 task_id）
-  - Inject: 2 项（运行中注入/多条消息 drain）
-  - Resume: 5 项（正常恢复/自定义 max_iterations/persist=False 报错/无 SessionManager 报错/多次 resume）
-  - 安全: 2 项（错误 session/未知 task_id）
-  - SpawnTool: 5 项（参数 schema/description/路由 follow_up/路由 spawn/max_iterations 传递）
-  - TaskKeeper: 1 项（resume 注册 task_keeper）
-- ✅ **T38.8** 全量回归: 513 passed, 1 skipped, 0 failed
-- ✅ **T38.9** `docs/REQUIREMENTS.md` — 新增 §36 章节
-- ✅ **T38.10** `docs/ARCHITECTURE.md` — 新增 §十五 章节
-- ✅ **T38.11** DEVLOG.md 本条记录
-
-### 影响文件
-
-| 文件 | 改动 |
-|------|------|
-| `agent/subagent.py` | SubagentMeta、_task_meta、inject checkpoint、follow_up()、_check_ownership() |
-| `agent/tools/spawn.py` | follow_up 参数、execute() 路由、description 更新 |
-| `tests/test_spawn_follow_up.py` | 26 项新测试 |
-| `docs/DESIGN_SPAWN_FOLLOWUP.md` | 设计文档 |
-| `docs/REQUIREMENTS.md` | §36 章节 |
-| `docs/ARCHITECTURE.md` | §十五 章节 |
-| `docs/DEVLOG.md` | Phase 38 记录 |
-
----
-
-## Phase 39: §37 Spawn stop — 主动停止 subagent
-
-> 需求：§37 | 架构：§十六 | 日期：2026-03-10
-
-### 任务清单
-
-- [x] **T39.1** `agent/subagent.py` — 新增 `_stop_flags: set[str]`，在 `__init__` 初始化
-- [x] **T39.2** `agent/subagent.py` — 新增 `stop_subagent()` 方法（鉴权 + 状态判断 + cancel + 持久化）
-- [x] **T39.3** `agent/subagent.py` — `_run_subagent()` CancelledError 处理中区分 stop vs 其他 cancel，stop 时跳过 announce
-- [x] **T39.4** `agent/tools/spawn.py` — 新增 `stop` 参数，`execute()` 路由，`parameters` / `description` 更新
-- [x] **T39.5** `tests/test_spawn_stop.py` — 19 项测试全部通过
-  - StopRunning: 2 项（运行中 stop / 空 reason）
-  - StopAlreadyFinished: 3 项（completed / failed / already stopped）
-  - StopOwnership: 2 项（错误 session / 未知 task_id）
-  - StopNoAnnounce: 2 项（stop 不 announce / 普通 cancel 仍 announce）
-  - StopThenResume: 1 项（stop 后 follow_up resume）
-  - StopPersistence: 2 项（persist=True 写入 / persist=False 不写入）
-  - StopFlagsCleanup: 1 项（flag 清理）
-  - SpawnToolStop: 5 项（参数 schema / description / 路由 stop / 空 task / 互斥检查 / 正常 spawn）
-- [x] **T39.6** 全量回归: 532 passed, 1 skipped, 0 failed
-- [x] **T39.7** Git commit: `0fd78a4`
-
----
-
 ## Phase 40: Spawn status — 查询 subagent 执行状态 (§38)
 
 > 需求：§38 | 架构：§十七 | 日期：2026-03-10
@@ -274,3 +202,40 @@ spawn subagent 当前是"发射后不管"模式。需要支持向已有 subagent
 - [x] **T40.7** Git commit: `16a4c96` (§38) + `15b1c7d` (§39)
 - [x] **T40.8** Backlog §39: SpawnTool.execute() 未知参数检查（`**kwargs` 非空时报错）
 - [x] **T40.9** 全量回归: 566 passed, 1 skipped, 0 failed; Git commit
+
+---
+
+## Phase 42: §41-§45 核心层基础改动 ✅
+
+**日期**: 2026-03-11
+**需求**: §41-§45（`requirements/s40-s49.md`）
+
+### 任务清单
+
+- [x] §41 Usage 日志记录补充 provider name 字段
+- [x] §42 LLM 连接超时优化 — 拆分 connect/read timeout
+- [x] §43 修复轮次超限软提醒 — budget alert 改 user role
+- [x] §44 Spawn status 异常诊断字段
+- [x] §45 Subagent 返回内容标记隐藏 system prompt
+- [x] 新增测试: `tests/test_phase42.py` — 28 项全通过
+- [x] 全量回归: 623 passed, 1 skipped
+
+### 改动文件
+
+| 文件 | 改动 |
+|------|------|
+| `nanobot/usage/recorder.py` | §41: SCHEMA_SQL + _MIGRATION_SQL + record() 新增 provider 字段 |
+| `nanobot/providers/litellm_provider.py` | §41: `self.provider_name` 属性; §42: `_LLM_TIMEOUT` → `httpx.Timeout` |
+| `nanobot/agent/loop.py` | §41: record() 传 provider; §43: budget alert 改 user role |
+| `nanobot/agent/subagent.py` | §41: record() 传 provider; §43: budget alert 改 user role; §44: SubagentMeta 新增 error 字段 + _chat_with_retry task_id + get_status 输出 + resume 重置; §45: _announce_result 添加 `<!-- nanobot:system -->` |
+| `tests/test_phase42.py` | 新测试文件（28 项测试） |
+| `tests/test_budget_alert.py` | §43: 更新 budget alert 测试（role + content 格式） |
+| `tests/test_subagent.py` | §43: 更新 budget alert 检测逻辑（system → user） |
+
+### 设计要点
+
+- **§41**: `getattr(_provider, "provider_name", "")` 兼容 ProviderPool 和 LiteLLMProvider
+- **§42**: `httpx.Timeout` 对象拆分 connect(30s)/read(120s)，LiteLLM 原生支持
+- **§43**: user role 在对话尾部，与 §32 cache breakpoint #3 兼容；`[System Notice]` 前缀区分
+- **§44**: 只记录 LLM 调用异常（_chat_with_retry 层），不记录工具执行异常
+- **§45**: HTML 注释 `<!-- nanobot:system -->` 不影响 LLM 行为

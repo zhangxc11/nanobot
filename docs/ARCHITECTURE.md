@@ -82,6 +82,11 @@ nanobot 核心是一个可嵌入的 AI Agent 框架，支持多 channel（CLI/We
 | §十六 | Spawn stop | spawn.md |
 | §十七 | Spawn status | spawn.md |
 | §十八 | SubagentManager 单例化 + 跨进程恢复 | spawn.md |
+| §十九 | Spawn status 异常诊断字段 (§44) | spawn.md |
+| §二十 | Usage 日志 provider 字段 (§41) | core-loop.md |
+| §二十一 | LLM 连接超时拆分 (§42) | provider.md |
+| §二十二 | Budget alert user role (§43) | core-loop.md |
+| §二十三 | Subagent announce 隐藏标记 (§45) | spawn.md |
 
 ---
 

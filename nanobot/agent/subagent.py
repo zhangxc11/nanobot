@@ -70,6 +70,7 @@ class SubagentMeta:
 
     §36: Created at spawn time, persists in memory until process restart.
     §38: Added created_at, finished_at, current_iteration, last_tool_name.
+    §44: Added error_count, last_error, last_error_time for diagnostics.
     """
     task_id: str
     subagent_session_key: str
@@ -85,6 +86,10 @@ class SubagentMeta:
     finished_at: str | None = None          # ISO timestamp, set when reaching terminal status
     current_iteration: int = 0              # Updated each iteration in _run_subagent
     last_tool_name: str | None = None       # Updated after each tool execution
+    # §44: Error diagnostic fields (LLM call errors only)
+    error_count: int = 0
+    last_error: str | None = None
+    last_error_time: str | None = None
 
 
 def _budget_alert_threshold(max_iterations: int) -> int:
@@ -328,20 +333,23 @@ class SubagentManager:
                     self._task_meta[task_id].current_iteration = iteration
 
                 # Budget alert injection (once, when remaining == threshold)
+                # §43: Use "user" role for LLM visibility
                 remaining = max_iterations - iteration
                 if remaining == threshold:
                     budget_msg = {
-                        "role": "system",
+                        "role": "user",
                         "content": (
-                            f"⚠️ Budget alert: You have {remaining} tool call iterations "
-                            f"remaining (out of {max_iterations}). Please prioritize saving "
-                            f"your work state and wrapping up gracefully."
+                            f"[System Notice] ⚠️ You have {remaining} tool-call iterations "
+                            f"remaining out of {max_iterations}. "
+                            f"Prioritize completing your current task. If you cannot finish "
+                            f"in time, summarize progress so far and present what you have. "
+                            f"Do not acknowledge this notice — continue working."
                         ),
                     }
                     messages.append(budget_msg)
 
                 # LLM call with retry
-                response = await self._chat_with_retry(messages, tools)
+                response = await self._chat_with_retry(messages, tools, task_id=task_id)
 
                 # ── Usage recording ──
                 if response.usage and self.usage_recorder:
@@ -358,6 +366,7 @@ class SubagentManager:
                             finished_at=now,
                             cache_creation_input_tokens=response.usage.get("cache_creation_input_tokens", 0),
                             cache_read_input_tokens=response.usage.get("cache_read_input_tokens", 0),
+                            provider=getattr(self.provider, "provider_name", ""),  # §41
                         )
                     except Exception as e:
                         logger.warning("Subagent [{}] usage recording failed: {}", task_id, e)
@@ -505,6 +514,7 @@ class SubagentManager:
         self,
         messages: list[dict[str, Any]],
         tools: ToolRegistry,
+        task_id: str | None = None,
     ) -> Any:
         """Call provider.chat() with exponential backoff retry for transient errors.
 
@@ -512,6 +522,9 @@ class SubagentManager:
         timeout errors, slow for rate-limit/overload.
         Retries up to ``_MAX_RETRIES`` times.
         Non-retryable errors are raised immediately.
+
+        §44: When *task_id* is provided, LLM call errors are recorded in the
+        corresponding SubagentMeta for diagnostic queries via get_status().
         """
         last_error: Exception | None = None
         for attempt in range(_MAX_RETRIES + 1):
@@ -527,6 +540,13 @@ class SubagentManager:
                     kwargs["reasoning_effort"] = self.reasoning_effort
                 return await self.provider.chat(**kwargs)
             except Exception as e:
+                # §44: Record LLM error in meta for diagnostics
+                if task_id and task_id in self._task_meta:
+                    meta = self._task_meta[task_id]
+                    meta.error_count += 1
+                    meta.last_error = str(e)[:500]
+                    meta.last_error_time = datetime.now().isoformat()
+
                 if attempt < _MAX_RETRIES and _is_retryable(e):
                     fast = is_fast_retryable(e)
                     delay = compute_retry_delay(attempt, fast)
@@ -660,6 +680,12 @@ class SubagentManager:
             lines.append(f"- **finished_at**: {meta.finished_at}")
         if meta.last_tool_name:
             lines.append(f"- **last_tool**: {meta.last_tool_name}")
+        # §44: Error diagnostic fields
+        lines.append(f"- **error_count**: {meta.error_count}")
+        if meta.last_error:
+            lines.append(f"- **last_error**: {meta.last_error}")
+        if meta.last_error_time:
+            lines.append(f"- **last_error_time**: {meta.last_error_time}")
         return "\n".join(lines)
 
     def list_subagents(self, parent_session_key: str) -> str:
@@ -800,6 +826,9 @@ class SubagentManager:
             meta.finished_at = None              # §38: reset for new run
             meta.current_iteration = 0           # §38: reset iteration counter
             meta.last_tool_name = None           # §38: reset last tool
+            meta.error_count = 0                 # §44: reset error diagnostics
+            meta.last_error = None
+            meta.last_error_time = None
 
             # Start new background task
             bg_task = asyncio.create_task(
@@ -918,7 +947,10 @@ class SubagentManager:
         """
         status_text = "completed successfully" if status == "ok" else "failed"
 
-        announce_content = f"""[Subagent Result Notification]
+        # §45: Insert hidden system prompt marker before the guiding prompt.
+        # This marker allows downstream consumers to identify the system-injected
+        # portion of the announce message without affecting LLM behavior.
+        announce_content = f"""<!-- nanobot:system -->[Subagent Result Notification]
 A previously spawned subagent '{label}' has {status_text}.
 
 Original task: {task}

@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS token_usage (
     started_at        TEXT NOT NULL,
     finished_at       TEXT NOT NULL,
     cache_creation_input_tokens INTEGER DEFAULT 0,
-    cache_read_input_tokens     INTEGER DEFAULT 0
+    cache_read_input_tokens     INTEGER DEFAULT 0,
+    provider          TEXT DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_usage_session  ON token_usage(session_key);
@@ -44,6 +45,7 @@ CREATE INDEX IF NOT EXISTS idx_usage_model    ON token_usage(model);
 _MIGRATION_SQL = [
     "ALTER TABLE token_usage ADD COLUMN cache_creation_input_tokens INTEGER DEFAULT 0",
     "ALTER TABLE token_usage ADD COLUMN cache_read_input_tokens INTEGER DEFAULT 0",
+    "ALTER TABLE token_usage ADD COLUMN provider TEXT DEFAULT ''",
 ]
 
 
@@ -115,6 +117,7 @@ class UsageRecorder:
         finished_at: str = "",
         cache_creation_input_tokens: int = 0,
         cache_read_input_tokens: int = 0,
+        provider: str = "",
     ) -> int:
         """Insert a usage record.  Returns the new row id.
 
@@ -128,17 +131,19 @@ class UsageRecorder:
                     INSERT INTO token_usage
                         (session_key, model, prompt_tokens, completion_tokens,
                          total_tokens, llm_calls, started_at, finished_at,
-                         cache_creation_input_tokens, cache_read_input_tokens)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         cache_creation_input_tokens, cache_read_input_tokens,
+                         provider)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (session_key, model, prompt_tokens, completion_tokens,
                      total_tokens, llm_calls, started_at, finished_at,
-                     cache_creation_input_tokens, cache_read_input_tokens),
+                     cache_creation_input_tokens, cache_read_input_tokens,
+                     provider),
                 )
                 row_id = cur.lastrowid
                 logger.debug(
-                    "Recorded usage: session={} model={} tokens={} cache_create={} cache_read={} (row {})",
-                    session_key, model, total_tokens,
+                    "Recorded usage: session={} model={} provider={} tokens={} cache_create={} cache_read={} (row {})",
+                    session_key, model, provider, total_tokens,
                     cache_creation_input_tokens, cache_read_input_tokens, row_id,
                 )
                 return row_id

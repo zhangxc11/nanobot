@@ -82,7 +82,12 @@ local    ← 本地自定义改动（基于 main）
 | §37 | Spawn stop | ✅ | [requirements/s31-s39.md](requirements/s31-s39.md) |
 | §38 | Spawn status | ✅ | [requirements/s31-s39.md](requirements/s31-s39.md) |
 | §39 | SpawnTool 未知参数检查 | ✅ | [requirements/s31-s39.md](requirements/s31-s39.md) |
-| §40 | SubagentManager 单例化 + 跨进程恢复 | 🔜 | [requirements/s40-s49.md](requirements/s40-s49.md) |
+| §40 | SubagentManager 单例化 + 跨进程恢复 | ✅ | [requirements/s40-s49.md](requirements/s40-s49.md) |
+| §41 | Usage 日志记录补充 provider name 字段 | ✅ | [requirements/s40-s49.md](requirements/s40-s49.md) |
+| §42 | LLM 连接超时优化 — 拆分 connect/read timeout | ✅ | [requirements/s40-s49.md](requirements/s40-s49.md) |
+| §43 | 修复轮次超限软提醒 — budget alert 改 user role | ✅ | [requirements/s40-s49.md](requirements/s40-s49.md) |
+| §44 | Spawn status 异常诊断字段 | ✅ | [requirements/s40-s49.md](requirements/s40-s49.md) |
+| §45 | Subagent 返回内容标记隐藏 system prompt | ✅ | [requirements/s40-s49.md](requirements/s40-s49.md) |
 
 ---
 

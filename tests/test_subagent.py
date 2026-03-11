@@ -237,13 +237,17 @@ class TestBudgetAlertInjection:
                 except asyncio.TimeoutError:
                     pass
 
-        # Check that at some point a system message was in the messages
+        # Check that at some point a user-role budget alert was in the messages
+        # §43: Budget alert changed from system to user role
         found_budget_alert = False
         for msg_roles in messages_captured:
-            if "system" in msg_roles[2:]:  # Skip initial system prompt
+            # Count user messages after the initial [system, user] pair
+            # The budget alert adds an extra "user" message before the LLM call
+            user_count = sum(1 for r in msg_roles if r == "user")
+            if user_count >= 2:  # Initial user + budget alert user
                 found_budget_alert = True
                 break
-        assert found_budget_alert, "Budget alert system message should have been injected"
+        assert found_budget_alert, "Budget alert user message should have been injected"
 
 
 # ── Tests: LLM retry ────────────────────────────────────────────────────────
