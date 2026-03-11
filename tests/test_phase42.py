@@ -659,7 +659,7 @@ class TestAnnounceSystemMarker:
         )
 
         assert "Review this result" in captured_content
-        assert "automated system notification" in captured_content
+        assert "Do not repeat work" in captured_content
 
     @pytest.mark.asyncio
     async def test_announce_via_session_messenger_has_marker(self):
