@@ -36,6 +36,15 @@ if TYPE_CHECKING:
     from nanobot.cron.service import CronService
 
 
+def _format_tokens(n: int) -> str:
+    """Format token count to human-readable string (e.g. 12.3K)."""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}K"
+    return str(n)
+
+
 class AgentLoop:
     """
     The agent loop is the core processing engine.
@@ -942,6 +951,19 @@ class AgentLoop:
                     f"**{usage['total_tokens']:,}** total "
                     f"({usage['llm_calls']} 次调用)"
                 )
+                # Append cache info if available
+                cache_read = usage.get('cache_read_input_tokens', 0)
+                cache_creation = usage.get('cache_creation_input_tokens', 0)
+                if cache_read or cache_creation:
+                    cache_parts = []
+                    if cache_read:
+                        cache_parts.append(f"缓存命中: {_format_tokens(cache_read)}")
+                    if cache_creation:
+                        cache_parts.append(f"缓存写入: {_format_tokens(cache_creation)}")
+                    uncached = usage['prompt_tokens'] - cache_read - cache_creation
+                    if uncached > 0:
+                        cache_parts.append(f"未缓存: {_format_tokens(uncached)}")
+                    token_line += "\n**缓存**: " + " · ".join(cache_parts)
             except Exception:
                 token_line = "查询失败"
         else:

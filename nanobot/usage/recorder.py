@@ -182,7 +182,9 @@ class UsageRecorder:
                 SELECT COALESCE(SUM(prompt_tokens), 0)     AS prompt_tokens,
                        COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
                        COALESCE(SUM(total_tokens), 0)      AS total_tokens,
-                       COALESCE(SUM(llm_calls), 0)         AS llm_calls
+                       COALESCE(SUM(llm_calls), 0)         AS llm_calls,
+                       COALESCE(SUM(cache_creation_input_tokens), 0) AS cache_creation_input_tokens,
+                       COALESCE(SUM(cache_read_input_tokens), 0)     AS cache_read_input_tokens
                 FROM token_usage WHERE session_key = ?
                 """,
                 (session_key,),
@@ -193,4 +195,6 @@ class UsageRecorder:
                 "completion_tokens": row["completion_tokens"],
                 "total_tokens": row["total_tokens"],
                 "llm_calls": row["llm_calls"],
+                "cache_creation_input_tokens": row["cache_creation_input_tokens"],
+                "cache_read_input_tokens": row["cache_read_input_tokens"],
             }
