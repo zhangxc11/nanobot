@@ -164,6 +164,20 @@
 - **批量恢复**: `_load_disk_subagents()` glob 匹配前缀，用于 `list_subagents()`
 - **Gateway 模式不受影响**: `subagent_manager=None`（默认）走原有路径
 
+### §40 Hotfix: subagent usage_recorder 丢失 (2026-03-11)
+
+**根因**: `_get_subagent_manager()` 初始实现未传 `usage_recorder`，singleton 的 `usage_recorder=None`，导致所有 subagent 的 usage 数据不再记录到 SQLite。
+
+**修复**:
+1. web-chat `worker.py`: `_get_subagent_manager()` 传入 `usage_recorder=UsageRecorder()`
+2. nanobot 核心 `loop.py`: 外部传入 `subagent_manager` 且 `usage_recorder=None` 时打 warning 日志
+3. 新增 4 项测试（`test_spawn_singleton.py` 25→29）:
+   - `test_external_with_usage_recorder` — 外部 manager 带 recorder 时正确使用
+   - `test_external_without_usage_recorder_warns` — 外部 manager 无 recorder 时代码不报错
+   - `test_default_inherits_usage_recorder` — 默认模式正确传递 recorder
+   - `test_default_no_usage_recorder` — 默认模式无 recorder 时 subagents.usage_recorder=None
+4. 全量回归: 595 passed, 1 skipped
+
 ---
 
 ## Phase 38: Spawn follow_up — 向 subagent 追加消息 (§36) ✅

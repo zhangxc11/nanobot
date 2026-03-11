@@ -106,6 +106,14 @@ class AgentLoop:
         # otherwise create a new one (gateway mode, default behavior).
         if subagent_manager is not None:
             self.subagents = subagent_manager
+            # §40 fix: warn if external SubagentManager has no usage_recorder —
+            # this was the root cause of subagent usage data loss.
+            if self.subagents.usage_recorder is None:
+                logger.warning(
+                    "External SubagentManager has usage_recorder=None; "
+                    "subagent usage will NOT be recorded. "
+                    "Pass usage_recorder=UsageRecorder() when creating the singleton."
+                )
         else:
             self.subagents = SubagentManager(
                 provider=provider,
