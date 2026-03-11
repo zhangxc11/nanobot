@@ -20,6 +20,9 @@ Stopped subagents skip announce and can be resumed via follow_up.
 - _check_ownership: disk fallback when task_id not in memory.
 
 §46: Spawn concurrency limit — queue excess spawn requests and auto-dequeue.
+
+§47: SubagentEventCallback protocol — 4 lifecycle callbacks (spawned,
+progress, retry, done) for external consumers to track subagent state.
 """
 
 import asyncio
@@ -28,7 +31,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Protocol, runtime_checkable
 
 from loguru import logger
 
@@ -64,6 +67,34 @@ def _is_retryable(error: Exception) -> bool:
     Delegates to shared ``agent.retry.is_retryable()`` (Phase 28).
     """
     return _is_retryable_shared(error)
+
+
+@runtime_checkable
+class SubagentEventCallback(Protocol):
+    """Protocol for receiving subagent lifecycle events.
+
+    §47: Defines 4 callback points that external consumers (e.g. web-chat
+    Worker) implement to track subagent state in real time.
+
+    All methods are synchronous and should be lightweight (no I/O).
+    Implementations maintain their own state (e.g. a registry dict).
+    """
+
+    def on_subagent_spawned(self, meta: "SubagentMeta") -> None:
+        """Called when a subagent is created (including queued tasks)."""
+        ...
+
+    def on_subagent_progress(self, task_id: str, iteration: int, max_iterations: int, last_tool: str | None) -> None:
+        """Called at the start of each iteration in the subagent's agent loop."""
+        ...
+
+    def on_subagent_retry(self, task_id: str, attempt: int, max_retries: int, delay: float, error: str, is_fast: bool) -> None:
+        """Called before an LLM retry sleep in the subagent."""
+        ...
+
+    def on_subagent_done(self, task_id: str, status: str, error: str | None) -> None:
+        """Called when a subagent reaches a terminal state (completed/failed/stopped/max_iterations)."""
+        ...
 
 
 @dataclass
@@ -157,6 +188,8 @@ class SubagentManager:
         read_file_hard_limit: int | None = None,
         # §46 addition
         max_concurrency: int = 4,
+        # §47 addition
+        event_callback: SubagentEventCallback | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         self.provider = provider
@@ -183,6 +216,8 @@ class SubagentManager:
         # §46: Concurrency control
         self._max_concurrency = max(1, max_concurrency)
         self._queue: list[QueuedSpawn] = []              # FIFO queue for excess spawns
+        # §47: Event callback for external consumers
+        self._event_callback = event_callback
 
     @property
     def _running_count(self) -> int:
@@ -276,6 +311,12 @@ class SubagentManager:
 
             logger.info("Subagent [{}] queued (position #{}, concurrency {}/{})",
                         task_id, position, self._running_count, self._max_concurrency)
+            # §47: Notify callback even for queued tasks
+            if self._event_callback is not None:
+                try:
+                    self._event_callback.on_subagent_spawned(meta)
+                except Exception as exc:
+                    logger.warning("event_callback.on_subagent_spawned failed: {}", exc)
             return (
                 f"Subagent queued (position #{position}). "
                 f"Current concurrency limit: {self._max_concurrency}. "
@@ -295,6 +336,13 @@ class SubagentManager:
             created_at=datetime.now().isoformat(),  # §38
         )
         self._task_meta[task_id] = meta
+
+        # §47: Notify callback for newly spawned (running) task
+        if self._event_callback is not None:
+            try:
+                self._event_callback.on_subagent_spawned(meta)
+            except Exception as exc:
+                logger.warning("event_callback.on_subagent_spawned failed: {}", exc)
 
         self._start_subagent_task(task_id, task, display_label, origin,
                                   effective_max, persist, subagent_key,
@@ -459,6 +507,14 @@ class SubagentManager:
                 if task_id in self._task_meta:
                     self._task_meta[task_id].current_iteration = iteration
 
+                # §47: Notify progress callback
+                if self._event_callback is not None:
+                    try:
+                        last_tool = self._task_meta[task_id].last_tool_name if task_id in self._task_meta else None
+                        self._event_callback.on_subagent_progress(task_id, iteration, max_iterations, last_tool)
+                    except Exception as exc:
+                        logger.warning("event_callback.on_subagent_progress failed: {}", exc)
+
                 # Budget alert injection (once, when remaining == threshold)
                 # §43: Use "user" role for LLM visibility
                 remaining = max_iterations - iteration
@@ -590,11 +646,23 @@ class SubagentManager:
                 if task_id in self._task_meta:
                     self._task_meta[task_id].status = "max_iterations"
                     self._task_meta[task_id].finished_at = datetime.now().isoformat()  # §38
+                # §47: Notify done callback
+                if self._event_callback is not None:
+                    try:
+                        self._event_callback.on_subagent_done(task_id, "max_iterations", None)
+                    except Exception as exc:
+                        logger.warning("event_callback.on_subagent_done failed: {}", exc)
             else:
                 # §36: Update meta status
                 if task_id in self._task_meta:
                     self._task_meta[task_id].status = "completed"
                     self._task_meta[task_id].finished_at = datetime.now().isoformat()  # §38
+                # §47: Notify done callback
+                if self._event_callback is not None:
+                    try:
+                        self._event_callback.on_subagent_done(task_id, "completed", None)
+                    except Exception as exc:
+                        logger.warning("event_callback.on_subagent_done failed: {}", exc)
 
             logger.info("Subagent [{}] completed successfully (iterations: {}/{})",
                          task_id, iteration, max_iterations)
@@ -610,12 +678,24 @@ class SubagentManager:
                 if task_id in self._task_meta:
                     self._task_meta[task_id].status = "stopped"
                     self._task_meta[task_id].finished_at = datetime.now().isoformat()  # §38
+                # §47: Notify done callback
+                if self._event_callback is not None:
+                    try:
+                        self._event_callback.on_subagent_done(task_id, "stopped", None)
+                    except Exception as exc:
+                        logger.warning("event_callback.on_subagent_done failed: {}", exc)
                 logger.info("Subagent [{}] stopped by parent session", task_id)
             else:
                 # Other cancellation (e.g. cancel_by_session) — announce error
                 if task_id in self._task_meta:
                     self._task_meta[task_id].status = "failed"
                     self._task_meta[task_id].finished_at = datetime.now().isoformat()  # §38
+                # §47: Notify done callback
+                if self._event_callback is not None:
+                    try:
+                        self._event_callback.on_subagent_done(task_id, "failed", "Task was cancelled")
+                    except Exception as exc:
+                        logger.warning("event_callback.on_subagent_done failed: {}", exc)
                 logger.warning("Subagent [{}] cancelled", task_id)
                 try:
                     await self._announce_result(
@@ -631,6 +711,12 @@ class SubagentManager:
             if task_id in self._task_meta:
                 self._task_meta[task_id].status = "failed"
                 self._task_meta[task_id].finished_at = datetime.now().isoformat()  # §38
+            # §47: Notify done callback
+            if self._event_callback is not None:
+                try:
+                    self._event_callback.on_subagent_done(task_id, "failed", str(e)[:500])
+                except Exception as exc:
+                    logger.warning("event_callback.on_subagent_done failed: {}", exc)
             error_msg = f"Error: {str(e)}"
             logger.error("Subagent [{}] failed: {}", task_id, e)
             await self._announce_result(task_id, label, task, error_msg, origin, "error",
@@ -682,6 +768,14 @@ class SubagentManager:
                         "Subagent LLM retry {}/{} ({}) after {:.0f}s: {}",
                         attempt + 1, _MAX_RETRIES, retry_type, delay, e,
                     )
+                    # §47: Notify retry callback (only for subagent tasks)
+                    if task_id and self._event_callback is not None:
+                        try:
+                            self._event_callback.on_subagent_retry(
+                                task_id, attempt + 1, _MAX_RETRIES, delay, str(e)[:500], fast,
+                            )
+                        except Exception as exc:
+                            logger.warning("event_callback.on_subagent_retry failed: {}", exc)
                     await asyncio.sleep(delay)
                     last_error = e
                 else:
@@ -1029,6 +1123,12 @@ class SubagentManager:
             self._queue = [q for q in self._queue if q.task_id != task_id]
             meta.status = "stopped"
             meta.finished_at = datetime.now().isoformat()
+            # §47: Notify done callback for stopped queued task
+            if self._event_callback is not None:
+                try:
+                    self._event_callback.on_subagent_done(task_id, "stopped", None)
+                except Exception as exc:
+                    logger.warning("event_callback.on_subagent_done failed: {}", exc)
             logger.info("Stopped queued subagent [{}] (id: {}){}", meta.label, task_id,
                         f": {reason}" if reason else "")
             # §46: Check if any queued tasks can now start

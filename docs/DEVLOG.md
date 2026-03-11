@@ -258,3 +258,33 @@
 - **done callback 触发 dequeue**: task 完成时 cleanup callback 调用 `_try_dequeue()`，包括 follow_up resume 的 task
 - **queued 任务 stop**: 直接从 `_queue` 移除，不创建 asyncio.Task，设置 stopped 状态
 - **线程安全**: asyncio 单线程模型，`_queue` 和 `_running_tasks` 无竞态
+
+## Phase 44: SubagentEventCallback 协议 (§47) ✅
+
+**日期**: 2026-03-11
+
+### 目标
+
+为 subagent 生命周期定义 4 个回调点（spawned/progress/retry/done），
+供 web-chat Worker 等外部消费者实时追踪 subagent 状态。
+
+### 任务
+
+- [x] **T44.1** `nanobot/agent/subagent.py` — 新增 `SubagentEventCallback` Protocol（@runtime_checkable，4 个方法）
+- [x] **T44.2** `nanobot/agent/subagent.py` — `SubagentManager.__init__()` 新增 `event_callback` 参数
+- [x] **T44.3** `nanobot/agent/subagent.py` — `spawn()` 调用 `on_subagent_spawned`（running + queued）
+- [x] **T44.4** `nanobot/agent/subagent.py` — `_run_subagent()` 每次 iteration 调用 `on_subagent_progress`
+- [x] **T44.5** `nanobot/agent/subagent.py` — `_chat_with_retry()` 重试前调用 `on_subagent_retry`
+- [x] **T44.6** `nanobot/agent/subagent.py` — 所有终态调用 `on_subagent_done`（completed/failed/stopped/max_iterations + queued stop）
+- [x] **T44.7** `nanobot/agent/loop.py` — `AgentLoop.__init__()` 新增 `on_iteration` 回调参数，主循环每次迭代调用
+- [x] **T44.8** `tests/test_subagent_event_callback.py` — 18 项测试全部通过
+- [x] **T44.9** 全量回归: 678 passed, 1 skipped
+- [x] **T44.10** Git commit
+
+### 改动文件
+
+| 文件 | 改动 |
+|------|------|
+| `nanobot/agent/subagent.py` | 新增 `SubagentEventCallback` Protocol；`SubagentManager` 新增 `event_callback` 参数；spawn/iteration/retry/done 4 处回调 |
+| `nanobot/agent/loop.py` | `AgentLoop` 新增 `on_iteration` 参数，主循环每次迭代调用 |
+| `tests/test_subagent_event_callback.py` | 新测试文件（18 项测试） |

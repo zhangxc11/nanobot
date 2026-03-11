@@ -86,6 +86,7 @@ class AgentLoop:
         read_file_hard_limit: int | None = None,
         subagent_manager: "SubagentManager | None" = None,  # §40: external singleton
         spawn_max_concurrency: int = 4,  # §46: spawn concurrency limit
+        on_iteration: "Callable[[int, int, str | None], None] | None" = None,  # §47: iteration callback
     ):
         from nanobot.config.schema import ExecToolConfig
         self.bus = bus
@@ -108,6 +109,7 @@ class AgentLoop:
         self.detail_logger = detail_logger
         self.audit_logger = audit_logger
         self.session_messenger = session_messenger
+        self._on_iteration = on_iteration  # §47: iteration callback
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
@@ -391,6 +393,14 @@ class AgentLoop:
 
         while iteration < self.max_iterations:
             iteration += 1
+
+            # §47: Notify on_iteration callback
+            if self._on_iteration is not None:
+                try:
+                    _last_tool = tools_used[-1] if tools_used else None
+                    self._on_iteration(iteration, self.max_iterations, _last_tool)
+                except Exception:
+                    pass  # Callback errors must not break the agent loop
 
             # ── Budget alert: warn LLM when iterations are running low ──
             # §43: Use "user" role so the alert is visible to the LLM at the

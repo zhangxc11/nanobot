@@ -89,6 +89,7 @@ local    ← 本地自定义改动（基于 main）
 | §44 | Spawn status 异常诊断字段 | ✅ | [requirements/s40-s49.md](requirements/s40-s49.md) |
 | §45 | Subagent 返回内容标记隐藏 system prompt | ✅ | [requirements/s40-s49.md](requirements/s40-s49.md) |
 | §46 | Spawn 并发限制 | ✅ | [requirements/s40-s49.md](requirements/s40-s49.md) |
+| §47 | SubagentEventCallback 协议 | ✅ | [requirements/s40-s49.md](requirements/s40-s49.md) |
 
 ---
 
