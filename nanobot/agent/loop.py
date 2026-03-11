@@ -76,6 +76,7 @@ class AgentLoop:
         session_messenger: "Any | None" = None,
         read_file_hard_limit: int | None = None,
         subagent_manager: "SubagentManager | None" = None,  # §40: external singleton
+        spawn_max_concurrency: int = 4,  # §46: spawn concurrency limit
     ):
         from nanobot.config.schema import ExecToolConfig
         self.bus = bus
@@ -132,6 +133,7 @@ class AgentLoop:
                 task_keeper=subagent_task_keeper,
                 session_messenger=session_messenger,
                 read_file_hard_limit=read_file_hard_limit,
+                max_concurrency=spawn_max_concurrency,
             )
 
         self._running = False

@@ -67,6 +67,7 @@
 | Phase 35: Subagent 回报消息 role 回归 user (§35) | ✅ 已完成 | local |
 | Phase 37: read_file 大文件保护 (§34) | ✅ 已完成 | local |
 | Phase 42: 核心层基础改动 (§41-§45) | ✅ 已完成 | local |
+| Phase 43: Spawn 并发限制 (§46) | ✅ 已完成 | local |
 
 ---
 
@@ -131,6 +132,7 @@
 | 40 | Spawn status — 查询 subagent 执行状态 (§38) | ✅ | [devlog/phase-31-40.md](devlog/phase-31-40.md) |
 | 41 | §40 SubagentManager 单例化 + 跨进程 follow_up 恢复 | ✅ | *主文件* |
 | 42 | §41-§45 核心层基础改动 (Phase 42) | ✅ | *主文件* |
+| 43 | Spawn 并发限制 (§46) | ✅ | *主文件* |
 
 ---
 
@@ -180,29 +182,6 @@
    - `test_default_no_usage_recorder` — 默认模式无 recorder 时 subagents.usage_recorder=None
 4. 全量回归: 595 passed, 1 skipped
 
-## Phase 40: Spawn status — 查询 subagent 执行状态 (§38)
-
-> 需求：§38 | 架构：§十七 | 日期：2026-03-10
-
-### 任务清单
-
-- [x] **T40.1** `agent/subagent.py` — SubagentMeta 新增 4 字段：`created_at`, `finished_at`, `current_iteration`, `last_tool_name`
-- [x] **T40.2** `agent/subagent.py` — `spawn()` 中设置 `created_at`；`_run_subagent()` 中同步 `current_iteration`、`last_tool_name`；状态变更时设置 `finished_at`
-- [x] **T40.3** `agent/subagent.py` — 新增 `get_status()` 和 `list_subagents()` 方法
-- [x] **T40.4** `agent/tools/spawn.py` — 新增 `status` 参数，`execute()` 路由，互斥检查扩展，`parameters` / `description` 更新
-- [x] **T40.5** `tests/test_spawn_status.py` — 34 项测试全部通过
-  - SubagentMeta: 2 项（默认值/自定义值）
-  - get_status: 5 项（运行中/已完成/无 last_tool/鉴权错误 session/未知 task_id）
-  - list_subagents: 5 项（空列表/单个/多个排序/过滤 session/无 last_tool/长 label 截断）
-  - FieldUpdates: 6 项（created_at/iteration+last_tool/completed/failed/max_iterations/stopped 的 finished_at）
-  - ResumeResets: 1 项（resume 重置 §38 字段）
-  - SpawnToolStatus: 9 项（schema/description/路由 list/路由 task_id/未知 id/错误 session/互斥×3/正常 spawn）
-  - UnknownParamRejection: 4 项（单个/多个/阻止 spawn/已知参数正常）
-- [x] **T40.6** 全量回归: 566 passed, 1 skipped, 0 failed
-- [x] **T40.7** Git commit: `16a4c96` (§38) + `15b1c7d` (§39)
-- [x] **T40.8** Backlog §39: SpawnTool.execute() 未知参数检查（`**kwargs` 非空时报错）
-- [x] **T40.9** 全量回归: 566 passed, 1 skipped, 0 failed; Git commit
-
 ---
 
 ## Phase 42: §41-§45 核心层基础改动 ✅
@@ -239,3 +218,43 @@
 - **§43**: user role 在对话尾部，与 §32 cache breakpoint #3 兼容；`[System Notice]` 前缀区分
 - **§44**: 只记录 LLM 调用异常（_chat_with_retry 层），不记录工具执行异常
 - **§45**: HTML 注释 `<!-- nanobot:system -->` 不影响 LLM 行为
+
+---
+
+## Phase 43: Spawn 并发限制 (§46) ✅
+
+**日期**: 2026-03-11
+**需求**: §46（`requirements/s40-s49.md`）
+
+### 任务清单
+
+- [x] **T43.1** `nanobot/config/schema.py` — 新增 `SpawnConfig` with `max_concurrency: int = 4`；`Config` 新增 `spawn` 字段
+- [x] **T43.2** `nanobot/agent/subagent.py` — 新增 `QueuedSpawn` dataclass；SubagentManager 新增 `_queue`, `_max_concurrency`
+- [x] **T43.3** `nanobot/agent/subagent.py` — `spawn()` 检查并发 → 超限入队返回 queued 消息
+- [x] **T43.4** `nanobot/agent/subagent.py` — `_try_dequeue()` 出队方法 + task done callback 触发
+- [x] **T43.5** `nanobot/agent/subagent.py` — `stop_subagent()` 支持 queued 任务
+- [x] **T43.6** `nanobot/agent/subagent.py` — `get_status()` 和 `list_subagents()` 自动显示 queued 状态
+- [x] **T43.7** `nanobot/agent/loop.py` + `cli/commands.py` + `sdk/runner.py` — 传递 `max_concurrency` 参数
+- [x] **T43.8** `tests/test_spawn_concurrency.py` — 37 项测试全部通过
+- [x] **T43.9** 全量回归: 660 passed, 1 skipped
+- [x] **T43.10** Git commit
+
+### 改动文件
+
+| 文件 | 改动 |
+|------|------|
+| `nanobot/config/schema.py` | 新增 `SpawnConfig(Base)` with `max_concurrency: int = 4`；`Config` 新增 `spawn` 字段 |
+| `nanobot/agent/subagent.py` | 新增 `QueuedSpawn` dataclass；SubagentManager 新增 `_queue`, `_max_concurrency`, `_running_count` 属性；`spawn()` 并发检查+入队；`_start_subagent_task()` 提取；`_try_dequeue()` 出队方法；`stop_subagent()` 支持 queued；done callback 触发 dequeue |
+| `nanobot/agent/loop.py` | 新增 `spawn_max_concurrency` 参数，传递给 SubagentManager |
+| `nanobot/cli/commands.py` | 3 处 AgentLoop 实例化传递 `spawn_max_concurrency=config.spawn.max_concurrency` |
+| `nanobot/sdk/runner.py` | AgentLoop 实例化传递 `spawn_max_concurrency` |
+| `tests/test_spawn_concurrency.py` | 新测试文件（37 项测试） |
+
+### 设计要点
+
+- **并发粒度**: SubagentManager 实例级别（单个父 session 维度）
+- **`_running_count` 属性**: 统计 `_running_tasks` 中未 done 的 task 数，比 `len(_running_tasks)` 更准确
+- **`_start_subagent_task()`**: 从 `spawn()` 提取出来，供 `_try_dequeue()` 复用
+- **done callback 触发 dequeue**: task 完成时 cleanup callback 调用 `_try_dequeue()`，包括 follow_up resume 的 task
+- **queued 任务 stop**: 直接从 `_queue` 移除，不创建 asyncio.Task，设置 stopped 状态
+- **线程安全**: asyncio 单线程模型，`_queue` 和 `_running_tasks` 无竞态

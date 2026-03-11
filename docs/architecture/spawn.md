@@ -12,6 +12,9 @@
 | §十六 | Spawn stop — 主动停止 subagent |
 | §十七 | Spawn status — 查询 subagent 执行状态 |
 | §十八 | SubagentManager 单例化 + 跨进程恢复 |
+| §十九 | Spawn status 异常诊断字段 |
+| §二十三 | Subagent announce 隐藏标记 |
+| §二十四 | Spawn 并发限制 |
 
 ---
 
@@ -937,4 +940,88 @@ A previously spawned subagent '{label}' has {status_text}.
 - 下游消费者（前端/日志分析）可识别系统注入的引导 prompt 部分
 - HTML 注释不影响 LLM 对内容的理解
 - 旧数据不做迁移，只在新消息中添加
+
+---
+
+## §二十四 Spawn 并发限制 (§46)
+
+### 概述
+
+限制单个 SubagentManager 实例同时运行的 subagent 数量，超出时排队等待，FIFO 出队。
+
+### 数据结构
+
+```python
+@dataclass
+class QueuedSpawn:
+    """Queued spawn request waiting for a concurrency slot."""
+    task_id: str
+    task: str
+    label: str
+    origin: dict[str, str]
+    session_key: str | None
+    max_iterations: int
+    persist: bool
+    subagent_session_key: str
+
+class SubagentManager:
+    _queue: list[QueuedSpawn]       # FIFO 排队队列
+    _max_concurrency: int           # 并发上限（默认 4）
+```
+
+### 并发计数
+
+`_running_count` 属性统计当前 `status == "running"` 的 subagent 数量（通过 `_running_tasks` 中未 done 的 task 计数）。
+
+### spawn() 流程
+
+```
+spawn() 调用
+  ├─ 创建 SubagentMeta（status="queued" 或 "running"）
+  ├─ 检查 _running_count >= _max_concurrency?
+  │   ├─ YES → 创建 QueuedSpawn，入队，返回 queued 消息
+  │   └─ NO  → 正常启动 asyncio.Task（原有逻辑）
+  └─ 返回结果
+```
+
+### 出队机制
+
+`_try_dequeue()` 在以下时机调用：
+- `_run_subagent()` 完成时（正常/异常/取消）
+- `stop_subagent()` 对 queued 任务执行后
+
+```
+_try_dequeue():
+  while _queue 非空 AND _running_count < _max_concurrency:
+    取出队首 QueuedSpawn
+    更新对应 SubagentMeta.status = "running"
+    创建 asyncio.Task 启动 subagent
+```
+
+### stop queued 任务
+
+对 queued 状态的任务执行 stop 时：
+- 从 `_queue` 中移除
+- 设置 `meta.status = "stopped"`, `meta.finished_at = now`
+- 不创建 asyncio.Task
+- 调用 `_try_dequeue()` 检查是否有后续任务可出队
+
+### 配置
+
+```python
+class SpawnConfig(Base):
+    max_concurrency: int = 4
+
+class Config(BaseSettings):
+    spawn: SpawnConfig = Field(default_factory=SpawnConfig)
+```
+
+SubagentManager 构造函数新增 `max_concurrency: int = 4` 参数。
+AgentLoop 从 config 读取并传递。
+
+### 线程安全
+
+SubagentManager 在单个 asyncio 事件循环中运行，asyncio 本身是单线程的，
+所以 `_queue` 和 `_running_tasks` 的访问不需要额外的锁。
+`_try_dequeue()` 作为同步方法调用（内部创建 asyncio.Task），不会有竞态问题。
 

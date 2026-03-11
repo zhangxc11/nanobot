@@ -326,6 +326,12 @@ class ToolsConfig(Base):
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
 
+class SpawnConfig(Base):
+    """Spawn subagent configuration."""
+
+    max_concurrency: int = 4  # §46: Max concurrent running subagents per SubagentManager instance
+
+
 class Config(BaseSettings):
     """Root configuration for nanobot."""
 
@@ -334,6 +340,7 @@ class Config(BaseSettings):
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    spawn: SpawnConfig = Field(default_factory=SpawnConfig)  # §46: Spawn concurrency config
 
     @property
     def workspace_path(self) -> Path:

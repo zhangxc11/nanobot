@@ -18,6 +18,8 @@ Stopped subagents skip announce and can be resumed via follow_up.
 - _recover_meta: deterministic session key → O(1) file stat recovery.
 - _load_disk_subagents: glob-based batch recovery for list_subagents.
 - _check_ownership: disk fallback when task_id not in memory.
+
+§46: Spawn concurrency limit — queue excess spawn requests and auto-dequeue.
 """
 
 import asyncio
@@ -92,6 +94,24 @@ class SubagentMeta:
     last_error_time: str | None = None
 
 
+@dataclass
+class QueuedSpawn:
+    """§46: Queued spawn request waiting for a concurrency slot.
+
+    Stores all parameters needed to start the subagent when a slot
+    becomes available. Created when spawn() is called but concurrency
+    limit is reached.
+    """
+    task_id: str
+    task: str
+    label: str
+    origin: dict[str, str]
+    session_key: str | None
+    max_iterations: int
+    persist: bool
+    subagent_session_key: str
+
+
 def _budget_alert_threshold(max_iterations: int) -> int:
     """Calculate the budget alert threshold (remaining iterations).
 
@@ -135,6 +155,8 @@ class SubagentManager:
         session_messenger: "SessionMessenger | None" = None,
         # §34 addition
         read_file_hard_limit: int | None = None,
+        # §46 addition
+        max_concurrency: int = 4,
     ):
         from nanobot.config.schema import ExecToolConfig
         self.provider = provider
@@ -158,6 +180,14 @@ class SubagentManager:
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
         self._task_meta: dict[str, SubagentMeta] = {}   # task_id -> metadata (§36)
         self._stop_flags: set[str] = set()               # §37: task_ids being stopped
+        # §46: Concurrency control
+        self._max_concurrency = max(1, max_concurrency)
+        self._queue: list[QueuedSpawn] = []              # FIFO queue for excess spawns
+
+    @property
+    def _running_count(self) -> int:
+        """§46: Count currently running (not done) subagent tasks."""
+        return sum(1 for t in self._running_tasks.values() if not t.done())
 
     async def spawn(
         self,
@@ -171,6 +201,9 @@ class SubagentManager:
         persist: bool = True,
     ) -> str:
         """Spawn a subagent to execute a task in the background.
+
+        §46: If the concurrency limit is reached, the spawn request is queued
+        and will start automatically when a slot becomes available (FIFO).
 
         Parameters
         ----------
@@ -210,6 +243,45 @@ class SubagentManager:
             MAX_SUBAGENT_ITERATIONS,
         )
 
+        # §46: Check concurrency limit
+        if self._running_count >= self._max_concurrency:
+            # Queue this spawn request
+            meta = SubagentMeta(
+                task_id=task_id,
+                subagent_session_key=subagent_key,
+                parent_session_key=session_key,
+                label=display_label,
+                origin=origin,
+                status="queued",
+                max_iterations=effective_max,
+                persist=persist,
+                created_at=datetime.now().isoformat(),
+            )
+            self._task_meta[task_id] = meta
+            if session_key:
+                self._session_tasks.setdefault(session_key, set()).add(task_id)
+
+            queued = QueuedSpawn(
+                task_id=task_id,
+                task=task,
+                label=display_label,
+                origin=origin,
+                session_key=session_key,
+                max_iterations=effective_max,
+                persist=persist,
+                subagent_session_key=subagent_key,
+            )
+            self._queue.append(queued)
+            position = len(self._queue)
+
+            logger.info("Subagent [{}] queued (position #{}, concurrency {}/{})",
+                        task_id, position, self._running_count, self._max_concurrency)
+            return (
+                f"Subagent queued (position #{position}). "
+                f"Current concurrency limit: {self._max_concurrency}. "
+                f"It will start automatically when a slot becomes available."
+            )
+
         # §36: Create metadata for follow_up support
         meta = SubagentMeta(
             task_id=task_id,
@@ -224,9 +296,33 @@ class SubagentManager:
         )
         self._task_meta[task_id] = meta
 
+        self._start_subagent_task(task_id, task, display_label, origin,
+                                  effective_max, persist, subagent_key,
+                                  session_key, meta)
+
+        logger.info("Spawned subagent [{}]: {} (max_iterations={}, persist={})",
+                     task_id, display_label, effective_max, persist)
+        return f"Subagent [{display_label}] started (id: {task_id}). I'll notify you when it completes."
+
+    def _start_subagent_task(
+        self,
+        task_id: str,
+        task: str,
+        label: str,
+        origin: dict[str, str],
+        max_iterations: int,
+        persist: bool,
+        subagent_key: str,
+        session_key: str | None,
+        meta: SubagentMeta,
+    ) -> None:
+        """§46: Start an asyncio task for a subagent and register cleanup.
+
+        Extracted from spawn() to be reused by _try_dequeue().
+        """
         bg_task = asyncio.create_task(
-            self._run_subagent(task_id, task, display_label, origin,
-                               effective_max, persist, subagent_key,
+            self._run_subagent(task_id, task, label, origin,
+                               max_iterations, persist, subagent_key,
                                parent_session_key=session_key,
                                inject_queue=meta.inject_queue)
         )
@@ -246,12 +342,43 @@ class SubagentManager:
             self._running_tasks.pop(task_id, None)
             # §36: Do NOT remove from _session_tasks or _task_meta —
             # they are needed for follow_up ownership checks and resume.
+            # §46: Check queue for pending spawns
+            self._try_dequeue()
 
         bg_task.add_done_callback(_cleanup)
 
-        logger.info("Spawned subagent [{}]: {} (max_iterations={}, persist={})",
-                     task_id, display_label, effective_max, persist)
-        return f"Subagent [{display_label}] started (id: {task_id}). I'll notify you when it completes."
+    def _try_dequeue(self) -> None:
+        """§46: Start queued spawns if concurrency slots are available.
+
+        Called from task cleanup callbacks (synchronous context).
+        Creates new asyncio tasks for queued items while under the limit.
+        """
+        while self._queue and self._running_count < self._max_concurrency:
+            queued = self._queue.pop(0)
+            meta = self._task_meta.get(queued.task_id)
+            if meta is None:
+                # Meta was removed (shouldn't happen), skip
+                continue
+            if meta.status != "queued":
+                # Already stopped or otherwise handled, skip
+                continue
+
+            meta.status = "running"
+            logger.info("Dequeuing subagent [{}]: {} (concurrency {}/{})",
+                        queued.task_id, queued.label,
+                        self._running_count + 1, self._max_concurrency)
+
+            self._start_subagent_task(
+                task_id=queued.task_id,
+                task=queued.task,
+                label=queued.label,
+                origin=queued.origin,
+                max_iterations=queued.max_iterations,
+                persist=queued.persist,
+                subagent_key=queued.subagent_session_key,
+                session_key=queued.session_key,
+                meta=meta,
+            )
 
     async def _run_subagent(
         self,
@@ -855,6 +982,8 @@ class SubagentManager:
 
             def _cleanup(_t: asyncio.Task) -> None:
                 self._running_tasks.pop(task_id, None)
+                # §46: Check queue for pending spawns
+                self._try_dequeue()
 
             bg_task.add_done_callback(_cleanup)
 
@@ -873,7 +1002,10 @@ class SubagentManager:
         parent_session_key: str,
         reason: str = "",
     ) -> str:
-        """Stop a running subagent.
+        """Stop a running or queued subagent.
+
+        §46: Also handles queued tasks — removes from queue without creating
+        a child session.
 
         Parameters
         ----------
@@ -891,6 +1023,19 @@ class SubagentManager:
         """
         # 1. Ownership check
         meta = self._check_ownership(parent_session_key, task_id)
+
+        # §46: Handle queued tasks — remove from queue, no asyncio task to cancel
+        if meta.status == "queued":
+            self._queue = [q for q in self._queue if q.task_id != task_id]
+            meta.status = "stopped"
+            meta.finished_at = datetime.now().isoformat()
+            logger.info("Stopped queued subagent [{}] (id: {}){}", meta.label, task_id,
+                        f": {reason}" if reason else "")
+            # §46: Check if any queued tasks can now start
+            self._try_dequeue()
+            return (
+                f"Subagent [{meta.label}] (id: {task_id}) has been removed from the queue and stopped."
+            )
 
         # 2. Check if actually running
         task = self._running_tasks.get(task_id)

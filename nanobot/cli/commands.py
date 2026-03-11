@@ -405,6 +405,7 @@ def gateway(
         usage_recorder=usage_recorder,
         detail_logger=detail_logger,
         audit_logger=audit_logger,
+        spawn_max_concurrency=config.spawn.max_concurrency,
     )
 
     # Set cron callback (needs agent)
@@ -595,6 +596,7 @@ def agent(
         usage_recorder=usage_recorder,
         detail_logger=detail_logger,
         audit_logger=audit_logger,
+        spawn_max_concurrency=config.spawn.max_concurrency,
     )
 
     # Show spinner when logs are off (no output to miss); skip when logs are on
@@ -1103,6 +1105,7 @@ def cron_run(
         usage_recorder=usage_recorder,
         detail_logger=detail_logger,
         audit_logger=audit_logger,
+        spawn_max_concurrency=config.spawn.max_concurrency,
     )
 
     store_path = get_data_dir() / "cron" / "jobs.json"

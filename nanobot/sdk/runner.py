@@ -112,6 +112,7 @@ class AgentRunner:
             usage_recorder=usage_recorder,
             detail_logger=detail_logger,
             audit_logger=audit_logger,
+            spawn_max_concurrency=config.spawn.max_concurrency,
         )
 
         logger.info("AgentRunner created (model={})", config.agents.defaults.model)
