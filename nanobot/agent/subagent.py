@@ -1241,8 +1241,6 @@ Review this result in the context of your current session. Choose the appropriat
 - If you were waiting for this result to continue a planned workflow, proceed accordingly.
 - If the conversation has already moved on or the user has been informed, no output is needed.
 - Do not repeat work that has already been done in this session.
-
-(This is an automated system notification delivered as a user message for technical reasons. It is NOT a new user request. Do not execute the subagent's task again. Simply review the result and decide how to proceed in the context of your current conversation.)
 <!-- /nanobot:system -->"""
 
         # Prefer SessionMessenger if available (Phase 30)
