@@ -87,6 +87,10 @@ nanobot 核心是一个可嵌入的 AI Agent 框架，支持多 channel（CLI/We
 | §二十一 | LLM 连接超时拆分 (§42) | provider.md |
 | §二十二 | Budget alert user role (§43) | core-loop.md |
 | §二十三 | Subagent announce 隐藏标记 (§45) | spawn.md |
+| §二十四 | Subagent detail_logger 接入 (§48) | spawn.md |
+| §二十五 | LLM logs + session provider 字段 (§48) | core-loop.md |
+| §二十六 | Subagent announce 标记修正 + 闭合标签 (§48) | spawn.md |
+| §二十七 | Budget alert 公共函数 (§48) | core-loop.md |
 
 ---
 

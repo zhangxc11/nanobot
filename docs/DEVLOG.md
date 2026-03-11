@@ -68,6 +68,8 @@
 | Phase 37: read_file 大文件保护 (§34) | ✅ 已完成 | local |
 | Phase 42: 核心层基础改动 (§41-§45) | ✅ 已完成 | local |
 | Phase 43: Spawn 并发限制 (§46) | ✅ 已完成 | local |
+| Phase 44: SubagentEventCallback 协议 (§47) | ✅ 已完成 | local |
+| Phase 45: 日志增强 + 标记修正 + Budget 优化 (§48) | 🔜 进行中 | local |
 
 ---
 
@@ -133,6 +135,8 @@
 | 41 | §40 SubagentManager 单例化 + 跨进程 follow_up 恢复 | ✅ | *主文件* |
 | 42 | §41-§45 核心层基础改动 (Phase 42) | ✅ | *主文件* |
 | 43 | Spawn 并发限制 (§46) | ✅ | *主文件* |
+| 44 | SubagentEventCallback 协议 (§47) | ✅ | *主文件* |
+| 45 | 日志增强 + 标记修正 + Budget 优化 (§48) | 🔜 | *主文件* |
 
 ---
 
@@ -288,3 +292,20 @@
 | `nanobot/agent/subagent.py` | 新增 `SubagentEventCallback` Protocol；`SubagentManager` 新增 `event_callback` 参数；spawn/iteration/retry/done 4 处回调 |
 | `nanobot/agent/loop.py` | `AgentLoop` 新增 `on_iteration` 参数，主循环每次迭代调用 |
 | `tests/test_subagent_event_callback.py` | 新测试文件（18 项测试） |
+
+---
+
+## Phase 45: 日志增强 + 标记修正 + Budget 优化 (§48) 🔜
+
+**日期**: 2026-03-11
+**需求**: §48（`requirements/s40-s49.md`）
+
+### 任务清单
+
+- [ ] **T45.1** SubagentManager 接入 detail_logger
+- [ ] **T45.2** LLM logs + session JSONL 增加 provider 字段
+- [ ] **T45.3** Subagent 返回内容标记修正 + 闭合标签
+- [ ] **T45.4** Budget alert 公共函数 build_budget_alert()
+- [ ] **T45.5** 新增测试
+- [ ] **T45.6** 全量回归
+- [ ] **T45.7** Git commit

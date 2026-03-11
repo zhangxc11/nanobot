@@ -63,6 +63,7 @@ class LLMDetailLogger:
         response_finish_reason: str = "stop",
         response_usage: dict[str, int] | None = None,
         timestamp: str | None = None,
+        provider: str | None = None,
     ) -> tuple[str, int] | None:
         """Record a single LLM call to the daily JSONL file.
 
@@ -111,6 +112,7 @@ class LLMDetailLogger:
         record = {
             "timestamp": ts,
             "session_key": session_key,
+            "provider": provider or "",
             "model": model,
             "iteration": iteration,
             "prompt_tokens": usage.get("prompt_tokens", 0),

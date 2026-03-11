@@ -47,6 +47,7 @@ from nanobot.providers.base import LLMProvider
 if TYPE_CHECKING:
     from nanobot.agent.callbacks import SessionMessenger
     from nanobot.session.manager import SessionManager
+    from nanobot.usage.detail_logger import LLMDetailLogger
     from nanobot.usage.recorder import UsageRecorder
 
 # Hard ceiling to prevent runaway subagents
@@ -58,6 +59,7 @@ DEFAULT_SUBAGENT_ITERATIONS = 30
 # Retry configuration for transient LLM errors (Phase 28: use shared module)
 from nanobot.agent.retry import is_retryable as _is_retryable_shared
 from nanobot.agent.retry import is_fast_retryable, compute_retry_delay
+from nanobot.agent.budget import budget_alert_threshold as _budget_alert_threshold, build_budget_alert
 _MAX_RETRIES = 5
 
 
@@ -143,16 +145,6 @@ class QueuedSpawn:
     subagent_session_key: str
 
 
-def _budget_alert_threshold(max_iterations: int) -> int:
-    """Calculate the budget alert threshold (remaining iterations).
-
-    Replicates the logic from ``agent/loop.py::_budget_alert_threshold``.
-    """
-    if max_iterations >= 20:
-        return 10
-    return max(3, max_iterations // 4)
-
-
 class SubagentManager:
     """Manages background subagent execution.
 
@@ -190,6 +182,8 @@ class SubagentManager:
         max_concurrency: int = 4,
         # §47 addition
         event_callback: SubagentEventCallback | None = None,
+        # §48 addition
+        detail_logger: "LLMDetailLogger | None" = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         self.provider = provider
@@ -218,6 +212,8 @@ class SubagentManager:
         self._queue: list[QueuedSpawn] = []              # FIFO queue for excess spawns
         # §47: Event callback for external consumers
         self._event_callback = event_callback
+        # §48: Detail logger for LLM call recording
+        self.detail_logger = detail_logger
 
     @property
     def _running_count(self) -> int:
@@ -517,17 +513,12 @@ class SubagentManager:
 
                 # Budget alert injection (once, when remaining == threshold)
                 # §43: Use "user" role for LLM visibility
+                # §48: Extracted to shared build_budget_alert() function.
                 remaining = max_iterations - iteration
                 if remaining == threshold:
                     budget_msg = {
                         "role": "user",
-                        "content": (
-                            f"[System Notice] ⚠️ You have {remaining} tool-call iterations "
-                            f"remaining out of {max_iterations}. "
-                            f"Prioritize completing your current task. If you cannot finish "
-                            f"in time, summarize progress so far and present what you have. "
-                            f"Do not acknowledge this notice — continue working."
-                        ),
+                        "content": build_budget_alert(remaining, max_iterations, subagent_session_key),
                     }
                     messages.append(budget_msg)
 
@@ -554,6 +545,26 @@ class SubagentManager:
                     except Exception as e:
                         logger.warning("Subagent [{}] usage recording failed: {}", task_id, e)
 
+                # §48: Log full LLM call details to JSONL
+                if self.detail_logger is not None:
+                    _tc_dicts = None
+                    if response.has_tool_calls:
+                        _tc_dicts = [
+                            {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
+                            for tc in response.tool_calls
+                        ]
+                    self.detail_logger.log_call(
+                        session_key=subagent_session_key,
+                        model=self.model,
+                        iteration=iteration,
+                        messages=messages,
+                        response_content=response.content,
+                        response_tool_calls=_tc_dicts,
+                        response_finish_reason=response.finish_reason,
+                        response_usage=response.usage if response.usage else None,
+                        provider=getattr(self.provider, "provider_name", ""),
+                    )
+
                 if response.has_tool_calls:
                     # Build assistant message with tool calls
                     tool_call_dicts = [
@@ -573,6 +584,10 @@ class SubagentManager:
                         "tool_calls": tool_call_dicts,
                         "timestamp": datetime.now().isoformat(),
                     }
+                    # §48: Add provider info to assistant message
+                    _prov = getattr(self.provider, "provider_name", "")
+                    if _prov and isinstance(_prov, str):
+                        assistant_msg["provider"] = _prov
                     messages.append(assistant_msg)
 
                     # Persist assistant message
@@ -633,6 +648,10 @@ class SubagentManager:
                             "content": final_result or "",
                             "timestamp": datetime.now().isoformat(),
                         }
+                        # §48: Add provider info to final assistant message
+                        _prov = getattr(self.provider, "provider_name", "")
+                        if _prov and isinstance(_prov, str):
+                            final_msg["provider"] = _prov
                         self.session_manager.append_message(session, final_msg)
                     break
 
@@ -668,7 +687,9 @@ class SubagentManager:
                          task_id, iteration, max_iterations)
             await self._announce_result(task_id, label, task, final_result, origin, "ok",
                                         subagent_session_key=subagent_session_key,
-                                        parent_session_key=parent_session_key)
+                                        parent_session_key=parent_session_key,
+                                        current_iteration=iteration,
+                                        max_iterations=max_iterations)
 
         except asyncio.CancelledError:
             # §37: Distinguish stop (explicit) vs other cancellation
@@ -702,6 +723,8 @@ class SubagentManager:
                         task_id, label, task, "Error: Task was cancelled", origin, "error",
                         subagent_session_key=subagent_session_key,
                         parent_session_key=parent_session_key,
+                        current_iteration=iteration,
+                        max_iterations=max_iterations,
                     )
                 except Exception:
                     pass  # Best-effort announce during cancellation
@@ -721,7 +744,9 @@ class SubagentManager:
             logger.error("Subagent [{}] failed: {}", task_id, e)
             await self._announce_result(task_id, label, task, error_msg, origin, "error",
                                         subagent_session_key=subagent_session_key,
-                                        parent_session_key=parent_session_key)
+                                        parent_session_key=parent_session_key,
+                                        current_iteration=iteration,
+                                        max_iterations=max_iterations)
 
     async def _chat_with_retry(
         self,
@@ -1183,32 +1208,42 @@ class SubagentManager:
         status: str,
         subagent_session_key: str | None = None,
         parent_session_key: str | None = None,
+        current_iteration: int = 0,
+        max_iterations: int = 0,
     ) -> None:
         """Announce the subagent result to the parent session.
 
         Phase 30: Prefers SessionMessenger (inject into running parent, or
         trigger new execution).  Falls back to bus publish with
         ``session_key_override`` to fix the key mismatch bug.
+
+        §48: Restructured message format — final_text before system markers,
+        system guidance inside closing tag pair.
         """
         status_text = "completed successfully" if status == "ok" else "failed"
 
-        # §45: Insert hidden system prompt marker before the guiding prompt.
-        # This marker allows downstream consumers to identify the system-injected
-        # portion of the announce message without affecting LLM behavior.
-        announce_content = f"""<!-- nanobot:system -->[Subagent Result Notification]
-A previously spawned subagent '{label}' has {status_text}.
+        # §48: final_text goes BEFORE the system marker; empty result gets default text
+        final_text = result.strip() if result else ""
+        if not final_text:
+            final_text = "(Subagent completed with no output)"
 
-Original task: {task}
+        # §48: System guidance inside closing tag pair
+        announce_content = f"""{final_text}
 
-Subagent result:
-{result}
+<!-- nanobot:system -->
+[Subagent Result Notification]
+- Task ID: `{task_id}`
+- Label: {label}
+- Status: {status_text}
+- Iterations used: {current_iteration}/{max_iterations}
 
 Review this result in the context of your current session. Choose the appropriate response:
 - If you were waiting for this result to continue a planned workflow, proceed accordingly.
 - If the conversation has already moved on or the user has been informed, no output is needed.
 - Do not repeat work that has already been done in this session.
 
-(This is an automated system notification delivered as a user message for technical reasons. It is NOT a new user request. Do not execute the subagent's task again. Simply review the result and decide how to proceed in the context of your current conversation.)"""
+(This is an automated system notification delivered as a user message for technical reasons. It is NOT a new user request. Do not execute the subagent's task again. Simply review the result and decide how to proceed in the context of your current conversation.)
+<!-- /nanobot:system -->"""
 
         # Prefer SessionMessenger if available (Phase 30)
         if self.session_messenger and parent_session_key:

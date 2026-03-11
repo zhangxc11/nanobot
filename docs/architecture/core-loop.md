@@ -734,3 +734,45 @@ Prioritize completing your current task. If you cannot finish in time, summarize
 
 **影响范围**：`loop.py` + `subagent.py` 两处 budget alert 同步修改。
 
+
+---
+
+## §二十五 LLM logs + session provider 字段 (§48)
+
+### 设计
+
+1. **LLM logs**: `LLMDetailLogger.log_call()` 新增 `provider` 参数，record dict 新增 `"provider"` 字段
+2. **Session JSONL**: assistant 消息 dict 在 persist 前追加 `"provider"` 字段
+
+### 数据示例
+
+LLM log record:
+```json
+{"timestamp": "...", "session_key": "...", "model": "...", "provider": "anthropic-main", ...}
+```
+
+Session JSONL assistant message:
+```json
+{"role": "assistant", "content": "...", "provider": "anthropic-main", "timestamp": "..."}
+```
+
+---
+
+## §二十七 Budget alert 公共函数 (§48)
+
+### 设计
+
+新建 `nanobot/agent/budget.py`，包含：
+
+```python
+def build_budget_alert(remaining: int, max_iterations: int, session_key: str = "") -> str:
+    """Build budget alert message and log warning."""
+    logger.warning("Budget alert: {}/{} remaining, session={}", remaining, max_iterations, session_key)
+    return (
+        f"[System Notice — Current Turn Budget] ⚠️ You have {remaining} tool-call iterations "
+        f"remaining out of {max_iterations}. ..."
+    )
+```
+
+`loop.py` 和 `subagent.py` 各一行调用，消除重复代码。
+Prompt 文本增加 "Current Turn Budget" 限定作用域。

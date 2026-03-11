@@ -14,6 +14,7 @@ from loguru import logger
 
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.memory import MemoryStore
+from nanobot.agent.budget import build_budget_alert
 from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
@@ -126,6 +127,9 @@ class AgentLoop:
                     "subagent usage will NOT be recorded. "
                     "Pass usage_recorder=UsageRecorder() when creating the singleton."
                 )
+            # §48: Inherit detail_logger if external manager doesn't have one
+            if self.subagents.detail_logger is None and self.detail_logger is not None:
+                self.subagents.detail_logger = self.detail_logger
         else:
             self.subagents = SubagentManager(
                 provider=provider,
@@ -145,6 +149,7 @@ class AgentLoop:
                 session_messenger=session_messenger,
                 read_file_hard_limit=read_file_hard_limit,
                 max_concurrency=spawn_max_concurrency,
+                detail_logger=detail_logger,  # §48
             )
 
         self._running = False
@@ -405,18 +410,14 @@ class AgentLoop:
             # ── Budget alert: warn LLM when iterations are running low ──
             # §43: Use "user" role so the alert is visible to the LLM at the
             # conversation tail (compatible with §32 cache breakpoint #3).
+            # §48: Extracted to shared build_budget_alert() function.
             remaining = self.max_iterations - iteration
             threshold = _budget_alert_threshold(self.max_iterations)
             if remaining == threshold:
+                _session_key = session.key if session is not None else ""
                 messages.append({
                     "role": "user",
-                    "content": (
-                        f"[System Notice] ⚠️ You have {remaining} tool-call iterations "
-                        f"remaining out of {self.max_iterations}. "
-                        f"Prioritize completing your current task. If you cannot finish "
-                        f"in time, summarize progress so far and present what you have. "
-                        f"Do not acknowledge this notice — continue working."
-                    ),
+                    "content": build_budget_alert(remaining, self.max_iterations, _session_key),
                 })
 
             response = await self._chat_with_retry(
@@ -478,6 +479,7 @@ class AgentLoop:
                     response_tool_calls=_tc_dicts,
                     response_finish_reason=response.finish_reason,
                     response_usage=response.usage if response.usage else None,
+                    provider=getattr(_provider, "provider_name", ""),
                 )
 
             if response.has_tool_calls:
@@ -503,6 +505,11 @@ class AgentLoop:
                     reasoning_content=response.reasoning_content,
                     thinking_blocks=response.thinking_blocks,
                 )
+
+                # §48: Add provider info to assistant message for session JSONL
+                _provider_name = getattr(_provider, "provider_name", "")
+                if _provider_name and isinstance(_provider_name, str):
+                    messages[-1]["provider"] = _provider_name
 
                 # Realtime persist: assistant message with tool_calls
                 if session is not None:
@@ -587,6 +594,11 @@ class AgentLoop:
                     reasoning_content=response.reasoning_content,
                     thinking_blocks=response.thinking_blocks,
                 )
+
+                # §48: Add provider info to final assistant message
+                _provider_name = getattr(_provider, "provider_name", "")
+                if _provider_name and isinstance(_provider_name, str):
+                    messages[-1]["provider"] = _provider_name
 
                 # Realtime persist: final assistant message
                 if session is not None:
