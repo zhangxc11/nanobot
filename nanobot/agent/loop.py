@@ -533,11 +533,16 @@ class AgentLoop:
                         await callbacks.on_message(messages[-1])
 
                 # ── User injection checkpoint ──
-                # After all tools in this round complete, check if the user
-                # has sent supplementary input to inject before the next LLM call.
+                # After all tools in this round complete, drain ALL pending
+                # messages before the next LLM call.  Previously only one
+                # message was consumed per checkpoint, which caused messages
+                # to be silently lost when multiple arrived during a single
+                # tool execution (e.g. subagent results + user inject).
                 if callbacks is not None:
-                    injected = await callbacks.check_user_input()
-                    if injected:
+                    while True:
+                        injected = await callbacks.check_user_input()
+                        if not injected:
+                            break
                         if isinstance(injected, dict):
                             # Structured inject (e.g. from SessionMessenger)
                             # — role is determined by the sender, not by content.
@@ -605,6 +610,47 @@ class AgentLoop:
                     self.sessions.append_message(session, messages[-1])
                 if callbacks is not None:
                     await callbacks.on_message(messages[-1])
+
+                # ── Final-response injection checkpoint ──
+                # Before exiting the loop, drain any pending inject messages
+                # that arrived while the LLM was generating its final response.
+                # If messages are found, persist them and continue the loop so
+                # the LLM can process them instead of silently dropping them.
+                _has_pending = False
+                if callbacks is not None:
+                    while True:
+                        injected = await callbacks.check_user_input()
+                        if not injected:
+                            break
+                        _has_pending = True
+                        if isinstance(injected, dict):
+                            inject_msg = {
+                                "role": injected.get("role", "user"),
+                                "content": injected["content"],
+                                "timestamp": datetime.now().isoformat(),
+                            }
+                        else:
+                            if not injected.startswith("["):
+                                injected = f"[Message from user during execution]\n{injected}"
+                            inject_msg = {
+                                "role": "user",
+                                "content": injected,
+                                "timestamp": datetime.now().isoformat(),
+                            }
+                        logger.info("Late-injected message (role={}): {}",
+                                    inject_msg["role"], inject_msg["content"][:120])
+                        messages.append(inject_msg)
+                        if session is not None:
+                            self.sessions.append_message(session, inject_msg)
+                        await callbacks.on_message(inject_msg)
+                        if _progress_fn:
+                            await _progress_fn(f"📝 User: {inject_msg['content'][:80]}")
+                if _has_pending:
+                    # Messages were injected after the LLM's "final" response.
+                    # Clear final_content so the loop continues and the LLM
+                    # can respond to the newly injected messages.
+                    final_content = None
+                    continue
                 break
 
         if final_content is None and iteration >= self.max_iterations:
