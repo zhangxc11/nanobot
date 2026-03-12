@@ -92,6 +92,7 @@ local    ← 本地自定义改动（基于 main）
 | §47 | SubagentEventCallback 协议 | ✅ | [requirements/s40-s49.md](requirements/s40-s49.md) |
 | §48 | 日志增强 + 标记修正 + Budget 优化 | ✅ | [requirements/s40-s49.md](requirements/s40-s49.md) |
 | §49 | Tool Result 历史截断阈值扩大 (500→2000) | ✅ | [requirements/s40-s49.md](requirements/s40-s49.md) |
+| §50 | Inject 队列 Drain — 防止消息丢失 | ✅ | [requirements/s50-s59.md](requirements/s50-s59.md) |
 
 ---
 
