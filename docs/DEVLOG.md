@@ -77,6 +77,7 @@
 | Phase 50: Session 父子关系解析统一到核心 (§54) | ✅ 已完成 | feat/batch-20260313-plan-core-cron |
 | Phase 52: Subagent Provider 继承 (§56) | ✅ 已完成 | feat/batch-20260313-plan-core-fixes |
 | Phase 53: 飞书语音消息 recognition 提取 (§57) | ✅ 已完成 | feat/batch-20260313-plan-core-fixes |
+| Phase 54: follow_up resume 缺少 event_callback (§58) | ✅ 已完成 | local |
 
 ---
 
@@ -149,78 +150,15 @@
 | 47 | Inject 队列 Drain 修复 (§50) | ✅ | [devlog/phase-46-50.md](devlog/phase-46-50.md) |
 | 48 | Runtime Context 注入 Session ID (§51) | ✅ | [devlog/phase-46-50.md](devlog/phase-46-50.md) |
 | 49 | Cron name 参数 + 消息格式优化 (§55) | ✅ | [devlog/phase-46-50.md](devlog/phase-46-50.md) |
-| 50 | Session 父子关系解析统一到核心 (§54) | ✅ | *主文件* |
-| 51 | CronTool 改用 session/parents.py 验证 target_session (§53 R2) | ✅ | *主文件* |
+| 50 | Session 父子关系解析统一到核心 (§54) | ✅ | [devlog/phase-46-50.md](devlog/phase-46-50.md) |
+| 51 | CronTool 改用 session/parents.py 验证 target_session (§53 R2) | ✅ | [devlog/phase-51-55.md](devlog/phase-51-55.md) |
 | 52 | Subagent Provider 继承 (§56) | ✅ | *主文件* |
 | 53 | 飞书语音消息 recognition 提取 (§57) | ✅ | *主文件* |
+| 54 | follow_up resume 缺少 event_callback (§58) | ✅ | *主文件* |
 
 ---
 
 ---
-
-## Phase 50: Session 父子关系解析统一到核心 (§54) ✅
-
-**日期**: 2026-03-16
-**需求**: §54（`requirements/s50-s59.md`）
-**Commit**: `0266e67`
-
-### 背景
-
-Session 父子关系的解析逻辑在 web-chat 前端 `resolveParent()` (~80 行 TS) 和 CronTool `_validate_target_session()` 各自独立实现，长期会分叉。将启发式逻辑统一到 nanobot 核心，成为 single source of truth。
-
-### 任务清单
-
-- [x] **T50.1** 新建 `nanobot/session/parents.py` — 4 个公共接口
-- [x] **T50.2** 更新 `nanobot/session/__init__.py` — 导出新接口
-- [x] **T50.3** `tests/test_session_parents.py` — 32 个测试全部通过
-- [x] **T50.4** 全量回归 780 passed, 1 skipped ✅
-- [x] **T50.5** Git commit `0266e67`
-
-### 改动文件
-
-| 文件 | 改动 |
-|------|------|
-| `nanobot/session/parents.py` | 新建：`load_manual_overrides`、`resolve_parent`、`build_parent_map`、`is_child_of` |
-| `nanobot/session/__init__.py` | 导出 4 个新接口 |
-| `tests/test_session_parents.py` | 32 个测试：7 个测试类覆盖 subagent/webchat/manual/root/is_child_of/build_parent_map |
-
-### 决策记录
-
-- **优先级排序确定性**：前端 Set 迭代顺序不确定，Python set 同理。当 priority a 有多个候选时，按长度排序取最短（最可能是 root session），确保结果确定性。
-- **subagent parent 不验证存在性**：与前端行为一致，即使 parent session 文件不存在也返回解析结果。
-- **不改 CronTool**：CronTool 消费改动属于独立任务（§54 消费方改动），本 Phase 只做核心模块。
-
----
-
-## Phase 51: CronTool 改用 session/parents.py 验证 target_session (§53 R2) ✅
-
-**日期**: 2026-03-16
-**需求**: §53 R2
-**Commit**: `edcce71`
-
-### 背景
-
-Phase 50 新增了 `nanobot/session/parents.py` 核心模块。本 Phase 将 CronTool `_validate_target_session()` 从子串匹配 (`self._session_id in target_session`) 改为调用 `is_child_of()` 做正式的父子关系验证。
-
-### 任务清单
-
-- [x] **T51.1** `nanobot/agent/tools/cron.py` — import `is_child_of`；`set_context()` 新增 `sessions_dir` 参数；`_validate_target_session()` 改用 `is_child_of()`；`clone()` 复制 `_sessions_dir`
-- [x] **T51.2** `nanobot/agent/loop.py` — `_set_tool_context()` 中传入 `sessions_dir=self.workspace / "sessions"`
-- [x] **T51.3** `tests/test_cron_service.py` — 更新测试 helper `_make_tool` 支持 `sessions_dir`；subagent/foreign 测试创建 `.jsonl` 文件；新增 `test_validate_target_session_no_sessions_dir_rejects`
-- [x] **T51.4** 全量回归 781 passed, 1 skipped ✅
-
-### 改动文件
-
-| 文件 | 改动 |
-|------|------|
-| `nanobot/agent/tools/cron.py` | `set_context()` 新增 `sessions_dir` 参数；`_validate_target_session()` 用 `is_child_of()` 替代子串匹配；`clone()` 复制 `_sessions_dir` |
-| `nanobot/agent/loop.py` | `_set_tool_context()` 传入 `sessions_dir=self.workspace / "sessions"` |
-| `tests/test_cron_service.py` | 更新 `_make_tool` helper；新增 `_make_sessions_dir` helper；subagent/foreign 测试改用 `tmp_path`；新增无 sessions_dir 拒绝测试 |
-
-### 决策记录
-
-- **sessions_dir 参数可选且 None 安全**：`set_context()` 中 `sessions_dir` 默认 None，仅当非 None 时更新。`_validate_target_session()` 在 `_sessions_dir` 为 None 时跳过 `is_child_of` 检查，直接拒绝非 self/非 cron 目标——这是安全的降级行为。
-- **cron_ 前缀检查在 is_child_of 之前**：避免不必要的文件系统扫描。
 
 ---
 
@@ -273,3 +211,29 @@ Gateway 模式下，主 session 通过 per-session override 使用 `anthropic_pr
 |------|------|
 | `nanobot/channels/feishu.py` | 两处 audio 处理后追加 recognition 提取（各 3 行） |
 | `tests/test_feishu_audio_recognition.py` | 新增 6 个测试覆盖 recognition 提取 |
+
+---
+
+## Phase 54: follow_up resume 缺少 event_callback (§58) ✅
+
+**日期**: 2026-03-17
+**需求**: §58（`requirements/s50-s59.md`）
+**Commit**: `a4a0776`
+
+### 背景
+
+`SubagentManager.follow_up()` 在 resume 分支中，设置 `meta.status = "running"` 后直接创建后台任务，但缺少 `on_subagent_spawned(meta)` 回调通知。对比 `spawn()` 新建路径（约 385-389 行）是有调用的。这导致 web-chat worker 的 `WorkerSubagentCallback._registry` 中 follow_up 恢复的 subagent 状态不会更新回 "running"。
+
+### 任务清单
+
+- [x] **T54.1** `nanobot/agent/subagent.py` — follow_up resume 分支添加 `on_subagent_spawned(meta)` 回调
+- [x] **T54.2** `tests/test_subagent_event_callback.py` — 新增测试验证 follow_up resume 时 callback 被调用
+- [x] **T54.3** 全量回归测试通过 (873 passed, 1 skipped)
+- [x] **T54.4** Git commit `a4a0776`
+
+### 改动文件
+
+| 文件 | 改动 |
+|------|------|
+| `nanobot/agent/subagent.py` | follow_up() resume 分支添加 event_callback 调用（~4 行） |
+| `tests/test_subagent_event_callback.py` | 新增 TestOnSubagentSpawnedFollowUp 测试类 |

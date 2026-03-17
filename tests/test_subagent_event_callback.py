@@ -481,3 +481,125 @@ class TestAgentLoopOnIteration:
 
         loop = AgentLoop(bus=bus, provider=provider, workspace=workspace)
         assert loop._on_iteration is None
+
+
+# ── Tests: on_subagent_spawned via follow_up resume (§58) ────────────────────
+
+
+class TestOnSubagentSpawnedFollowUp:
+    """Test on_subagent_spawned callback is called when follow_up resumes a finished subagent."""
+
+    @pytest.mark.asyncio
+    async def test_spawned_called_on_follow_up_resume(self):
+        """Callback should be called when follow_up resumes a finished subagent."""
+        cb = MockEventCallback()
+
+        session_mgr = MagicMock()
+        mock_session = MagicMock()
+        mock_session.get_history.return_value = [
+            {"role": "user", "content": "original task"},
+            {"role": "assistant", "content": "Done with original task"},
+        ]
+        session_mgr.get_or_create.return_value = mock_session
+
+        mgr = _make_manager(event_callback=cb, session_manager=session_mgr)
+        mgr.provider.chat = AsyncMock(return_value=FakeLLMResponse("Done"))
+
+        # Spawn and wait for completion
+        result = await mgr.spawn("test task", session_key="parent:1")
+        task_id = result.split("id: ")[1].split(")")[0]
+        await asyncio.sleep(0.3)
+
+        # Verify initial spawn callback
+        assert len(cb.spawned_calls) == 1
+        assert cb.spawned_calls[0]["status"] == "running"
+
+        # Reset for resume
+        mgr.provider.chat = AsyncMock(return_value=FakeLLMResponse("Resumed OK"))
+
+        # Follow up (resume)
+        await mgr.follow_up(
+            task_id=task_id,
+            message="continue please",
+            parent_session_key="parent:1",
+        )
+        await asyncio.sleep(0.3)
+
+        # Should have a second spawned callback for the resume
+        assert len(cb.spawned_calls) == 2
+        snap = cb.spawned_calls[1]
+        assert snap["task_id"] == task_id
+        assert snap["status"] == "running"
+        assert snap["parent_session_key"] == "parent:1"
+
+    @pytest.mark.asyncio
+    async def test_spawned_callback_error_swallowed_on_resume(self):
+        """Errors in spawned callback during resume should not prevent follow_up."""
+        class BadCallback(MockEventCallback):
+            def on_subagent_spawned(self, meta):
+                super().on_subagent_spawned(meta)
+                if len(self.spawned_calls) > 1:
+                    # Only raise on the resume call (second call)
+                    raise RuntimeError("callback error on resume")
+
+        cb = BadCallback()
+
+        session_mgr = MagicMock()
+        mock_session = MagicMock()
+        mock_session.get_history.return_value = [
+            {"role": "user", "content": "task"},
+            {"role": "assistant", "content": "done"},
+        ]
+        session_mgr.get_or_create.return_value = mock_session
+
+        mgr = _make_manager(event_callback=cb, session_manager=session_mgr)
+        mgr.provider.chat = AsyncMock(return_value=FakeLLMResponse("Done"))
+
+        result = await mgr.spawn("test task", session_key="parent:1")
+        task_id = result.split("id: ")[1].split(")")[0]
+        await asyncio.sleep(0.3)
+
+        mgr.provider.chat = AsyncMock(return_value=FakeLLMResponse("Resumed"))
+
+        # Should not raise despite callback error
+        resume_result = await mgr.follow_up(
+            task_id=task_id,
+            message="continue",
+            parent_session_key="parent:1",
+        )
+        assert "resumed" in resume_result.lower()
+        await asyncio.sleep(0.3)
+
+    @pytest.mark.asyncio
+    async def test_no_callback_on_inject(self):
+        """on_subagent_spawned should NOT be called when follow_up injects into running subagent."""
+        cb = MockEventCallback()
+        mgr = _make_manager(event_callback=cb)
+
+        # Make LLM call hang so subagent stays running
+        async def slow_chat(**kwargs):
+            await asyncio.sleep(10)
+            return FakeLLMResponse("Done")
+
+        mgr.provider.chat = slow_chat
+
+        result = await mgr.spawn("test task", session_key="parent:1")
+        task_id = result.split("id: ")[1].split(")")[0]
+        await asyncio.sleep(0.1)
+
+        # Initial spawn callback
+        assert len(cb.spawned_calls) == 1
+
+        # Inject follow_up (not resume)
+        await mgr.follow_up(
+            task_id=task_id,
+            message="inject this",
+            parent_session_key="parent:1",
+        )
+
+        # Should still be only 1 spawned call (inject doesn't trigger callback)
+        assert len(cb.spawned_calls) == 1
+
+        # Clean up
+        await mgr.stop_subagent(task_id, "parent:1")
+        await asyncio.sleep(0.3)

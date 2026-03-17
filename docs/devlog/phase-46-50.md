@@ -139,3 +139,37 @@ Agent 需要可靠获取自己的 session 标识。当前 Runtime Context 只注
 - [x] **T49.7** web-chat 前端 `parseCronNotification()` 适配新旧两种格式
 - [x] **T49.8** 新增 7 个测试
 - [x] **T49.9** 全量回归 780 passed, 1 skipped ✅
+
+---
+
+## Phase 50: Session 父子关系解析统一到核心 (§54) ✅
+
+**日期**: 2026-03-16
+**需求**: §54（`requirements/s50-s59.md`）
+**Commit**: `0266e67`
+
+### 背景
+
+Session 父子关系的解析逻辑在 web-chat 前端 `resolveParent()` (~80 行 TS) 和 CronTool `_validate_target_session()` 各自独立实现，长期会分叉。将启发式逻辑统一到 nanobot 核心，成为 single source of truth。
+
+### 任务清单
+
+- [x] **T50.1** 新建 `nanobot/session/parents.py` — 4 个公共接口
+- [x] **T50.2** 更新 `nanobot/session/__init__.py` — 导出新接口
+- [x] **T50.3** `tests/test_session_parents.py` — 32 个测试全部通过
+- [x] **T50.4** 全量回归 780 passed, 1 skipped ✅
+- [x] **T50.5** Git commit `0266e67`
+
+### 改动文件
+
+| 文件 | 改动 |
+|------|------|
+| `nanobot/session/parents.py` | 新建：`load_manual_overrides`、`resolve_parent`、`build_parent_map`、`is_child_of` |
+| `nanobot/session/__init__.py` | 导出 4 个新接口 |
+| `tests/test_session_parents.py` | 32 个测试：7 个测试类覆盖 subagent/webchat/manual/root/is_child_of/build_parent_map |
+
+### 决策记录
+
+- **优先级排序确定性**：前端 Set 迭代顺序不确定，Python set 同理。当 priority a 有多个候选时，按长度排序取最短（最可能是 root session），确保结果确定性。
+- **subagent parent 不验证存在性**：与前端行为一致，即使 parent session 文件不存在也返回解析结果。
+- **不改 CronTool**：CronTool 消费改动属于独立任务（§54 消费方改动），本 Phase 只做核心模块。

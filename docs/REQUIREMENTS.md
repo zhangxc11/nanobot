@@ -100,6 +100,7 @@ local    ← 本地自定义改动（基于 main）
 | §55 | Cron name 参数 + 消息格式优化 | ✅ | [requirements/s50-s59.md](requirements/s50-s59.md) |
 | §56 | Subagent Provider 继承 | ✅ | [requirements/s50-s59.md](requirements/s50-s59.md) |
 | §57 | 飞书语音消息 recognition 字段提取 | ✅ | [requirements/s50-s59.md](requirements/s50-s59.md) |
+| §58 | follow_up 恢复路径缺少 event_callback 通知 | ✅ | [requirements/s50-s59.md](requirements/s50-s59.md) |
 
 ---
 

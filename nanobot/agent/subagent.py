@@ -1158,6 +1158,13 @@ class SubagentManager:
             meta.last_error = None
             meta.last_error_time = None
 
+            # §58: Notify callback for resumed subagent (same as spawn path)
+            if self._event_callback is not None:
+                try:
+                    self._event_callback.on_subagent_spawned(meta)
+                except Exception as exc:
+                    logger.warning("event_callback.on_subagent_spawned failed: {}", exc)
+
             # Start new background task
             bg_task = asyncio.create_task(
                 self._run_subagent(
