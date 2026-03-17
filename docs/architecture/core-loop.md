@@ -841,3 +841,11 @@ Subagent（无 channel/chat_id）：
 Current Time: 2026-03-12 16:00 (Thursday) (CST)
 Session ID: subagent_webchat_1773250094_a1b2c3d4
 ```
+
+### ⚠️ Session 识别统一规则
+
+> **所有涉及 session 识别的场景（列表、切换、归档、摘要、缓存引用、路由表值等），统一使用 Session ID（文件名 stem），不使用 Session Key。**
+>
+> Session Key 仅在 nanobot core 内部（`get_or_create()`、analytics DB）中使用。面向用户展示、命令参数、缓存存储等外部接口一律使用 Session ID。
+>
+> `/session` 命令参数语法：`#N` = 序号引用（来自 list），`%session_id` = 直接引用，纯数字 = 数值参数。

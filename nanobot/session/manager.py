@@ -527,7 +527,10 @@ class SessionManager:
         List all sessions.
 
         Returns:
-            List of session info dicts.
+            List of session info dicts.  Each dict contains:
+            - ``session_id``: JSONL filename stem (globally unique)
+            - ``key``: metadata key (nanobot core internal)
+            - ``created_at``, ``updated_at``, ``path``
         """
         sessions = []
 
@@ -541,6 +544,7 @@ class SessionManager:
                         if data.get("_type") == "metadata":
                             key = data.get("key") or path.stem.replace("_", ":", 1)
                             sessions.append({
+                                "session_id": path.stem,
                                 "key": key,
                                 "created_at": data.get("created_at"),
                                 "updated_at": data.get("updated_at"),
@@ -621,3 +625,99 @@ class SessionManager:
         self.save(new_session)
 
         return new_key
+
+    # ── Session names / tags helpers ─────────────────────────────────
+
+    def _session_names_path(self) -> Path:
+        return self.sessions_dir / "session_names.json"
+
+    def _session_tags_path(self) -> Path:
+        return self.sessions_dir / "session_tags.json"
+
+    @staticmethod
+    def _read_json_file(path: Path) -> dict:
+        """Read a JSON file, returning {} on missing or corrupt files."""
+        if path.exists():
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                return {}
+        return {}
+
+    @staticmethod
+    def _write_json_file(path: Path, data: dict) -> None:
+        """Atomic write: write to .tmp then os.replace."""
+        import os as _os
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        _os.replace(str(tmp), str(path))
+
+    def get_session_id(self, key: str) -> str:
+        """Convert a session key to the filename-safe session_id."""
+        return safe_filename(key.replace(":", "_"))
+
+    # ── Names ──
+
+    def get_session_name(self, session_id: str) -> str | None:
+        names = self._read_json_file(self._session_names_path())
+        return names.get(session_id)
+
+    def set_session_name(self, session_id: str, name: str) -> None:
+        names = self._read_json_file(self._session_names_path())
+        names[session_id] = name
+        self._write_json_file(self._session_names_path(), names)
+
+    # ── Tags ──
+
+    def get_session_tags(self, session_id: str) -> list[str]:
+        tags = self._read_json_file(self._session_tags_path())
+        return tags.get(session_id, [])
+
+    def set_session_tags(self, session_id: str, tags: list[str]) -> None:
+        all_tags = self._read_json_file(self._session_tags_path())
+        all_tags[session_id] = tags
+        self._write_json_file(self._session_tags_path(), all_tags)
+
+    # ── Switch ──
+
+    def switch_session(self, channel: str, chat_id: str, target_session_id: str) -> None:
+        """Update routing so that ``channel:chat_id`` resolves to *target_session_id*.
+
+        The routing table value is stored as *session_id* (JSONL filename stem).
+        ``resolve_session_key()`` and ``_get_session_path()`` handle both
+        session_id format (no colon) and legacy session_key format (with colon).
+        """
+        natural_key = f"{channel}:{chat_id}"
+        table = self._load_routing()
+        table[natural_key] = target_session_id
+        self._save_routing(table)
+        # Invalidate caches so next get_or_create picks up the new key
+        self.invalidate(natural_key)
+
+    # ── Message count (lightweight) ──
+
+    def get_session_message_count(self, session_id: str) -> int:
+        """Return the message count for *session_id* without fully loading the session.
+
+        *session_id* is the JSONL filename stem (e.g. ``feishu.lab.1772855249``).
+        """
+        path = self.sessions_dir / f"{session_id}.jsonl"
+        if not path.exists():
+            return 0
+        count = 0
+        try:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                        if data.get("_type") != "metadata":
+                            count += 1
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        return count

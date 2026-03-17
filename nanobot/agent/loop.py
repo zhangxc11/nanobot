@@ -162,6 +162,7 @@ class AgentLoop:
         self._consolidation_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
         self._processing_lock = asyncio.Lock()
+        self._last_session_list: dict[str, list[str]] = {}  # chat_id -> [session_id, ...]
         self._register_default_tools()
         if self.audit_logger is not None:
             self.tools.set_audit_logger(self.audit_logger)
@@ -778,10 +779,27 @@ class AgentLoop:
                         self._active.pop(target_session_key, None)
 
                 # Idle → publish InboundMessage to trigger new task
+                # Resolve real channel/chat_id from target_session_key so
+                # outbound messages route to the correct channel (e.g. feishu).
+                real_channel = "session_messenger"  # fallback
+                real_chat_id = target_session_key    # fallback
+                routing = self._sessions._load_routing()
+                for natural_key, routed_key in routing.items():
+                    if routed_key == target_session_key:
+                        _parts = natural_key.split(":", 1)
+                        if len(_parts) == 2:
+                            real_channel, real_chat_id = _parts
+                        break
+                else:
+                    # target_session_key might be in natural key format
+                    _parts = target_session_key.split(":", 1)
+                    if len(_parts) == 2:
+                        real_channel, real_chat_id = _parts
+
                 msg = InboundMessage(
-                    channel="session_messenger",
+                    channel=real_channel,
                     sender_id=source_session_key or "unknown",
-                    chat_id=target_session_key,
+                    chat_id=real_chat_id,
                     content=prefixed,
                     session_key_override=target_session_key,
                 )
@@ -838,7 +856,7 @@ class AgentLoop:
                 continue
 
             # ── /session: show session status ──
-            if cmd == "/session":
+            if cmd == "/session" or cmd.startswith("/session "):
                 response = self._handle_session_command(
                     msg, session_key=session_key, active_sessions=active_sessions,
                 )
@@ -969,16 +987,49 @@ class AgentLoop:
         session_key: str | None = None,
         active_sessions: dict | None = None,
     ) -> OutboundMessage:
-        """Handle /session slash command: show current session info and status.
+        """Route ``/session [subcmd]`` to the appropriate handler."""
+        parts = msg.content.strip().split(maxsplit=2)
+        subcmd = parts[1].lower() if len(parts) > 1 else None
+        arg = parts[2] if len(parts) > 2 else None
 
-        Parameters
-        ----------
-        session_key:
-            Resolved session key.  If None, derived from msg.session_key.
-        active_sessions:
-            Dict of active SessionWorker instances (gateway concurrent mode).
-            If None (CLI/direct mode), status is always "idle".
-        """
+        if subcmd is None:
+            return self._session_info(msg, session_key, active_sessions)
+        elif subcmd == "list":
+            return self._session_list(msg, session_key, arg)
+        elif subcmd == "switch":
+            return self._session_switch(msg, session_key, active_sessions, arg)
+        elif subcmd == "name":
+            # Preserve original casing for the name value
+            raw = msg.content.strip()
+            name_idx = raw.lower().find(" name ")
+            name_arg = raw[name_idx + 6:].strip() if name_idx >= 0 else None
+            return self._session_name(msg, session_key, name_arg)
+        elif subcmd == "summary":
+            return self._session_summary(msg, session_key, arg)
+        elif subcmd == "done":
+            return self._session_done(msg, session_key, active_sessions, arg)
+        elif subcmd == "undone":
+            return self._session_undone(msg, session_key, arg)
+        elif subcmd == "help":
+            return self._session_help(msg)
+        else:
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content=(
+                    f"❌ 未知子命令: {subcmd}\n"
+                    "用法: /session [list|switch|name|summary|done|undone|help]"
+                ),
+            )
+
+    # ── /session (no subcommand) — original info display ─────────────
+
+    def _session_info(
+        self,
+        msg: InboundMessage,
+        session_key: str | None = None,
+        active_sessions: dict | None = None,
+    ) -> OutboundMessage:
+        """Show current session info and status (original ``/session`` behaviour)."""
         from nanobot.providers.pool import ProviderPool
 
         key = session_key or self.sessions.resolve_session_key(msg.session_key)
@@ -1038,10 +1089,11 @@ class AgentLoop:
             token_line = "N/A（未配置 UsageRecorder）"
 
         # ── Build output ──
+        sid = self.sessions.get_session_id(key)
         lines = [
             f"📋 **Session 信息**",
             f"",
-            f"**Session Key**: `{key}`",
+            f"**Session ID**: `{sid}`",
             f"**状态**: {status_text}",
             f"**Provider**: {provider_name} / `{model_name}`",
             f"**Token 用量**: {token_line}",
@@ -1054,6 +1106,508 @@ class AgentLoop:
             channel=msg.channel, chat_id=msg.chat_id,
             content="\n".join(lines),
         )
+
+    # ── /session help ───────────────────────────────────────────────
+
+    def _session_help(self, msg: InboundMessage) -> OutboundMessage:
+        """Show help for /session subcommands."""
+        text = (
+            "📖 /session 子命令:\n"
+            "  /session           — 显示当前 session 状态\n"
+            "  /session list [N]  — 列出最近 N 个 session（默认 10）\n"
+            "  /session list M-N  — 列出第 M 到第 N 个 session\n"
+            "  /session list --all — 列出所有 session（含已归档）\n"
+            "  /session switch <#N|%id> — 切换到指定 session\n"
+            "  /session name <名称>    — 给当前 session 命名\n"
+            "  /session summary [#N|%id] [条数] — 显示 session 摘要\n"
+            "  /session done [#N|%id]   — 归档 session\n"
+            "  /session undone [#N|%id] — 取消归档\n"
+            "  /session help           — 显示此帮助\n"
+            "\n"
+            "参数语法: #N = 序号引用（来自 list），%id = session_id 直接引用"
+        )
+        return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=text)
+
+    # ── /session list [N] ────────────────────────────────────────────
+
+    def _session_list(
+        self,
+        msg: InboundMessage,
+        session_key: str | None = None,
+        arg: str | None = None,
+    ) -> OutboundMessage:
+        """List recent sessions for the current channel.
+
+        Supports:
+        - ``/session list``          — last 10 sessions (excluding done)
+        - ``/session list N``        — last N sessions
+        - ``/session list M-N``      — sessions #M to #N (1-based, time-descending)
+        - ``/session list --all``    — include done sessions (marked ✓)
+        - ``/session list --all N``  — combine --all with limit
+        - ``/session list --all M-N``— combine --all with range
+        """
+        limit: int | None = 10
+        range_start: int | None = None
+        range_end: int | None = None
+        show_all = False
+
+        # Parse arg
+        if arg is not None:
+            tokens = arg.strip().split()
+            for token in tokens:
+                if token == "--all":
+                    show_all = True
+                elif "-" in token and not token.startswith("-"):
+                    # Range syntax M-N
+                    parts = token.split("-", 1)
+                    try:
+                        range_start = int(parts[0])
+                        range_end = int(parts[1])
+                        limit = None  # range overrides limit
+                    except ValueError:
+                        return OutboundMessage(
+                            channel=msg.channel, chat_id=msg.chat_id,
+                            content=f"❌ 无效范围: {token}（格式: M-N，如 5-10）",
+                        )
+                    if range_start < 1 or range_end < range_start:
+                        return OutboundMessage(
+                            channel=msg.channel, chat_id=msg.chat_id,
+                            content=f"❌ 无效范围: {token}（M 须 ≥ 1 且 N ≥ M）",
+                        )
+                else:
+                    try:
+                        limit = int(token)
+                    except ValueError:
+                        return OutboundMessage(
+                            channel=msg.channel, chat_id=msg.chat_id,
+                            content=f"❌ 无效参数: {token}（应为数字或 M-N 范围）",
+                        )
+
+        current_key = session_key or self.sessions.resolve_session_key(msg.session_key)
+        current_sid = self.sessions.get_session_id(current_key)
+        channel_prefix = msg.channel  # e.g. "feishu.lab", "webchat", "cli"
+
+        all_sessions = self.sessions.list_sessions()
+        # Filter by channel prefix (match session_id since key format varies)
+        filtered = [s for s in all_sessions
+                    if s["session_id"].startswith(channel_prefix.replace(":", "_"))]
+
+        # Read names and tags
+        names = self.sessions._read_json_file(self.sessions._session_names_path())
+        tags_data = self.sessions._read_json_file(self.sessions._session_tags_path())
+
+        # Annotate with done status
+        for s in filtered:
+            sid = s["session_id"]
+            s["_done"] = "done" in tags_data.get(sid, [])
+
+        total_all = len(filtered)
+        total_done = sum(1 for s in filtered if s["_done"])
+        total_active = total_all - total_done
+
+        # Cache ALL session_ids (before range/limit slicing) for sequence-number references.
+        # #N always refers to the N-th item in the full sorted list, regardless of displayed range.
+        if not show_all:
+            all_for_cache = [s for s in filtered if not s["_done"]]
+        else:
+            all_for_cache = list(filtered)
+        self._last_session_list[msg.chat_id] = [s["session_id"] for s in all_for_cache]
+
+        # Apply range or limit for display
+        if range_start is not None and range_end is not None:
+            # 1-based indices into the visible list
+            visible = all_for_cache[range_start - 1:range_end]
+        elif limit is not None:
+            visible = all_for_cache[:limit]
+        else:
+            visible = all_for_cache
+
+        if not visible:
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content="📋 没有找到匹配的 session。",
+            )
+
+        # Determine channel short name for title
+        # e.g. "feishu.lab" -> "lab", "feishu.ST" -> "ST", "webchat" -> "webchat"
+        ch_parts = channel_prefix.split(".")
+        channel_short = ch_parts[-1] if len(ch_parts) > 1 else channel_prefix
+
+        # Format output
+        if range_start is not None:
+            title = f"📋 ({channel_short}) Sessions（#{range_start}-#{range_end}）:"
+        else:
+            title = f"📋 ({channel_short}) Sessions（最近 {len(visible)} 个）:"
+        lines = [title]
+
+        enum_start = range_start if range_start is not None else 1
+        for idx, s in enumerate(visible, enum_start):
+            sid = s["session_id"]
+            name = names.get(sid, "")
+            is_current = (sid == current_sid)
+            marker = " ●" if is_current else "  "
+            done_marker = " ✓" if s.get("_done") else ""
+            msg_count = self.sessions.get_session_message_count(sid)
+
+            # Date: simplified format "26-03-07 16:34"
+            updated = s.get("updated_at", "")
+            if len(updated) >= 16:
+                # "2026-03-07T16:34:..." -> "26-03-07 16:34"
+                date_str = updated[2:10] + " " + updated[11:16]
+            else:
+                date_str = updated
+
+            # Display: name if available, otherwise short ID
+            if name:
+                display = name
+            else:
+                # Short ID: remove channel prefix from session_id
+                # channel_prefix "feishu.lab" -> file prefix "feishu.lab"
+                # session_id "feishu.lab.1772855249" -> short "1772855249"
+                # session_id "feishu.lab_ou_xxx_12345" -> short "ou_xxx_12345"
+                safe_prefix = channel_prefix.replace(":", "_")
+                if sid.startswith(safe_prefix + "."):
+                    display = sid[len(safe_prefix) + 1:]
+                elif sid.startswith(safe_prefix + "_"):
+                    display = sid[len(safe_prefix) + 1:]
+                else:
+                    display = sid
+
+            lines.append(
+                f" #{idx}{marker} {display}{done_marker} — {msg_count}条消息 {date_str}"
+            )
+
+        lines.append("")
+        lines.append(f"共 {total_active} 个 session，已归档 {total_done} 个")
+        lines.append("● = 当前 session | 用 `/session switch #N` 切换")
+        return OutboundMessage(
+            channel=msg.channel, chat_id=msg.chat_id,
+            content="\n".join(lines),
+        )
+
+    # ── /session switch <#N|%id> ───────────────────────────────────────
+
+    def _session_switch(
+        self,
+        msg: InboundMessage,
+        session_key: str | None = None,
+        active_sessions: dict | None = None,
+        arg: str | None = None,
+    ) -> OutboundMessage:
+        """Switch to a different session."""
+        if not arg:
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content="❌ 用法: /session switch <#序号|%session_id>",
+            )
+
+        current_key = session_key or self.sessions.resolve_session_key(msg.session_key)
+        current_sid = self.sessions.get_session_id(current_key)
+
+        target_sid = self._resolve_session_arg(msg, current_sid, arg)
+        if isinstance(target_sid, OutboundMessage):
+            return target_sid  # error message
+
+        if target_sid == current_sid:
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content=f"ℹ️ 已经在该 session 中: `{target_sid}`",
+            )
+
+        # Update routing with session_id
+        self.sessions.switch_session(msg.channel, msg.chat_id, target_sid)
+
+        name = self.sessions.get_session_name(target_sid)
+        display = f"{name} (`{target_sid}`)" if name else f"`{target_sid}`"
+        msg_count = self.sessions.get_session_message_count(target_sid)
+
+        return OutboundMessage(
+            channel=msg.channel, chat_id=msg.chat_id,
+            content=f"✅ 已切换到 session: {display}\n📊 {msg_count} 条消息",
+        )
+
+    # ── /session name <名称> ─────────────────────────────────────────
+
+    def _session_name(
+        self,
+        msg: InboundMessage,
+        session_key: str | None = None,
+        arg: str | None = None,
+    ) -> OutboundMessage:
+        """Set a display name for the current session."""
+        if not arg:
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content="❌ 用法: /session name <名称>",
+            )
+
+        key = session_key or self.sessions.resolve_session_key(msg.session_key)
+        sid = self.sessions.get_session_id(key)
+        self.sessions.set_session_name(sid, arg)
+
+        return OutboundMessage(
+            channel=msg.channel, chat_id=msg.chat_id,
+            content=f"✅ Session 已命名为: **{arg}**\n(`{key}`)",
+        )
+
+    # ── /session done [#N|key] ───────────────────────────────────────
+
+    def _session_done(
+        self,
+        msg: InboundMessage,
+        session_key: str | None = None,
+        active_sessions: dict | None = None,
+        arg: str | None = None,
+    ) -> OutboundMessage:
+        """Mark a session as done (archived)."""
+        current_key = session_key or self.sessions.resolve_session_key(msg.session_key)
+        current_sid = self.sessions.get_session_id(current_key)
+
+        target_sid = self._resolve_session_arg(msg, current_sid, arg)
+        if isinstance(target_sid, OutboundMessage):
+            return target_sid  # error message
+
+        tags = self.sessions.get_session_tags(target_sid)
+        if "done" not in tags:
+            tags.append("done")
+            self.sessions.set_session_tags(target_sid, tags)
+
+        name = self.sessions.get_session_name(target_sid)
+        display = name or target_sid
+
+        # If archiving the current session, create a new one
+        if target_sid == current_sid:
+            new_key = self.sessions.create_new_session(
+                channel=msg.channel, chat_id=msg.chat_id, old_key=current_key,
+            )
+            new_sid = self.sessions.get_session_id(new_key)
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content=(
+                    f"✅ Session **{display}** 已归档\n"
+                    f"🆕 已创建新 session: `{new_sid}`"
+                ),
+            )
+
+        return OutboundMessage(
+            channel=msg.channel, chat_id=msg.chat_id,
+            content=f"✅ Session **{display}** 已归档",
+        )
+
+    # ── /session undone [#N|key] ─────────────────────────────────────
+
+    def _session_undone(
+        self,
+        msg: InboundMessage,
+        session_key: str | None = None,
+        arg: str | None = None,
+    ) -> OutboundMessage:
+        """Remove the done tag from a session."""
+        current_key = session_key or self.sessions.resolve_session_key(msg.session_key)
+        current_sid = self.sessions.get_session_id(current_key)
+
+        target_sid = self._resolve_session_arg(msg, current_sid, arg)
+        if isinstance(target_sid, OutboundMessage):
+            return target_sid  # error message
+
+        tags = self.sessions.get_session_tags(target_sid)
+        if "done" in tags:
+            tags.remove("done")
+            self.sessions.set_session_tags(target_sid, tags)
+
+        name = self.sessions.get_session_name(target_sid)
+        display = name or target_sid
+
+        return OutboundMessage(
+            channel=msg.channel, chat_id=msg.chat_id,
+            content=f"✅ Session **{display}** 已取消归档",
+        )
+
+    # ── /session summary [#N|%id] [条数] ──────────────────────────────
+
+    def _session_summary(
+        self,
+        msg: InboundMessage,
+        session_key: str | None = None,
+        arg: str | None = None,
+    ) -> OutboundMessage:
+        """Show a rule-based summary of a session (no LLM).
+
+        Supports:
+        - ``/session summary``         — current session, 5 user messages
+        - ``/session summary N``       — current session, N user messages
+        - ``/session summary #2``      — session #2, 5 user messages
+        - ``/session summary #2 N``    — session #2, N user messages
+        - ``/session summary %id``     — session by id, 5 user messages
+        - ``/session summary %id N``   — session by id, N user messages
+        """
+        current_key = session_key or self.sessions.resolve_session_key(msg.session_key)
+        current_sid = self.sessions.get_session_id(current_key)
+
+        # Parse arg: may contain session ref + count
+        target_ref: str | None = None
+        user_msg_count = 5  # default
+
+        if arg is not None:
+            tokens = arg.strip().split()
+            for token in tokens:
+                if token.startswith("#") or token.startswith("%"):
+                    target_ref = token
+                else:
+                    try:
+                        user_msg_count = int(token)
+                    except ValueError:
+                        return OutboundMessage(
+                            channel=msg.channel, chat_id=msg.chat_id,
+                            content=f"❌ 无效参数: {token}",
+                        )
+
+        target_sid = self._resolve_session_arg(msg, current_sid, target_ref)
+        if isinstance(target_sid, OutboundMessage):
+            return target_sid  # error message
+
+        # Load session via its key to get messages
+        # session_id -> session_key: we need to find the key for get_or_create
+        # The session_id IS the filename stem, and _get_session_path(session_id)
+        # works because session_id has no colon, so replace(":", "_") is no-op.
+        session = self.sessions.get_or_create(target_sid)
+        messages = session.messages
+
+        if not messages:
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content="📭 该 session 暂无消息",
+            )
+
+        # Count by role
+        role_counts: dict[str, int] = {}
+        user_messages: list[str] = []
+
+        for m in messages:
+            role = m.get("role", "unknown")
+            role_counts[role] = role_counts.get(role, 0) + 1
+            if role == "user":
+                content = m.get("content", "")
+                if isinstance(content, str) and content.strip():
+                    user_messages.append(content[:120])
+
+        total = len(messages)
+        u_count = role_counts.get("user", 0)
+        a_count = role_counts.get("assistant", 0)
+        t_count = role_counts.get("tool", 0)
+
+        name = self.sessions.get_session_name(target_sid)
+
+        lines = [f"📊 **Session 摘要**"]
+        if name:
+            lines.append(f"**名称**: {name}")
+        lines.append(f"**Session ID**: `{target_sid}`")
+        lines.append(f"**消息数**: {total} 条（user: {u_count}, assistant: {a_count}, tool: {t_count}）")
+        lines.append(f"**创建时间**: {session.created_at.strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append(f"**最后更新**: {session.updated_at.strftime('%Y-%m-%d %H:%M:%S')}")
+
+        # Select user messages: first + evenly distributed
+        if user_messages:
+            selected = self._select_evenly(user_messages, user_msg_count)
+            lines.append(f"\n**用户消息**（{len(selected)}/{len(user_messages)} 条）:")
+            for i, text in enumerate(selected, 1):
+                lines.append(f"  {i}. {text}")
+
+        return OutboundMessage(
+            channel=msg.channel, chat_id=msg.chat_id,
+            content="\n".join(lines),
+        )
+
+    @staticmethod
+    def _select_evenly(items: list[str], count: int) -> list[str]:
+        """Select *count* items from *items*: first item + evenly spaced rest."""
+        if len(items) <= count:
+            return list(items)
+        if count <= 0:
+            return []
+        if count == 1:
+            return [items[0]]
+        # First item always included, then pick (count-1) more evenly from the rest
+        indices = [0]
+        step = (len(items) - 1) / (count - 1)
+        for i in range(1, count):
+            indices.append(round(i * step))
+        # Deduplicate while preserving order
+        seen: set[int] = set()
+        unique_indices: list[int] = []
+        for idx in indices:
+            if idx not in seen:
+                seen.add(idx)
+                unique_indices.append(idx)
+        return [items[i] for i in unique_indices]
+
+    # ── Helper: resolve #N or %session_id argument ────────────────────
+
+    def _resolve_session_arg(
+        self,
+        msg: InboundMessage,
+        current_session_id: str,
+        arg: str | None,
+    ) -> "str | OutboundMessage":
+        """Resolve an optional ``#N`` or ``%session_id`` argument.
+
+        Returns the resolved session_id (JSONL filename stem), or an
+        ``OutboundMessage`` on error.  If *arg* is ``None``, returns
+        *current_session_id*.
+
+        Supported formats:
+        - ``#N``  — sequence number from last ``/session list``
+        - ``%session_id`` — direct session_id reference
+        - Plain text is NOT accepted (pure numbers are treated as
+          numeric params by callers, not session refs).
+        """
+        if arg is None:
+            return current_session_id
+
+        arg = arg.strip()
+        if arg.startswith("#"):
+            try:
+                num = int(arg[1:])
+            except ValueError:
+                return OutboundMessage(
+                    channel=msg.channel, chat_id=msg.chat_id,
+                    content=f"❌ 无效序号: {arg}",
+                )
+            cached = self._last_session_list.get(msg.chat_id)
+            if not cached:
+                return OutboundMessage(
+                    channel=msg.channel, chat_id=msg.chat_id,
+                    content="❌ 请先执行 `/session list` 获取列表",
+                )
+            if num < 1 or num > len(cached):
+                return OutboundMessage(
+                    channel=msg.channel, chat_id=msg.chat_id,
+                    content=f"❌ 序号 #{num} 超出范围（当前列表共 {len(cached)} 个）",
+                )
+            return cached[num - 1]
+
+        if arg.startswith("%"):
+            session_id = arg[1:]
+            path = self.sessions.sessions_dir / f"{session_id}.jsonl"
+            if not path.exists():
+                return OutboundMessage(
+                    channel=msg.channel, chat_id=msg.chat_id,
+                    content=f"❌ Session 不存在: `{session_id}`",
+                )
+            return session_id
+
+        # Direct session_id (backward compat for switch command)
+        path = self.sessions.sessions_dir / f"{arg}.jsonl"
+        if not path.exists():
+            # Also try via _get_session_path for legacy key format
+            legacy_path = self.sessions._get_session_path(arg)
+            if legacy_path.exists():
+                return legacy_path.stem
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content=f"❌ Session 不存在: `{arg}`",
+            )
+        return arg
 
     async def _process_message_safe(
         self,
@@ -1215,10 +1769,10 @@ class AgentLoop:
                                   content=f"New session started: {new_key}")
         if cmd == "/help":
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
-                                  content="🐈 nanobot commands:\n/new — Start a new conversation (fresh session)\n/flush — Archive memory and clear current session\n/stop — Stop the currently running task\n/provider — View/switch active LLM provider\n/session — Show current session info and status\n/help — Show available commands")
+                                  content="🐈 nanobot commands:\n/new — Start a new conversation (fresh session)\n/flush — Archive memory and clear current session\n/stop — Stop the currently running task\n/provider — View/switch active LLM provider\n/session — Show current session info and status\n/session list [N] — List recent sessions\n/session switch <#N|%id> — Switch to another session\n/session name <名称> — Name current session\n/session done — Archive current session\n/session summary — Show session summary\n/session help — Show session subcommand help\n/help — Show available commands")
         if cmd.startswith("/provider"):
             return self._handle_provider_command(msg)
-        if cmd == "/session":
+        if cmd == "/session" or cmd.startswith("/session "):
             return self._handle_session_command(msg, session_key=key)
         if cmd == "/stop":
             # When called via process_direct (not through run()), there's
