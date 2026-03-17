@@ -46,6 +46,49 @@ def _format_tokens(n: int) -> str:
     return str(n)
 
 
+_TRUNCATION_WARNING_TEMPLATE = """⚠️ [Context Approaching Limit]
+This session has {current} messages in context. The limit is {max}.
+Older messages will be archived soon. To preserve important context:
+
+Write a session summary to `{workspace}/sessions/session_summary/{session_id}.md` with the following structure:
+
+## Current Task
+(What is being worked on right now)
+
+## Key Decisions
+(Important decisions made in this session, with reasoning)
+
+## Completed Work
+(What has been done so far — files modified, commits made, tests passed)
+
+## Pending Items
+(What still needs to be done)
+
+## Important Constraints
+(Rules, warnings, or constraints that must not be forgotten)
+
+## Open Questions
+(Unresolved questions or issues)
+
+This file will be your primary context recovery source after archival."""
+
+_TRUNCATION_NOTICE_WITH_SUMMARY = """⚠️ [Context Truncation Notice]
+{archived_count} earlier messages in this session have been archived.
+
+--- Session Summary ---
+{summary_content}
+--- End Summary ---
+
+Full session log: `{workspace}/sessions/{session_id}.jsonl` (for precise lookup if summary is insufficient)
+Do NOT re-do work that may have been completed in the archived portion — check files and git history first."""
+
+_TRUNCATION_NOTICE_NO_SUMMARY = """⚠️ [Context Truncation Notice]
+{archived_count} earlier messages in this session have been archived.
+No session summary was written before archival.
+Full session log: `{workspace}/sessions/{session_id}.jsonl` (use grep/parse for context recovery)
+Do NOT re-do work that may have been completed in the archived portion — check files and git history first."""
+
+
 class AgentLoop:
     """
     The agent loop is the core processing engine.
@@ -160,6 +203,7 @@ class AgentLoop:
         self._consolidating: set[str] = set()  # Session keys with consolidation in progress
         self._consolidation_tasks: set[asyncio.Task] = set()  # Strong refs to in-flight tasks
         self._consolidation_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+        self._pending_consolidation_done: dict[str, dict] = {}  # §59: consolidation result pending trim
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
         self._processing_lock = asyncio.Lock()
         self._last_session_list: dict[str, list[str]] = {}  # chat_id -> [session_id, ...]
@@ -387,6 +431,11 @@ class AgentLoop:
             "cache_read_input_tokens": 0,
         }
 
+        # §59: Turn-level warning state (reset each turn, not persisted)
+        _warned_this_turn: bool = False
+        _WARNING_LINE = self.memory_window - 10
+        _CONSOLIDATION_LINE = self.memory_window
+
         # Resolve progress callback: callbacks.on_progress takes precedence
         _progress_fn = on_progress
         if callbacks is not None:
@@ -408,6 +457,47 @@ class AgentLoop:
                     self._on_iteration(iteration, self.max_iterations, _last_tool)
                 except Exception:
                     pass  # Callback errors must not break the agent loop
+
+            # §59: Step 1 — Consolidation just completed? Trim messages.
+            if session is not None and session.key in self._pending_consolidation_done:
+                info = self._pending_consolidation_done.pop(session.key)
+                _warned_this_turn = self._trim_consolidated_messages(messages, info, session, _warned_this_turn)
+
+            # §59: Step 2 — Need to trigger consolidation?
+            _msg_count = len(messages) - 1  # exclude system prompt at messages[0]
+            if (session is not None
+                    and _msg_count >= _CONSOLIDATION_LINE
+                    and session.key not in self._consolidating):
+                self._consolidating.add(session.key)
+                _archive_cut = self._find_tool_aligned_cut(messages, 1, self.memory_window // 2)
+                logger.info("§59: Triggering mid-turn consolidation (msg_count={}, archive_cut={})", _msg_count, _archive_cut)
+                _task = asyncio.create_task(
+                    self._do_mid_turn_consolidation(session, messages, _archive_cut,
+                                                    provider=_provider, model=_model)
+                )
+                self._consolidation_tasks.add(_task)
+                _task.add_done_callback(self._consolidation_tasks.discard)
+
+            # §59: Step 3 — Need to warn?
+            _msg_count = len(messages) - 1
+            if (session is not None
+                    and _msg_count >= _WARNING_LINE
+                    and not _warned_this_turn
+                    and session.key not in self._consolidating):
+                _session_id = session.key.replace(":", "_")
+                _warn_msg = {
+                    "role": "user",
+                    "content": _TRUNCATION_WARNING_TEMPLATE.format(
+                        current=_msg_count,
+                        max=_CONSOLIDATION_LINE,
+                        workspace=str(self.workspace),
+                        session_id=_session_id,
+                    ),
+                    "timestamp": datetime.now().isoformat(),
+                }
+                messages.append(_warn_msg)
+                _warned_this_turn = True
+                logger.info("§59: Injected truncation warning (msg_count={})", _msg_count)
 
             # ── Budget alert: warn LLM when iterations are running low ──
             # §43: Use "user" role so the alert is visible to the LLM at the
@@ -1809,26 +1899,6 @@ class AgentLoop:
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="No active task to stop.")
 
-        unconsolidated = len(session.messages) - session.last_consolidated
-        if (unconsolidated >= self.memory_window and session.key not in self._consolidating):
-            self._consolidating.add(session.key)
-            lock = self._consolidation_locks.setdefault(session.key, asyncio.Lock())
-
-            async def _consolidate_and_unlock():
-                try:
-                    async with lock:
-                        await self._consolidate_memory(
-                            session, provider=_provider, model=_model,
-                        )
-                finally:
-                    self._consolidating.discard(session.key)
-                    _task = asyncio.current_task()
-                    if _task is not None:
-                        self._consolidation_tasks.discard(_task)
-
-            _task = asyncio.create_task(_consolidate_and_unlock())
-            self._consolidation_tasks.add(_task)
-
         self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"),
                               session_key=key, tools=_tools)
         if message_tool := _tools.get("message"):
@@ -1919,6 +1989,102 @@ class AgentLoop:
         return await MemoryStore(self.workspace).consolidate(
             session, _provider, _model,
             archive_all=archive_all, memory_window=self.memory_window,
+            detail_logger=self.detail_logger,
+            usage_recorder=self.usage_recorder,
+        )
+
+    async def _do_mid_turn_consolidation(
+        self, session: Session, messages: list[dict], archive_cut: int,
+        *, provider: LLMProvider | None = None, model: str | None = None,
+    ) -> None:
+        """§59: Run consolidation asynchronously, store result in pending dict."""
+        try:
+            lock = self._consolidation_locks.setdefault(session.key, asyncio.Lock())
+            async with lock:
+                success = await self._consolidate_memory(
+                    session, provider=provider, model=model,
+                )
+            if success:
+                logger.info("§59: Mid-turn consolidation succeeded for {} (last_consolidated={})", session.key, session.last_consolidated)
+                self._pending_consolidation_done[session.key] = {
+                    "archive_cut": archive_cut,
+                    "last_consolidated": session.last_consolidated,
+                    "messages_len": len(messages),
+                }
+            else:
+                logger.warning("§59: Mid-turn consolidation returned False for {}", session.key)
+        except Exception:
+            logger.exception("§59: Mid-turn consolidation failed for {}", session.key)
+        finally:
+            self._consolidating.discard(session.key)
+
+    def _trim_consolidated_messages(
+        self, messages: list[dict], info: dict, session: Session,
+        warned_this_turn: bool,
+    ) -> bool:
+        """§59: Remove archived messages from in-memory list and inject truncation notice."""
+        from datetime import datetime
+        archive_cut = info["archive_cut"]
+        saved_messages_len = info.get("messages_len")
+        # If messages were rebuilt via get_history() between turns, skip trimming
+        if saved_messages_len is not None and len(messages) < saved_messages_len - archive_cut:
+            logger.info("§59: Skipping trim — messages rebuilt between turns (saved={}, current={}, cut={})",
+                        saved_messages_len, len(messages), archive_cut)
+            return warned_this_turn
+        if archive_cut <= 0 or archive_cut >= len(messages):
+            logger.debug("§59: Skipping trim — archive_cut={} out of range (messages={})", archive_cut, len(messages))
+            return warned_this_turn
+        del messages[1:archive_cut]
+        notice = self._build_truncation_notice(session, self.workspace)
+        messages.insert(1, {
+            "role": "user",
+            "content": notice,
+            "timestamp": datetime.now().isoformat(),
+        })
+        logger.info("§59: Trimmed {} messages, injected truncation notice", archive_cut)
+        return False
+
+    def _find_tool_aligned_cut(self, messages: list[dict], start: int, target_count: int) -> int:
+        """§59: Find a safe cut point that doesn't split tool_call/tool_result pairs.
+
+        Archives messages[start:cut], so we check messages[cut-1] (the last archived message)
+        to ensure it's not a tool result or an assistant message with tool_calls.
+        """
+        cut = min(start + target_count, len(messages) - 1)
+        while cut > start:
+            last_archived = messages[cut - 1]
+            # Cannot end with a tool result (would break pairing with preceding assistant tool_calls)
+            if last_archived.get("role") == "tool":
+                cut -= 1
+                continue
+            # Cannot end with assistant(tool_calls) (corresponding tool results are after cut)
+            if last_archived.get("role") == "assistant" and last_archived.get("tool_calls"):
+                cut -= 1
+                continue
+            break
+        return cut
+
+    @staticmethod
+    def _build_truncation_notice(session: Session, workspace: Path) -> str:
+        """§59: Build truncation notice, expanding session summary if available."""
+        session_id = session.key.replace(":", "_")
+        archived_count = session.last_consolidated
+        summary_path = workspace / "sessions" / "session_summary" / f"{session_id}.md"
+        try:
+            if summary_path.exists():
+                summary_content = summary_path.read_text(encoding="utf-8").strip()
+                return _TRUNCATION_NOTICE_WITH_SUMMARY.format(
+                    archived_count=archived_count,
+                    summary_content=summary_content,
+                    workspace=str(workspace),
+                    session_id=session_id,
+                )
+        except Exception:
+            logger.debug("§59: Failed to read session summary from {}", summary_path)
+        return _TRUNCATION_NOTICE_NO_SUMMARY.format(
+            archived_count=archived_count,
+            workspace=str(workspace),
+            session_id=session_id,
         )
 
     async def process_direct(

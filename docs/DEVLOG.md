@@ -78,6 +78,7 @@
 | Phase 52: Subagent Provider 继承 (§56) | ✅ 已完成 | feat/batch-20260313-plan-core-fixes |
 | Phase 53: 飞书语音消息 recognition 提取 (§57) | ✅ 已完成 | feat/batch-20260313-plan-core-fixes |
 | Phase 54: follow_up resume 缺少 event_callback (§58) | ✅ 已完成 | local |
+| Phase 55: Turn 内 Consolidation + 截断预警/通知 (§59) | 🔜 进行中 | feat/turn-consolidation |
 
 ---
 
@@ -152,39 +153,14 @@
 | 49 | Cron name 参数 + 消息格式优化 (§55) | ✅ | [devlog/phase-46-50.md](devlog/phase-46-50.md) |
 | 50 | Session 父子关系解析统一到核心 (§54) | ✅ | [devlog/phase-46-50.md](devlog/phase-46-50.md) |
 | 51 | CronTool 改用 session/parents.py 验证 target_session (§53 R2) | ✅ | [devlog/phase-51-55.md](devlog/phase-51-55.md) |
-| 52 | Subagent Provider 继承 (§56) | ✅ | *主文件* |
+| 52 | Subagent Provider 继承 (§56) | ✅ | [devlog/phase-51-55.md](devlog/phase-51-55.md) |
 | 53 | 飞书语音消息 recognition 提取 (§57) | ✅ | *主文件* |
 | 54 | follow_up resume 缺少 event_callback (§58) | ✅ | *主文件* |
+| 55 | Turn 内 Consolidation + 截断预警/通知 (§59) | 🔜 | *主文件* |
 
 ---
 
 ---
-
----
-
-## Phase 52: Subagent Provider 继承 (§56) ✅
-
-**日期**: 2026-03-16
-**需求**: §56（`requirements/s50-s59.md`）
-**架构**: §二十九（`architecture/spawn.md`）
-
-### 背景
-
-Gateway 模式下，主 session 通过 per-session override 使用 `anthropic_proxy`，但 subagent 通过 `ProviderPool.chat()` 使用全局默认 `anthropic`。WebChat 下有并发竞态风险。
-
-### 任务清单
-
-- [ ] **T52.1** `nanobot/agent/subagent.py` — 新增 `_resolve_provider()` 辅助方法
-- [ ] **T52.2** `nanobot/agent/subagent.py` — `QueuedSpawn` 新增 `provider`/`model` 字段
-- [ ] **T52.3** `nanobot/agent/subagent.py` — `spawn()` 调用 `_resolve_provider()`，传给 `_start_subagent_task()`
-- [ ] **T52.4** `nanobot/agent/subagent.py` — `_start_subagent_task()` 接收并传递 provider/model
-- [ ] **T52.5** `nanobot/agent/subagent.py` — `_run_subagent()` 新增 provider/model 参数，用于 LLM 调用和 usage recording
-- [ ] **T52.6** `nanobot/agent/subagent.py` — `_chat_with_retry()` 新增 provider/model 参数
-- [ ] **T52.7** `nanobot/agent/subagent.py` — `follow_up()` resume 时调用 `_resolve_provider()`
-- [ ] **T52.8** `nanobot/agent/subagent.py` — `_try_dequeue()` 传递 QueuedSpawn 中的 provider/model
-- [ ] **T52.9** `tests/test_subagent_provider_inherit.py` — 新增单元测试
-- [ ] **T52.10** 全量回归测试通过
-- [ ] **T52.11** Git commit
 
 ---
 
@@ -237,3 +213,31 @@ Gateway 模式下，主 session 通过 per-session override 使用 `anthropic_pr
 |------|------|
 | `nanobot/agent/subagent.py` | follow_up() resume 分支添加 event_callback 调用（~4 行） |
 | `tests/test_subagent_event_callback.py` | 新增 TestOnSubagentSpawnedFollowUp 测试类 |
+
+---
+
+## Phase 55: Turn 内 Consolidation + 截断预警/通知 (§59) 🔜
+
+**日期**: 2026-03-18
+**需求**: §59（`requirements/s50-s59.md`）
+**架构**: §三十（`architecture/core-loop.md`）
+**分支**: `feat/turn-consolidation`
+
+### 背景
+
+Consolidation 触发检查只在 `_process_message()` 的 turn 入口，但消息增长主要在 turn 内的 tool call 循环中。`max_iterations` 最高 100，一个 turn 可产生 200+ 条消息，导致下一个 turn 的 `get_history()` 截断大量历史信息。
+
+### 任务清单
+
+- [ ] **T55.0** `nanobot/agent/memory.py` — `consolidate()` 新增 `detail_logger` 和 `usage_recorder` 参数，LLM 调用后记录
+- [ ] **T55.1** `nanobot/agent/loop.py` — 新增实例变量 `_pending_consolidation_done`
+- [ ] **T55.2** `nanobot/agent/loop.py` — `_run_agent_loop` 循环头部插入 Step 1/2/3 检查
+- [ ] **T55.3** `nanobot/agent/loop.py` — 新增 `_do_mid_turn_consolidation()` 方法
+- [ ] **T55.4** `nanobot/agent/loop.py` — 新增 `_trim_consolidated_messages()` 方法
+- [ ] **T55.5** `nanobot/agent/loop.py` — 新增 `_find_tool_aligned_cut()` 方法
+- [ ] **T55.6** `nanobot/agent/loop.py` — 新增 `_build_truncation_notice()` 方法
+- [ ] **T55.7** `nanobot/agent/loop.py` — 移除 `_process_message` 中旧的 turn 入口 consolidation 逻辑
+- [ ] **T55.8** `nanobot/agent/loop.py` — `_consolidate_memory()` 传入 `detail_logger` 和 `usage_recorder`
+- [ ] **T55.9** `nanobot/session/manager.py` — `get_history()` 头部注入截断通知（`last_consolidated > 0` 时）
+- [ ] **T55.10** 测试验证（import 不报错、基本逻辑正确）
+- [ ] **T55.11** Git commit

@@ -13,6 +13,8 @@ from nanobot.utils.helpers import ensure_dir
 if TYPE_CHECKING:
     from nanobot.providers.base import LLMProvider
     from nanobot.session.manager import Session
+    from nanobot.usage.detail_logger import LLMDetailLogger
+    from nanobot.usage.recorder import UsageRecorder
 
 
 _SAVE_MEMORY_TOOL = [
@@ -74,6 +76,8 @@ class MemoryStore:
         *,
         archive_all: bool = False,
         memory_window: int = 50,
+        detail_logger: LLMDetailLogger | None = None,
+        usage_recorder: UsageRecorder | None = None,
     ) -> bool:
         """Consolidate old messages into MEMORY.md + HISTORY.md via LLM tool call.
 
@@ -119,6 +123,45 @@ class MemoryStore:
                 tools=_SAVE_MEMORY_TOOL,
                 model=model,
             )
+
+            # Record consolidation LLM call to llm-logs and analytics.db
+            from datetime import datetime as _dt
+            _call_ts = _dt.now().isoformat()
+            if detail_logger is not None and response.usage:
+                try:
+                    detail_logger.log_call(
+                        session_key=session.key,
+                        model=model,
+                        iteration=0,
+                        messages=[
+                            {"role": "system", "content": "You are a memory consolidation agent."},
+                            {"role": "user", "content": prompt[:200] + "..."},
+                        ],
+                        response_content=response.content,
+                        response_tool_calls=None,
+                        response_finish_reason=response.finish_reason if hasattr(response, "finish_reason") else "stop",
+                        response_usage=response.usage,
+                        provider=getattr(provider, "provider_name", ""),
+                    )
+                except Exception:
+                    logger.debug("Failed to log consolidation LLM call to detail_logger")
+            if usage_recorder is not None and response.usage:
+                try:
+                    usage_recorder.record(
+                        session_key=session.key,
+                        model=model,
+                        prompt_tokens=response.usage.get("prompt_tokens", 0),
+                        completion_tokens=response.usage.get("completion_tokens", 0),
+                        total_tokens=response.usage.get("total_tokens", 0),
+                        llm_calls=1,
+                        started_at=_call_ts,
+                        finished_at=_call_ts,
+                        cache_creation_input_tokens=response.usage.get("cache_creation_input_tokens", 0),
+                        cache_read_input_tokens=response.usage.get("cache_read_input_tokens", 0),
+                        provider=getattr(provider, "provider_name", ""),
+                    )
+                except Exception:
+                    logger.debug("Failed to record consolidation usage")
 
             if not response.has_tool_calls:
                 logger.warning("Memory consolidation: LLM did not call save_memory, skipping")

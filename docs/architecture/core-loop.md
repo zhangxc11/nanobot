@@ -17,6 +17,7 @@
 | §二十五 | LLM logs + session provider 字段 (§48) |
 | §二十七 | Budget alert 公共函数 (§48) |
 | §二十八 | Runtime Context 注入 Session ID (§51) |
+| §三十 | Turn 内 Consolidation + 截断预警/通知 (§59) |
 
 ---
 
@@ -873,3 +874,60 @@ CronTool 内部使用 `session_id` 进行 target_session 校验（通过 `sessio
 | key → id | `key.replace(":", "_")` | `webchat:1773591411` → `webchat_1773591411` |
 | id → key | `id.replace("_", ":", 1)` | `webchat_1773591411` → `webchat:1773591411` |
 | subagent | `id.replace("_", ":", 1)` | `subagent_webchat_xxx_a1b2` → `subagent:webchat_xxx_a1b2` |
+
+---
+
+## §三十 Turn 内 Consolidation + 截断预警/通知 (§59)
+
+### 问题
+
+Consolidation 触发检查只在 `_process_message()` 的 turn 入口，但消息增长主要在 turn 内的 tool call 循环中。`max_iterations` 最高 100，一个 turn 可产生 200+ 条消息，导致下一个 turn 的 `get_history()` 截断大量历史。
+
+### 架构设计
+
+#### 阈值常量（turn 级局部变量）
+
+```python
+WARNING_LINE = self.memory_window - 10      # 默认 90
+CONSOLIDATION_LINE = self.memory_window     # 默认 100
+```
+
+#### 状态管理
+
+```
+AgentLoop 实例级（跨 turn 存在）：
+  self._consolidating: set[str]                    # 已有
+  self._pending_consolidation_done: dict[str, dict] # 新增
+  self._consolidation_locks: WeakValueDictionary    # 已有
+
+Turn 级（_run_agent_loop 局部变量）：
+  _warned_this_turn: bool = False
+```
+
+#### 循环头部检查（Step 1/2/3）
+
+插入位置：`_run_agent_loop` 循环头部，budget alert 之前。
+
+- **Step 1**：`_pending_consolidation_done` 有值 → 调用 `_trim_consolidated_messages()` 瘦身，重置 `_warned_this_turn = False`
+- **Step 2**：`len(messages) - 1 >= CONSOLIDATION_LINE` 且未在 consolidating → 异步触发 `_do_mid_turn_consolidation()`
+- **Step 3**：`len(messages) - 1 >= WARNING_LINE` 且未预警且未在 consolidating → 注入预警消息，`_warned_this_turn = True`
+
+#### 消息计数
+
+`messages[0]` 是 system prompt（含 tool 清单），不计入。检查阈值使用 `len(messages) - 1`。
+
+#### Tool Call 边界对齐
+
+`_find_tool_aligned_cut()` 向前回退到安全边界，不切断 `assistant(tool_calls) + tool result` 对。
+
+#### get_history() 截断通知注入
+
+`last_consolidated > 0` 时头部注入截断通知（与 turn 内瘦身使用相同模板和 `archived_count=session.last_consolidated`）。首次 consolidation 未完成时（`last_consolidated == 0`）不注入。
+
+#### 截断通知内容
+
+读取 `$WORKSPACE/sessions/session_summary/{session_id}.md`，有则展开，无则 fallback 提示读取 JSONL 日志。
+
+#### 移除旧逻辑
+
+`_process_message` 中第 1812-1830 行的 turn 入口 consolidation 检查移除，统一到 `_run_agent_loop` 内部。

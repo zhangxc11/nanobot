@@ -34,3 +34,29 @@ Phase 50 新增了 `nanobot/session/parents.py` 核心模块。本 Phase 将 Cro
 
 - **sessions_dir 参数可选且 None 安全**：`set_context()` 中 `sessions_dir` 默认 None，仅当非 None 时更新。`_validate_target_session()` 在 `_sessions_dir` 为 None 时跳过 `is_child_of` 检查，直接拒绝非 self/非 cron 目标——这是安全的降级行为。
 - **cron_ 前缀检查在 is_child_of 之前**：避免不必要的文件系统扫描。
+
+---
+
+## Phase 52: Subagent Provider 继承 (§56) ✅
+
+**日期**: 2026-03-16
+**需求**: §56（`requirements/s50-s59.md`）
+**架构**: §二十九（`architecture/spawn.md`）
+
+### 背景
+
+Gateway 模式下，主 session 通过 per-session override 使用 `anthropic_proxy`，但 subagent 通过 `ProviderPool.chat()` 使用全局默认 `anthropic`。WebChat 下有并发竞态风险。
+
+### 任务清单
+
+- [x] **T52.1** `nanobot/agent/subagent.py` — 新增 `_resolve_provider()` 辅助方法
+- [x] **T52.2** `nanobot/agent/subagent.py` — `QueuedSpawn` 新增 `provider`/`model` 字段
+- [x] **T52.3** `nanobot/agent/subagent.py` — `spawn()` 调用 `_resolve_provider()`，传给 `_start_subagent_task()`
+- [x] **T52.4** `nanobot/agent/subagent.py` — `_start_subagent_task()` 接收并传递 provider/model
+- [x] **T52.5** `nanobot/agent/subagent.py` — `_run_subagent()` 新增 provider/model 参数，用于 LLM 调用和 usage recording
+- [x] **T52.6** `nanobot/agent/subagent.py` — `_chat_with_retry()` 新增 provider/model 参数
+- [x] **T52.7** `nanobot/agent/subagent.py` — `follow_up()` resume 时调用 `_resolve_provider()`
+- [x] **T52.8** `nanobot/agent/subagent.py` — `_try_dequeue()` 传递 QueuedSpawn 中的 provider/model
+- [x] **T52.9** `tests/test_subagent_provider_inherit.py` — 新增单元测试
+- [x] **T52.10** 全量回归测试通过
+- [x] **T52.11** Git commit
