@@ -1644,12 +1644,40 @@ class AgentLoop:
             ))
         except Exception as e:
             logger.error("Error processing message: {}", e)
+            # Persist core error to session JSONL so frontend can display it
+            # after page refresh.  Uses the unified ``"Error calling LLM:"``
+            # prefix format so get_history() filters it and frontend renders
+            # it with the existing error bubble style.
+            self._persist_error(msg.session_key, e)
             await self.bus.publish_outbound(OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
                 content=f"Sorry, I encountered an error: {str(e)}"
             ))
 
+    def _persist_error(self, session_key: str, error: Exception) -> None:
+        """Persist an error message to the session JSONL.
+
+        Uses the same ``role: "assistant"`` + ``"Error calling LLM:"``
+        prefix format as the in-loop LLM error path, so that:
+        - ``get_history()`` Phase 2 filters it out (no poison loops)
+        - The frontend ``isErrorMessage()`` detects and renders it with
+          the existing error bubble style (no extra logic needed)
+        """
+        from datetime import datetime
+
+        try:
+            key = self.sessions.resolve_session_key(session_key)
+            session = self.sessions.get_or_create(key)
+            error_entry = {
+                "role": "assistant",
+                "content": f"Error calling LLM: {error}",
+                "timestamp": datetime.now().isoformat(),
+            }
+            self.sessions.append_message(session, error_entry)
+            self.sessions.update_metadata(session)
+        except Exception:
+            logger.exception("Failed to persist error to session JSONL")
 
     async def close_mcp(self) -> None:
         """Close MCP connections."""
@@ -1907,13 +1935,23 @@ class AgentLoop:
 
         When *callbacks* is provided, events are dispatched to the callback
         object.  The ``on_done`` callback receives an ``AgentResult``.
+
+        Errors are persisted to the session JSONL (as ``role: "assistant"``
+        with ``"Error calling LLM:"`` prefix) so that the message survives
+        a page refresh, then **re-raised** so the caller can handle task
+        status as before.
         """
         await self._connect_mcp()
         msg = InboundMessage(channel=channel, sender_id="user", chat_id=chat_id, content=content,
                              media=media or [])
-        response = await self._process_message(
-            msg, session_key=session_key, on_progress=on_progress, callbacks=callbacks,
-        )
+        try:
+            response = await self._process_message(
+                msg, session_key=session_key, on_progress=on_progress, callbacks=callbacks,
+            )
+        except Exception as e:
+            # Persist error to session JSONL before re-raising.
+            self._persist_error(session_key or f"{channel}:{chat_id}", e)
+            raise
         result_content = response.content if response else ""
 
         # Fire on_done callback

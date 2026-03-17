@@ -81,3 +81,61 @@
 
 - **final-response 有 pending 时 continue 而非 break**：用户发了消息就期望 LLM 处理，不能静默丢弃
 - **日志全量记录**：日志成本远低于丢失消息后无法排查的代价
+
+---
+
+## Phase 48: Runtime Context 注入 Session ID (§51) ✅
+
+**日期**: 2026-03-12
+**需求**: §51（`requirements/s50-s59.md`）
+**架构**: §二十八（`architecture/core-loop.md`）
+**Commit**: `30ebaf5`
+
+### 背景
+
+Agent 需要可靠获取自己的 session 标识。当前 Runtime Context 只注入 Channel + Chat ID，agent 需手动拼接，但在飞书 routed session 和 subagent 场景下拼接结果不等于实际 session ID。
+
+### 任务清单
+
+- [x] **T48.1** `nanobot/agent/context.py` — `_build_runtime_context` 新增 `session_id` 参数，输出 `Session ID: {session_id}`
+- [x] **T48.2** `nanobot/agent/context.py` — `build_messages` 新增 `session_id` 参数，透传到 `_build_runtime_context`
+- [x] **T48.3** `nanobot/agent/loop.py` — 两个 `build_messages` 调用点传入 `session_id=key.replace(":", "_")`
+- [x] **T48.4** `nanobot/agent/subagent.py` — `_build_subagent_prompt` 中调用 `_build_runtime_context` 传入 `session_id`
+- [x] **T48.5** `tests/test_session_id_context.py` — 7 个新测试全部通过
+- [x] **T48.6** 全量回归 713 passed, 1 skipped ✅
+- [x] **T48.7** Git commit `30ebaf5`
+
+### 改动文件
+
+| 文件 | 改动 |
+|------|------|
+| `nanobot/agent/context.py` | `_build_runtime_context` + `build_messages` 新增 `session_id` 参数 |
+| `nanobot/agent/loop.py` | 两个 `build_messages` 调用点传入 `session_id=key.replace(":", "_")` |
+| `nanobot/agent/subagent.py` | `_build_subagent_prompt(session_key)` 传入 subagent session key |
+| `tests/test_session_id_context.py` | 7 个新测试 |
+
+---
+
+## Phase 49: Cron name 参数 + 消息格式优化 (§55) ✅
+
+**日期**: 2026-03-16
+**需求**: §55（`requirements/s50-s59.md`）
+**Commit**: nanobot `db5aaa0` / web-chat `e8bd58f`
+
+### 背景
+
+1. **G1 消息内容重复**：`_add_job()` 中 `name = message[:30]`，当 message ≤ 30 字符时 name == message，导致 executor 端消息中 job.name 和 message 重复显示
+2. **G3 文档缺失**：`tz` 参数仅对 `cron_expr` 生效，不对 `at` 生效，但 SKILL.md 和 tool schema 未说明
+3. **G5 session 列表无区分度**：所有 cron session 显示为 `[Scheduled Task] Timer finished.`
+
+### 任务清单
+
+- [x] **T49.1** CronTool schema 新增 `name` 参数（可选），LLM 传入时使用，未传时 fallback `message[:50]`
+- [x] **T49.2** CronTool `tz` description 改为明确仅对 `cron_expr` 生效
+- [x] **T49.3** SKILL.md 补充 tz + at 不兼容说明
+- [x] **T49.4** web-chat WorkerCronExecutor `execute_job()` 消息格式简化
+- [x] **T49.5** web-chat WorkerCronExecutor `send_to_session()` 前缀简化
+- [x] **T49.6** web-chat 前端 `isCronNotification()` 检测逻辑改为 `⏰` 前缀
+- [x] **T49.7** web-chat 前端 `parseCronNotification()` 适配新旧两种格式
+- [x] **T49.8** 新增 7 个测试
+- [x] **T49.9** 全量回归 780 passed, 1 skipped ✅

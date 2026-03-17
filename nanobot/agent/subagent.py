@@ -23,6 +23,10 @@ Stopped subagents skip announce and can be resumed via follow_up.
 
 §47: SubagentEventCallback protocol — 4 lifecycle callbacks (spawned,
 progress, retry, done) for external consumers to track subagent state.
+
+§56: Subagent provider inheritance — spawn/follow_up resolve the parent
+session's provider from ProviderPool and pass it as a snapshot to the
+subagent runtime, so subagents use the correct per-session provider.
 """
 
 import asyncio
@@ -46,6 +50,7 @@ from nanobot.providers.base import LLMProvider
 
 if TYPE_CHECKING:
     from nanobot.agent.callbacks import SessionMessenger
+    from nanobot.providers.pool import ProviderPool
     from nanobot.session.manager import SessionManager
     from nanobot.usage.detail_logger import LLMDetailLogger
     from nanobot.usage.recorder import UsageRecorder
@@ -134,6 +139,9 @@ class QueuedSpawn:
     Stores all parameters needed to start the subagent when a slot
     becomes available. Created when spawn() is called but concurrency
     limit is reached.
+
+    §56: Added resolved_provider/resolved_model to carry the parent
+    session's provider snapshot through the queue.
     """
     task_id: str
     task: str
@@ -143,6 +151,9 @@ class QueuedSpawn:
     max_iterations: int
     persist: bool
     subagent_session_key: str
+    # §56: Provider snapshot from parent session
+    resolved_provider: LLMProvider | None = None
+    resolved_model: str | None = None
 
 
 class SubagentManager:
@@ -220,6 +231,38 @@ class SubagentManager:
         """§46: Count currently running (not done) subagent tasks."""
         return sum(1 for t in self._running_tasks.values() if not t.done())
 
+    def _resolve_provider(self, parent_session_key: str | None) -> tuple[LLMProvider, str]:
+        """§56: Resolve the provider/model for a subagent based on parent session.
+
+        If the provider is a ProviderPool and a parent_session_key is given,
+        returns the per-session (or global fallback) provider instance and model.
+        Otherwise falls back to self.provider / self.model.
+
+        Returns
+        -------
+        tuple[LLMProvider, str]
+            (provider_instance, model_name) — a snapshot safe for the
+            subagent's entire lifetime.
+        """
+        from nanobot.providers.pool import ProviderPool
+
+        if isinstance(self.provider, ProviderPool) and parent_session_key:
+            try:
+                provider_inst, model = self.provider.get_for_session(parent_session_key)
+                prov_name = self.provider.get_session_provider_name(parent_session_key)
+                logger.debug(
+                    "§56: Resolved provider for parent session '{}': {} / {}",
+                    parent_session_key, prov_name, model,
+                )
+                return provider_inst, model
+            except Exception as e:
+                logger.warning(
+                    "§56: Failed to resolve provider for session '{}', "
+                    "falling back to default: {}",
+                    parent_session_key, e,
+                )
+        return self.provider, self.model
+
     async def spawn(
         self,
         task: str,
@@ -274,6 +317,9 @@ class SubagentManager:
             MAX_SUBAGENT_ITERATIONS,
         )
 
+        # §56: Resolve parent session's provider/model (snapshot)
+        resolved_provider, resolved_model = self._resolve_provider(session_key)
+
         # §46: Check concurrency limit
         if self._running_count >= self._max_concurrency:
             # Queue this spawn request
@@ -301,6 +347,8 @@ class SubagentManager:
                 max_iterations=effective_max,
                 persist=persist,
                 subagent_session_key=subagent_key,
+                resolved_provider=resolved_provider,   # §56
+                resolved_model=resolved_model,         # §56
             )
             self._queue.append(queued)
             position = len(self._queue)
@@ -342,7 +390,9 @@ class SubagentManager:
 
         self._start_subagent_task(task_id, task, display_label, origin,
                                   effective_max, persist, subagent_key,
-                                  session_key, meta)
+                                  session_key, meta,
+                                  resolved_provider=resolved_provider,
+                                  resolved_model=resolved_model)
 
         logger.info("Spawned subagent [{}]: {} (max_iterations={}, persist={})",
                      task_id, display_label, effective_max, persist)
@@ -359,16 +409,23 @@ class SubagentManager:
         subagent_key: str,
         session_key: str | None,
         meta: SubagentMeta,
+        resolved_provider: LLMProvider | None = None,
+        resolved_model: str | None = None,
     ) -> None:
         """§46: Start an asyncio task for a subagent and register cleanup.
 
         Extracted from spawn() to be reused by _try_dequeue().
+
+        §56: resolved_provider/resolved_model are the parent session's
+        provider snapshot. Passed through to _run_subagent().
         """
         bg_task = asyncio.create_task(
             self._run_subagent(task_id, task, label, origin,
                                max_iterations, persist, subagent_key,
                                parent_session_key=session_key,
-                               inject_queue=meta.inject_queue)
+                               inject_queue=meta.inject_queue,
+                               resolved_provider=resolved_provider,
+                               resolved_model=resolved_model)
         )
         self._running_tasks[task_id] = bg_task
         if session_key:
@@ -422,6 +479,8 @@ class SubagentManager:
                 subagent_key=queued.subagent_session_key,
                 session_key=queued.session_key,
                 meta=meta,
+                resolved_provider=queued.resolved_provider,   # §56
+                resolved_model=queued.resolved_model,         # §56
             )
 
     async def _run_subagent(
@@ -436,14 +495,25 @@ class SubagentManager:
         parent_session_key: str | None = None,
         inject_queue: asyncio.Queue[str] | None = None,
         resume_messages: list[dict[str, Any]] | None = None,
+        resolved_provider: LLMProvider | None = None,
+        resolved_model: str | None = None,
     ) -> None:
         """Execute the subagent task and announce the result.
 
         §36: Added inject_queue for mid-execution message injection,
         and resume_messages for resuming from session history.
+
+        §56: resolved_provider/resolved_model override self.provider/self.model
+        for this subagent's LLM calls, inheriting the parent session's provider.
         """
-        logger.info("Subagent [{}] starting task: {} (max_iterations={}{})",
+        # §56: Use resolved provider/model or fall back to self defaults
+        _provider = resolved_provider or self.provider
+        _model = resolved_model or self.model
+
+        logger.info("Subagent [{}] starting task: {} (max_iterations={}, provider={}, model={}{})",
                      task_id, label, max_iterations,
+                     getattr(_provider, "provider_name", type(_provider).__name__),
+                     _model,
                      ", resumed" if resume_messages else "")
 
         try:
@@ -523,7 +593,8 @@ class SubagentManager:
                     messages.append(budget_msg)
 
                 # LLM call with retry
-                response = await self._chat_with_retry(messages, tools, task_id=task_id)
+                response = await self._chat_with_retry(messages, tools, task_id=task_id,
+                                                       provider=_provider, model=_model)
 
                 # ── Usage recording ──
                 if response.usage and self.usage_recorder:
@@ -531,7 +602,7 @@ class SubagentManager:
                     try:
                         self.usage_recorder.record(
                             session_key=subagent_session_key,
-                            model=self.model,
+                            model=_model,
                             prompt_tokens=response.usage.get("prompt_tokens", 0),
                             completion_tokens=response.usage.get("completion_tokens", 0),
                             total_tokens=response.usage.get("total_tokens", 0),
@@ -540,7 +611,7 @@ class SubagentManager:
                             finished_at=now,
                             cache_creation_input_tokens=response.usage.get("cache_creation_input_tokens", 0),
                             cache_read_input_tokens=response.usage.get("cache_read_input_tokens", 0),
-                            provider=getattr(self.provider, "provider_name", ""),  # §41
+                            provider=getattr(_provider, "provider_name", ""),  # §41, §56
                         )
                     except Exception as e:
                         logger.warning("Subagent [{}] usage recording failed: {}", task_id, e)
@@ -555,14 +626,14 @@ class SubagentManager:
                         ]
                     self.detail_logger.log_call(
                         session_key=subagent_session_key,
-                        model=self.model,
+                        model=_model,
                         iteration=iteration,
                         messages=messages,
                         response_content=response.content,
                         response_tool_calls=_tc_dicts,
                         response_finish_reason=response.finish_reason,
                         response_usage=response.usage if response.usage else None,
-                        provider=getattr(self.provider, "provider_name", ""),
+                        provider=getattr(_provider, "provider_name", ""),
                     )
 
                 if response.has_tool_calls:
@@ -585,7 +656,7 @@ class SubagentManager:
                         "timestamp": datetime.now().isoformat(),
                     }
                     # §48: Add provider info to assistant message
-                    _prov = getattr(self.provider, "provider_name", "")
+                    _prov = getattr(_provider, "provider_name", "")
                     if _prov and isinstance(_prov, str):
                         assistant_msg["provider"] = _prov
                     messages.append(assistant_msg)
@@ -649,7 +720,7 @@ class SubagentManager:
                             "timestamp": datetime.now().isoformat(),
                         }
                         # §48: Add provider info to final assistant message
-                        _prov = getattr(self.provider, "provider_name", "")
+                        _prov = getattr(_provider, "provider_name", "")
                         if _prov and isinstance(_prov, str):
                             final_msg["provider"] = _prov
                         self.session_manager.append_message(session, final_msg)
@@ -753,6 +824,8 @@ class SubagentManager:
         messages: list[dict[str, Any]],
         tools: ToolRegistry,
         task_id: str | None = None,
+        provider: LLMProvider | None = None,
+        model: str | None = None,
     ) -> Any:
         """Call provider.chat() with exponential backoff retry for transient errors.
 
@@ -763,20 +836,26 @@ class SubagentManager:
 
         §44: When *task_id* is provided, LLM call errors are recorded in the
         corresponding SubagentMeta for diagnostic queries via get_status().
+
+        §56: Optional *provider*/*model* override self.provider/self.model,
+        allowing subagents to use the parent session's provider snapshot.
         """
+        _provider = provider or self.provider
+        _model = model or self.model
+
         last_error: Exception | None = None
         for attempt in range(_MAX_RETRIES + 1):
             try:
                 kwargs: dict[str, Any] = dict(
                     messages=messages,
                     tools=tools.get_definitions(),
-                    model=self.model,
+                    model=_model,
                     temperature=self.temperature,
                     max_tokens=self.max_tokens,
                 )
                 if self.reasoning_effort is not None:
                     kwargs["reasoning_effort"] = self.reasoning_effort
-                return await self.provider.chat(**kwargs)
+                return await _provider.chat(**kwargs)
             except Exception as e:
                 # §44: Record LLM error in meta for diagnostics
                 if task_id and task_id in self._task_meta:
@@ -1065,6 +1144,9 @@ class SubagentManager:
                 MAX_SUBAGENT_ITERATIONS,
             )
 
+            # §56: Resolve parent session's provider/model for the resumed subagent
+            resolved_provider, resolved_model = self._resolve_provider(meta.parent_session_key)
+
             # Reset inject_queue (create fresh one for the new turn)
             meta.inject_queue = asyncio.Queue()
             meta.status = "running"
@@ -1089,6 +1171,8 @@ class SubagentManager:
                     parent_session_key=meta.parent_session_key,
                     inject_queue=meta.inject_queue,
                     resume_messages=resume_msgs,
+                    resolved_provider=resolved_provider,   # §56
+                    resolved_model=resolved_model,         # §56
                 )
             )
             self._running_tasks[task_id] = bg_task

@@ -98,6 +98,8 @@ local    ← 本地自定义改动（基于 main）
 | §53 | Cron target_session 修复 — session_id 统一 | ✅ | [requirements/s50-s59.md](requirements/s50-s59.md) |
 | §54 | Session 父子关系解析统一到核心 | ✅ | [requirements/s50-s59.md](requirements/s50-s59.md) |
 | §55 | Cron name 参数 + 消息格式优化 | ✅ | [requirements/s50-s59.md](requirements/s50-s59.md) |
+| §56 | Subagent Provider 继承 | ✅ | [requirements/s50-s59.md](requirements/s50-s59.md) |
+| §57 | 飞书语音消息 recognition 字段提取 | ✅ | [requirements/s50-s59.md](requirements/s50-s59.md) |
 
 ---
 

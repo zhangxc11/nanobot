@@ -779,6 +779,12 @@ class FeishuChannel(BaseChannel):
             file_path = media_dir / filename
             file_path.write_bytes(data)
             logger.debug("Downloaded {} to {}", msg_type, file_path)
+            # For audio, include duration info if available
+            if msg_type == "audio":
+                duration_ms = content_json.get("duration")
+                if duration_ms:
+                    duration_s = round(duration_ms / 1000, 1)
+                    return str(file_path), f"[audio: {filename}, {duration_s}s]"
             return str(file_path), f"[{msg_type}: {filename}]"
 
         return None, f"[{msg_type}: download failed]"
@@ -851,6 +857,11 @@ class FeishuChannel(BaseChannel):
                 if file_path:
                     media_paths.append(file_path)
                 text_parts.append(content_text)
+                # Extract speech-to-text recognition for audio messages
+                if sub_type == "audio":
+                    recognition = sub_content.get("recognition", "")
+                    if recognition:
+                        text_parts.append(recognition)
 
             elif sub_type in ("share_chat", "share_user", "interactive",
                               "share_calendar_event", "system"):

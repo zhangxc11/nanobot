@@ -250,11 +250,14 @@ class Session:
         sliced = sliced[start:]
 
         # ── Phase 2: Strip error artefacts ──
-        # Remove assistant messages that are LLM error diagnostics from
-        # previous failed turns (e.g. "Error calling LLM: ...").
+        # Remove error messages that are meant for frontend display only.
+        # - ``_type: "error"``: legacy format (backward compat for old JSONL)
+        # - ``"Error calling LLM:"``: current unified format used by both
+        #   in-loop LLM errors and _persist_error() outer exceptions.
         sliced = [
             m for m in sliced
-            if not (
+            if m.get("_type") != "error"
+            and not (
                 m.get("role") == "assistant"
                 and isinstance(m.get("content"), str)
                 and m["content"].startswith("Error calling LLM:")

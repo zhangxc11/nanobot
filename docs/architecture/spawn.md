@@ -1079,3 +1079,43 @@ Review this result in the context of your current session. ...
 - final_text 在标记对之外（前端可见）
 - 系统引导在闭合标签对内（前端隐藏）
 - final_text 为空时填默认文本 `"(Subagent completed with no output)"`
+
+---
+
+## §二十九 Subagent Provider 继承 (§56)
+
+### 问题
+
+SubagentManager 的 `_chat_with_retry()` 直接使用 `self.provider.chat()`，走 ProviderPool 的全局 `_active_provider`，不感知父 session 的 per-session override。
+
+### 设计
+
+**Provider 快照模式**：spawn 时从 ProviderPool 解析父 session 的 (provider_instance, model)，作为快照传入 subagent 运行时。
+
+```
+spawn(session_key="feishu:group_123")
+  │
+  ├─ isinstance(self.provider, ProviderPool)?
+  │   ├─ Yes → pool.get_for_session("feishu:group_123")
+  │   │        → (anthropic_proxy_instance, "claude-sonnet-4-20250514")
+  │   └─ No  → (self.provider, self.model)
+  │
+  └─ _run_subagent(..., provider=resolved, model=resolved)
+       └─ _chat_with_retry(..., provider=resolved, model=resolved)
+            └─ provider.chat(messages, model=model, ...)  # 直接调用，绕过 Pool
+```
+
+### 数据流
+
+1. **spawn()**: `_resolve_provider(session_key)` → `(provider, model)`
+2. **QueuedSpawn**: 新增 `provider` + `model` 字段存储快照
+3. **_start_subagent_task()**: 透传 provider/model
+4. **_run_subagent()**: 新增 `provider`/`model` 参数，用于 LLM 调用和 usage recording
+5. **_chat_with_retry()**: 新增 `provider`/`model` 参数，覆盖 `self.provider`/`self.model`
+6. **follow_up()**: resume 时同样调用 `_resolve_provider()`
+
+### 关键约束
+
+- **快照不可变**: spawn 时确定的 provider/model 在整个 subagent 生命周期内不变，即使父 session 后续切换 provider
+- **非 ProviderPool 降级**: CLI 等单 provider 场景，`isinstance` 检查失败，使用 `self.provider`/`self.model`
+- **usage recording**: 使用快照的 model 和 provider 名称，确保统计准确

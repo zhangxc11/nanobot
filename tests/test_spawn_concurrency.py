@@ -452,10 +452,10 @@ class TestDequeue:
         original_start = mgr._start_subagent_task
 
         def tracking_start(task_id, task, label, origin, max_iterations,
-                           persist, subagent_key, session_key, meta):
+                           persist, subagent_key, session_key, meta, **kwargs):
             dequeue_order.append(task)
             return original_start(task_id, task, label, origin, max_iterations,
-                                  persist, subagent_key, session_key, meta)
+                                  persist, subagent_key, session_key, meta, **kwargs)
 
         # First, fill the slot with a blocking task
         blocker = asyncio.Future()

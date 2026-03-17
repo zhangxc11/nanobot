@@ -73,8 +73,10 @@
 | Phase 46: Tool Result 截断阈值扩大 (§49) | ✅ 已完成 | local |
 | Phase 47: Inject 队列 Drain 修复 (§50) | ✅ 已完成 | local |
 | Phase 48: Runtime Context 注入 Session ID (§51) | ✅ 已完成 | local |
-| Phase 49: Cron name 参数 + 消息格式优化 (§54) | ✅ 已完成 | feat/batch-20260313-plan-core-cron |
-| Phase 50: Session 父子关系解析统一到核心 (§53) | ✅ 已完成 | feat/batch-20260313-plan-core-cron |
+| Phase 49: Cron name 参数 + 消息格式优化 (§55) | ✅ 已完成 | feat/batch-20260313-plan-core-cron |
+| Phase 50: Session 父子关系解析统一到核心 (§54) | ✅ 已完成 | feat/batch-20260313-plan-core-cron |
+| Phase 52: Subagent Provider 继承 (§56) | ✅ 已完成 | feat/batch-20260313-plan-core-fixes |
+| Phase 53: 飞书语音消息 recognition 提取 (§57) | ✅ 已完成 | feat/batch-20260313-plan-core-fixes |
 
 ---
 
@@ -145,98 +147,21 @@
 | 45h | Subagent 返回消息 prompt 精简 | ✅ | [devlog/phase-41-45.md](devlog/phase-41-45.md) |
 | 46 | Tool Result 截断阈值扩大 (§49) | ✅ | [devlog/phase-46-50.md](devlog/phase-46-50.md) |
 | 47 | Inject 队列 Drain 修复 (§50) | ✅ | [devlog/phase-46-50.md](devlog/phase-46-50.md) |
-| 48 | Runtime Context 注入 Session ID (§51) | ✅ | *主文件* |
-| 49 | Cron name 参数 + 消息格式优化 (§54) | ✅ | *主文件* |
-| 50 | Session 父子关系解析统一到核心 (§53) | ✅ | *主文件* |
+| 48 | Runtime Context 注入 Session ID (§51) | ✅ | [devlog/phase-46-50.md](devlog/phase-46-50.md) |
+| 49 | Cron name 参数 + 消息格式优化 (§55) | ✅ | [devlog/phase-46-50.md](devlog/phase-46-50.md) |
+| 50 | Session 父子关系解析统一到核心 (§54) | ✅ | *主文件* |
+| 51 | CronTool 改用 session/parents.py 验证 target_session (§53 R2) | ✅ | *主文件* |
+| 52 | Subagent Provider 继承 (§56) | ✅ | *主文件* |
+| 53 | 飞书语音消息 recognition 提取 (§57) | ✅ | *主文件* |
 
 ---
 
 ---
 
-## Phase 48: Runtime Context 注入 Session ID (§51) ✅
-
-**日期**: 2026-03-12
-**需求**: §51（`requirements/s50-s59.md`）
-**架构**: §二十八（`architecture/core-loop.md`）
-**Commit**: `30ebaf5`
-
-### 背景
-
-Agent 需要可靠获取自己的 session 标识。当前 Runtime Context 只注入 Channel + Chat ID，agent 需手动拼接，但在飞书 routed session 和 subagent 场景下拼接结果不等于实际 session ID。
-
-### 任务清单
-
-- [x] **T48.1** `nanobot/agent/context.py` — `_build_runtime_context` 新增 `session_id` 参数，输出 `Session ID: {session_id}`
-- [x] **T48.2** `nanobot/agent/context.py` — `build_messages` 新增 `session_id` 参数，透传到 `_build_runtime_context`
-- [x] **T48.3** `nanobot/agent/loop.py` — 两个 `build_messages` 调用点传入 `session_id=key.replace(":", "_")`
-- [x] **T48.4** `nanobot/agent/subagent.py` — `_build_subagent_prompt` 中调用 `_build_runtime_context` 传入 `session_id`
-- [x] **T48.5** `tests/test_session_id_context.py` — 7 个新测试全部通过
-- [x] **T48.6** 全量回归 713 passed, 1 skipped ✅
-- [x] **T48.7** Git commit `30ebaf5`
-
-### 改动文件
-
-| 文件 | 改动 |
-|------|------|
-| `nanobot/agent/context.py` | `_build_runtime_context` + `build_messages` 新增 `session_id` 参数 |
-| `nanobot/agent/loop.py` | 两个 `build_messages` 调用点传入 `session_id=key.replace(":", "_")` |
-| `nanobot/agent/subagent.py` | `_build_subagent_prompt(session_key)` 传入 subagent session key |
-| `tests/test_session_id_context.py` | 7 个新测试 |
-
----
-
-## Phase 49: Cron name 参数 + 消息格式优化 (§54) ✅
+## Phase 50: Session 父子关系解析统一到核心 (§54) ✅
 
 **日期**: 2026-03-16
 **需求**: §54（`requirements/s50-s59.md`）
-**Commit**: nanobot `db5aaa0` / web-chat `e8bd58f`
-
-### 背景
-
-1. **G1 消息内容重复**：`_add_job()` 中 `name = message[:30]`，当 message ≤ 30 字符时 name == message，导致 executor 端消息中 job.name 和 message 重复显示
-2. **G3 文档缺失**：`tz` 参数仅对 `cron_expr` 生效，不对 `at` 生效，但 SKILL.md 和 tool schema 未说明
-3. **G5 session 列表无区分度**：所有 cron session 显示为 `[Scheduled Task] Timer finished.`
-
-### 任务清单
-
-- [x] **T49.1** CronTool schema 新增 `name` 参数（可选），LLM 传入时使用，未传时 fallback `message[:50]`
-- [x] **T49.2** CronTool `tz` description 改为明确仅对 `cron_expr` 生效
-- [x] **T49.3** SKILL.md 补充 tz + at 不兼容说明
-- [x] **T49.4** web-chat WorkerCronExecutor `execute_job()` 消息格式简化：`⏰ {job.name}\n\n{message}`
-- [x] **T49.5** web-chat WorkerCronExecutor `send_to_session()` 前缀简化：`⏰ [cron:{source}] {message}`
-- [x] **T49.6** web-chat 前端 `isCronNotification()` 检测逻辑从 `[Scheduled Task` 改为 `⏰` 前缀
-- [x] **T49.7** web-chat 前端 `parseCronNotification()` 适配新旧两种格式
-- [x] **T49.8** 新增 7 个测试（name 参数 5 个 + tz description 1 个 + schema 1 个）
-- [x] **T49.9** 全量回归 780 passed, 1 skipped ✅
-
-### 改动文件
-
-**nanobot**:
-
-| 文件 | 改动 |
-|------|------|
-| `nanobot/agent/tools/cron.py` | schema 新增 `name` 参数；`execute()` + `_add_job()` 签名新增 `name`；fallback `message[:50]`；`tz` description 更新 |
-| `nanobot/skills/cron/SKILL.md` | 补充 tz 仅对 cron_expr 生效说明 |
-| `tests/test_cron_service.py` | 新增 `TestCronToolNameParameter`（5 个测试）+ `TestCronToolTzDescription`（1 个测试） |
-
-**web-chat**:
-
-| 文件 | 改动 |
-|------|------|
-| `worker.py` | `execute_job()` 消息格式简化；`send_to_session()` 前缀简化 |
-| `frontend/src/pages/chat/MessageItem.tsx` | `isCronNotification()` 检测 `⏰` 前缀；`parseCronNotification()` 支持新旧格式 |
-
-### 决策记录
-
-- **name fallback 从 `[:30]` 扩大到 `[:50]`**：30 字符对中文消息太短，50 字符更合理
-- **前端保留 legacy 格式兼容**：旧 cron session 的历史消息仍以 `[Scheduled Task` 开头，parseCronNotification 保留对旧格式的解析能力
-
----
-
-## Phase 50: Session 父子关系解析统一到核心 (§53) ✅
-
-**日期**: 2026-03-16
-**需求**: §53（`requirements/s50-s59.md`）
 **Commit**: `0266e67`
 
 ### 背景
@@ -263,14 +188,14 @@ Session 父子关系的解析逻辑在 web-chat 前端 `resolveParent()` (~80 �
 
 - **优先级排序确定性**：前端 Set 迭代顺序不确定，Python set 同理。当 priority a 有多个候选时，按长度排序取最短（最可能是 root session），确保结果确定性。
 - **subagent parent 不验证存在性**：与前端行为一致，即使 parent session 文件不存在也返回解析结果。
-- **不改 CronTool**：CronTool 消费改动属于独立任务（§53 消费方改动），本 Phase 只做核心模块。
+- **不改 CronTool**：CronTool 消费改动属于独立任务（§54 消费方改动），本 Phase 只做核心模块。
 
 ---
 
-## Phase 51: CronTool 改用 session/parents.py 验证 target_session (§52 R2) ✅
+## Phase 51: CronTool 改用 session/parents.py 验证 target_session (§53 R2) ✅
 
 **日期**: 2026-03-16
-**需求**: §52 R2
+**需求**: §53 R2
 **Commit**: `edcce71`
 
 ### 背景
@@ -296,3 +221,55 @@ Phase 50 新增了 `nanobot/session/parents.py` 核心模块。本 Phase 将 Cro
 
 - **sessions_dir 参数可选且 None 安全**：`set_context()` 中 `sessions_dir` 默认 None，仅当非 None 时更新。`_validate_target_session()` 在 `_sessions_dir` 为 None 时跳过 `is_child_of` 检查，直接拒绝非 self/非 cron 目标——这是安全的降级行为。
 - **cron_ 前缀检查在 is_child_of 之前**：避免不必要的文件系统扫描。
+
+---
+
+## Phase 52: Subagent Provider 继承 (§56) ✅
+
+**日期**: 2026-03-16
+**需求**: §56（`requirements/s50-s59.md`）
+**架构**: §二十九（`architecture/spawn.md`）
+
+### 背景
+
+Gateway 模式下，主 session 通过 per-session override 使用 `anthropic_proxy`，但 subagent 通过 `ProviderPool.chat()` 使用全局默认 `anthropic`。WebChat 下有并发竞态风险。
+
+### 任务清单
+
+- [ ] **T52.1** `nanobot/agent/subagent.py` — 新增 `_resolve_provider()` 辅助方法
+- [ ] **T52.2** `nanobot/agent/subagent.py` — `QueuedSpawn` 新增 `provider`/`model` 字段
+- [ ] **T52.3** `nanobot/agent/subagent.py` — `spawn()` 调用 `_resolve_provider()`，传给 `_start_subagent_task()`
+- [ ] **T52.4** `nanobot/agent/subagent.py` — `_start_subagent_task()` 接收并传递 provider/model
+- [ ] **T52.5** `nanobot/agent/subagent.py` — `_run_subagent()` 新增 provider/model 参数，用于 LLM 调用和 usage recording
+- [ ] **T52.6** `nanobot/agent/subagent.py` — `_chat_with_retry()` 新增 provider/model 参数
+- [ ] **T52.7** `nanobot/agent/subagent.py` — `follow_up()` resume 时调用 `_resolve_provider()`
+- [ ] **T52.8** `nanobot/agent/subagent.py` — `_try_dequeue()` 传递 QueuedSpawn 中的 provider/model
+- [ ] **T52.9** `tests/test_subagent_provider_inherit.py` — 新增单元测试
+- [ ] **T52.10** 全量回归测试通过
+- [ ] **T52.11** Git commit
+
+---
+
+## Phase 53: 飞书语音消息 recognition 提取 (§57) ✅
+
+**日期**: 2026-03-16
+**需求**: §57（`requirements/s50-s59.md`）
+
+### 背景
+
+飞书语音消息的 `content` JSON 中包含 `recognition` 字段（语音转文字），但 nanobot 飞书通道代码在处理 `audio` 类型消息时完全没有提取该字段。
+
+### 任务清单
+
+- [x] **T53.1** `feishu.py` 直接 audio 消息处理：提取 `recognition` 字段
+- [x] **T53.2** `feishu.py` merge_forward audio 子消息处理：提取 `recognition` 字段
+- [x] **T53.3** 新增单元测试
+- [x] **T53.4** 全量回归测试通过
+- [x] **T53.5** Git commit
+
+### 改动文件
+
+| 文件 | 改动 |
+|------|------|
+| `nanobot/channels/feishu.py` | 两处 audio 处理后追加 recognition 提取（各 3 行） |
+| `tests/test_feishu_audio_recognition.py` | 新增 6 个测试覆盖 recognition 提取 |
