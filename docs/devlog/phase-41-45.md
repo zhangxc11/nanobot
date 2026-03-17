@@ -126,3 +126,88 @@
 - **done callback 触发 dequeue**: task 完成时 cleanup callback 调用 `_try_dequeue()`，包括 follow_up resume 的 task
 - **queued 任务 stop**: 直接从 `_queue` 移除，不创建 asyncio.Task，设置 stopped 状态
 - **线程安全**: asyncio 单线程模型，`_queue` 和 `_running_tasks` 无竞态
+
+---
+
+## Phase 44: SubagentEventCallback 协议 (§47) ✅
+
+**日期**: 2026-03-11
+
+### 目标
+
+为 subagent 生命周期定义 4 个回调点（spawned/progress/retry/done），
+供 web-chat Worker 等外部消费者实时追踪 subagent 状态。
+
+### 任务
+
+- [x] **T44.1** `nanobot/agent/subagent.py` — 新增 `SubagentEventCallback` Protocol（@runtime_checkable，4 个方法）
+- [x] **T44.2** `nanobot/agent/subagent.py` — `SubagentManager.__init__()` 新增 `event_callback` 参数
+- [x] **T44.3** `nanobot/agent/subagent.py` — `spawn()` 调用 `on_subagent_spawned`（running + queued）
+- [x] **T44.4** `nanobot/agent/subagent.py` — `_run_subagent()` 每次 iteration 调用 `on_subagent_progress`
+- [x] **T44.5** `nanobot/agent/subagent.py` — `_chat_with_retry()` 重试前调用 `on_subagent_retry`
+- [x] **T44.6** `nanobot/agent/subagent.py` — 所有终态调用 `on_subagent_done`（completed/failed/stopped/max_iterations + queued stop）
+- [x] **T44.7** `nanobot/agent/loop.py` — `AgentLoop.__init__()` 新增 `on_iteration` 回调参数，主循环每次迭代调用
+- [x] **T44.8** `tests/test_subagent_event_callback.py` — 18 项测试全部通过
+- [x] **T44.9** 全量回归: 678 passed, 1 skipped
+- [x] **T44.10** Git commit
+
+### 改动文件
+
+| 文件 | 改动 |
+|------|------|
+| `nanobot/agent/subagent.py` | 新增 `SubagentEventCallback` Protocol；`SubagentManager` 新增 `event_callback` 参数；spawn/iteration/retry/done 4 处回调 |
+| `nanobot/agent/loop.py` | `AgentLoop` 新增 `on_iteration` 参数，主循环每次迭代调用 |
+| `tests/test_subagent_event_callback.py` | 新测试文件（18 项测试） |
+
+---
+
+## Phase 45: 日志增强 + 标记修正 + Budget 优化 (§48) ✅
+
+**日期**: 2026-03-11
+**需求**: §48（`requirements/s40-s49.md`）
+**Commit**: `d53513a`
+
+### 任务清单
+
+- [x] **T45.1** SubagentManager 接入 detail_logger
+- [x] **T45.2** LLM logs + session JSONL 增加 provider 字段
+- [x] **T45.3** Subagent 返回内容标记修正 + 闭合标签
+- [x] **T45.4** Budget alert 公共函数 build_budget_alert()
+- [x] **T45.5** 新增测试 (`tests/test_phase45.py`, 257 行)
+- [x] **T45.6** 全量回归通过
+- [x] **T45.7** Git commit
+
+### 改动文件
+
+| 文件 | 改动 |
+|------|------|
+| `nanobot/agent/subagent.py` | detail_logger 接入 + 返回内容改为闭合标签 `<!-- nanobot:system -->` |
+| `nanobot/agent/loop.py` | LLM 日志增加 provider 字段 |
+| `nanobot/agent/budget.py` | 新文件：`build_budget_alert()` 公共函数 |
+| `nanobot/usage/detail_logger.py` | 增加 provider 字段支持 |
+| `docs/ARCHITECTURE.md` | §48 架构说明索引 |
+| `docs/architecture/core-loop.md` | 日志增强架构说明 |
+| `docs/architecture/spawn.md` | 标记修正 + budget alert 架构说明 |
+| `docs/requirements/s40-s49.md` | §48 需求正文 |
+| `tests/test_phase45.py` | 新测试文件 |
+
+---
+
+## Phase 45 Hotfix: Subagent 返回消息 prompt 精简 ✅
+
+**日期**: 2026-03-12
+**Commit**: `8b6d1d5` (nanobot core)
+
+### 问题
+
+Subagent 返回消息的 `<!-- nanobot:system -->` 标签内，引导 prompt 存在冗余：3 条 bullet 和最后一段括号解释说的是同一件事。
+
+### 修复
+
+删除括号段落 `(This is an automated system notification...)`，保留 3 条精简 bullet。
+
+### 改动文件
+
+| 文件 | 改动 |
+|------|------|
+| `nanobot/agent/subagent.py` | 删除冗余括号解释段落（-2 行） |

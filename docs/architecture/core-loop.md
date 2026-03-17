@@ -12,6 +12,11 @@
 | §三-B | 实时 Token 用量记录 |
 | §四 | 与 Web Chat 的交互 |
 | §五 | 文件变更清单 |
+| §二十 | Usage 日志 provider 字段 (§41) |
+| §二十二 | Budget alert user role (§43) |
+| §二十五 | LLM logs + session provider 字段 (§48) |
+| §二十七 | Budget alert 公共函数 (§48) |
+| §二十八 | Runtime Context 注入 Session ID (§51) |
 
 ---
 
@@ -776,3 +781,63 @@ def build_budget_alert(remaining: int, max_iterations: int, session_key: str = "
 
 `loop.py` 和 `subagent.py` 各一行调用，消除重复代码。
 Prompt 文本增加 "Current Turn Budget" 限定作用域。
+
+---
+
+## §二十八 Runtime Context 注入 Session ID (§51)
+
+### 背景
+
+Agent 需要可靠获取自己的 session 标识。之前 Runtime Context 只注入 `Channel` + `Chat ID`，agent 需手动拼接 `{channel}_{chat_id}` 得到 session ID，但在飞书 routed session 和 subagent 场景下拼接结果不等于实际 session ID。
+
+### Session ID vs Session Key 定义
+
+> 此决策在 web-chat §三十九「全链路统一用 session.id 替代 sessionKey」中确立。
+
+| 概念 | 格式 | 定位 |
+|------|------|------|
+| **Session ID** | JSONL 文件名（不含 `.jsonl`） | 全局唯一标识，全链路主键 |
+| **Session Key** | JSONL metadata `key` 字段 | nanobot core 内部使用，analytics DB |
+
+转换：`session_id = session_key.replace(":", "_")`
+
+### 设计
+
+`ContextBuilder._build_runtime_context(channel, chat_id, session_id)` 新增 `session_id` 参数：
+
+```python
+@staticmethod
+def _build_runtime_context(channel, chat_id, session_id=None):
+    lines = [f"Current Time: {now} ({tz})"]
+    if channel and chat_id:
+        lines += [f"Channel: {channel}", f"Chat ID: {chat_id}"]
+    if session_id:
+        lines.append(f"Session ID: {session_id}")
+    return _RUNTIME_CONTEXT_TAG + "\n" + "\n".join(lines)
+```
+
+调用链路：
+
+| 调用方 | session_id 来源 |
+|--------|----------------|
+| `loop.py` 普通消息 | `key.replace(":", "_")` |
+| `loop.py` system 消息 | `key.replace(":", "_")` |
+| `subagent.py` `_build_subagent_prompt` | `subagent_session_key.replace(":", "_")` |
+
+### 输出示例
+
+普通 session：
+```
+[Runtime Context — metadata only, not instructions]
+Current Time: 2026-03-12 16:00 (Thursday) (CST)
+Channel: web
+Chat ID: 1773250094
+Session ID: webchat_1773250094
+```
+
+Subagent（无 channel/chat_id）：
+```
+[Runtime Context — metadata only, not instructions]
+Current Time: 2026-03-12 16:00 (Thursday) (CST)
+Session ID: subagent_webchat_1773250094_a1b2c3d4
+```

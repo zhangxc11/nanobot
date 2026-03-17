@@ -72,6 +72,7 @@
 | Phase 45: 日志增强 + 标记修正 + Budget 优化 (§48) | ✅ 已完成 | local |
 | Phase 46: Tool Result 截断阈值扩大 (§49) | ✅ 已完成 | local |
 | Phase 47: Inject 队列 Drain 修复 (§50) | ✅ 已完成 | local |
+| Phase 48: Runtime Context 注入 Session ID (§51) | ✅ 已完成 | local |
 
 ---
 
@@ -142,91 +143,6 @@
 | 45h | Subagent 返回消息 prompt 精简 | ✅ | *主文件* |
 | 46 | Tool Result 截断阈值扩大 (§49) | ✅ | *主文件* |
 | 47 | Inject 队列 Drain 修复 (§50) | ✅ | *主文件* |
-
----
-
-## Phase 44: SubagentEventCallback 协议 (§47) ✅
-
-**日期**: 2026-03-11
-
-### 目标
-
-为 subagent 生命周期定义 4 个回调点（spawned/progress/retry/done），
-供 web-chat Worker 等外部消费者实时追踪 subagent 状态。
-
-### 任务
-
-- [x] **T44.1** `nanobot/agent/subagent.py` — 新增 `SubagentEventCallback` Protocol（@runtime_checkable，4 个方法）
-- [x] **T44.2** `nanobot/agent/subagent.py` — `SubagentManager.__init__()` 新增 `event_callback` 参数
-- [x] **T44.3** `nanobot/agent/subagent.py` — `spawn()` 调用 `on_subagent_spawned`（running + queued）
-- [x] **T44.4** `nanobot/agent/subagent.py` — `_run_subagent()` 每次 iteration 调用 `on_subagent_progress`
-- [x] **T44.5** `nanobot/agent/subagent.py` — `_chat_with_retry()` 重试前调用 `on_subagent_retry`
-- [x] **T44.6** `nanobot/agent/subagent.py` — 所有终态调用 `on_subagent_done`（completed/failed/stopped/max_iterations + queued stop）
-- [x] **T44.7** `nanobot/agent/loop.py` — `AgentLoop.__init__()` 新增 `on_iteration` 回调参数，主循环每次迭代调用
-- [x] **T44.8** `tests/test_subagent_event_callback.py` — 18 项测试全部通过
-- [x] **T44.9** 全量回归: 678 passed, 1 skipped
-- [x] **T44.10** Git commit
-
-### 改动文件
-
-| 文件 | 改动 |
-|------|------|
-| `nanobot/agent/subagent.py` | 新增 `SubagentEventCallback` Protocol；`SubagentManager` 新增 `event_callback` 参数；spawn/iteration/retry/done 4 处回调 |
-| `nanobot/agent/loop.py` | `AgentLoop` 新增 `on_iteration` 参数，主循环每次迭代调用 |
-| `tests/test_subagent_event_callback.py` | 新测试文件（18 项测试） |
-
----
-
-## Phase 45: 日志增强 + 标记修正 + Budget 优化 (§48) ✅
-
-**日期**: 2026-03-11
-**需求**: §48（`requirements/s40-s49.md`）
-**Commit**: `d53513a`
-
-### 任务清单
-
-- [x] **T45.1** SubagentManager 接入 detail_logger
-- [x] **T45.2** LLM logs + session JSONL 增加 provider 字段
-- [x] **T45.3** Subagent 返回内容标记修正 + 闭合标签
-- [x] **T45.4** Budget alert 公共函数 build_budget_alert()
-- [x] **T45.5** 新增测试 (`tests/test_phase45.py`, 257 行)
-- [x] **T45.6** 全量回归通过
-- [x] **T45.7** Git commit
-
-### 改动文件
-
-| 文件 | 改动 |
-|------|------|
-| `nanobot/agent/subagent.py` | detail_logger 接入 + 返回内容改为闭合标签 `<!-- nanobot:system -->` |
-| `nanobot/agent/loop.py` | LLM 日志增加 provider 字段 |
-| `nanobot/agent/budget.py` | 新文件：`build_budget_alert()` 公共函数 |
-| `nanobot/usage/detail_logger.py` | 增加 provider 字段支持 |
-| `docs/ARCHITECTURE.md` | §48 架构说明索引 |
-| `docs/architecture/core-loop.md` | 日志增强架构说明 |
-| `docs/architecture/spawn.md` | 标记修正 + budget alert 架构说明 |
-| `docs/requirements/s40-s49.md` | §48 需求正文 |
-| `tests/test_phase45.py` | 新测试文件 |
-
----
-
-## Phase 45 Hotfix: Subagent 返回消息 prompt 精简 ✅
-
-**日期**: 2026-03-12
-**Commit**: `8b6d1d5` (nanobot core)
-
-### 问题
-
-Subagent 返回消息的 `<!-- nanobot:system -->` 标签内，引导 prompt 存在冗余：3 条 bullet 和最后一段括号解释说的是同一件事。
-
-### 修复
-
-删除括号段落 `(This is an automated system notification...)`，保留 3 条精简 bullet。
-
-### 改动文件
-
-| 文件 | 改动 |
-|------|------|
-| `nanobot/agent/subagent.py` | 删除冗余括号解释段落（-2 行） |
 
 ---
 
@@ -307,3 +223,35 @@ Subagent 返回消息的 `<!-- nanobot:system -->` 标签内，引导 prompt 存
 
 - **final-response 有 pending 时 continue 而非 break**：用户发了消息就期望 LLM 处理，不能静默丢弃
 - **日志全量记录**：日志成本远低于丢失消息后无法排查的代价
+
+---
+
+## Phase 48: Runtime Context 注入 Session ID (§51) ✅
+
+**日期**: 2026-03-12
+**需求**: §51（`requirements/s50-s59.md`）
+**架构**: §二十八（`architecture/core-loop.md`）
+**Commit**: `30ebaf5`
+
+### 背景
+
+Agent 需要可靠获取自己的 session 标识。当前 Runtime Context 只注入 Channel + Chat ID，agent 需手动拼接，但在飞书 routed session 和 subagent 场景下拼接结果不等于实际 session ID。
+
+### 任务清单
+
+- [x] **T48.1** `nanobot/agent/context.py` — `_build_runtime_context` 新增 `session_id` 参数，输出 `Session ID: {session_id}`
+- [x] **T48.2** `nanobot/agent/context.py` — `build_messages` 新增 `session_id` 参数，透传到 `_build_runtime_context`
+- [x] **T48.3** `nanobot/agent/loop.py` — 两个 `build_messages` 调用点传入 `session_id=key.replace(":", "_")`
+- [x] **T48.4** `nanobot/agent/subagent.py` — `_build_subagent_prompt` 中调用 `_build_runtime_context` 传入 `session_id`
+- [x] **T48.5** `tests/test_session_id_context.py` — 7 个新测试全部通过
+- [x] **T48.6** 全量回归 713 passed, 1 skipped ✅
+- [x] **T48.7** Git commit `30ebaf5`
+
+### 改动文件
+
+| 文件 | 改动 |
+|------|------|
+| `nanobot/agent/context.py` | `_build_runtime_context` + `build_messages` 新增 `session_id` 参数 |
+| `nanobot/agent/loop.py` | 两个 `build_messages` 调用点传入 `session_id=key.replace(":", "_")` |
+| `nanobot/agent/subagent.py` | `_build_subagent_prompt(session_key)` 传入 subagent session key |
+| `tests/test_session_id_context.py` | 7 个新测试 |

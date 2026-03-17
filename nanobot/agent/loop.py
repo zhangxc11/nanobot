@@ -1150,6 +1150,7 @@ class AgentLoop:
             messages = self.context.build_messages(
                 history=history,
                 current_message=msg.content, channel=channel, chat_id=chat_id,
+                session_id=key.replace(":", "_"),
             )
 
             # Realtime persist: user message (last element of initial_messages)
@@ -1257,6 +1258,7 @@ class AgentLoop:
             current_message=msg.content,
             media=msg.media if msg.media else None,
             channel=msg.channel, chat_id=msg.chat_id,
+            session_id=key.replace(":", "_"),
         )
 
         # Realtime persist: user/system message (last element of initial_messages)

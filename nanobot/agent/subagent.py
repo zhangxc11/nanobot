@@ -466,7 +466,7 @@ class SubagentManager:
             tools.register(WebSearchTool(api_key=self.brave_api_key, proxy=self.web_proxy))
             tools.register(WebFetchTool(proxy=self.web_proxy))
 
-            system_prompt = self._build_subagent_prompt()
+            system_prompt = self._build_subagent_prompt(session_key=subagent_session_key)
 
             # §36: Resume from history or start fresh
             if resume_messages is not None:
@@ -1039,7 +1039,7 @@ class SubagentManager:
                 )
 
             # Rebuild messages: system prompt + history + new user message
-            system_prompt = self._build_subagent_prompt()
+            system_prompt = self._build_subagent_prompt(session_key=meta.subagent_session_key)
             resume_msgs: list[dict[str, Any]] = [
                 {"role": "system", "content": system_prompt},
             ]
@@ -1270,12 +1270,13 @@ Review this result in the context of your current session. Choose the appropriat
         logger.debug("Subagent [{}] announced via bus to {}:{} (override={})",
                       task_id, origin["channel"], origin["chat_id"], parent_session_key)
 
-    def _build_subagent_prompt(self) -> str:
+    def _build_subagent_prompt(self, session_key: str | None = None) -> str:
         """Build a focused system prompt for the subagent."""
         from nanobot.agent.context import ContextBuilder
         from nanobot.agent.skills import SkillsLoader
 
-        time_ctx = ContextBuilder._build_runtime_context(None, None)
+        session_id = session_key.replace(":", "_") if session_key else None
+        time_ctx = ContextBuilder._build_runtime_context(None, None, session_id=session_id)
         parts = [f"""# Subagent
 
 {time_ctx}
