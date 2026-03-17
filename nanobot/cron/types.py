@@ -27,6 +27,9 @@ class CronPayload:
     deliver: bool = False
     channel: str | None = None  # e.g. "whatsapp"
     to: str | None = None  # e.g. phone number
+    # Target session ID — send message to existing session instead of creating new cron session
+    # Uses session_id format (underscore-separated, e.g. "webchat_1773591411")
+    target_session: str | None = None
 
 
 @dataclass

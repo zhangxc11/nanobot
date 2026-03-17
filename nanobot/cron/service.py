@@ -1,12 +1,13 @@
 """Cron service for scheduling agent tasks."""
 
 import asyncio
+import fcntl
 import json
 import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Coroutine
+from typing import Any, Callable, Coroutine, Protocol, runtime_checkable
 
 from loguru import logger
 
@@ -60,20 +61,106 @@ def _validate_schedule_for_add(schedule: CronSchedule) -> None:
             raise ValueError(f"unknown timezone '{schedule.tz}'") from None
 
 
+# ── CronExecutor Protocol ──
+
+
+@runtime_checkable
+class CronExecutor(Protocol):
+    """Protocol for executing cron jobs.
+
+    Gateway and Worker each provide their own implementation.
+    CronService delegates job execution through this interface.
+    """
+
+    async def execute_job(self, job: CronJob) -> str | None:
+        """Create a new cron session and execute the job."""
+        ...
+
+    async def send_to_session(self, target_session_key: str, message: str, source: str | None = None) -> bool:
+        """Send a message to an existing session."""
+        ...
+
+
+# ── File Lock for Scheduler Arbitration ──
+
+_WATCHDOG_INTERVAL_S = 60  # 1 minute
+
+
+class _SchedulerLock:
+    """File-based lock for scheduler arbitration.
+
+    Only one process (gateway or worker) should schedule and execute jobs.
+    The other stays in standby mode with a watchdog that periodically
+    tries to acquire the lock.
+    """
+
+    def __init__(self, lock_path: Path):
+        self._lock_path = lock_path
+        self._fd: int | None = None
+        self._acquired = False
+
+    def try_acquire(self) -> bool:
+        """Try to acquire the scheduler lock (non-blocking).
+
+        Returns True if lock was acquired, False if another process holds it.
+        """
+        if self._acquired:
+            return True
+
+        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            if self._fd is None:
+                self._fd = open(self._lock_path, "w")  # noqa: SIM115
+            fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self._acquired = True
+            # Write PID for debugging
+            self._fd.seek(0)
+            self._fd.truncate()
+            self._fd.write(f"{__import__('os').getpid()}\n")
+            self._fd.flush()
+            return True
+        except (OSError, IOError):
+            return False
+
+    def release(self) -> None:
+        """Release the scheduler lock."""
+        if self._fd is not None:
+            try:
+                fcntl.flock(self._fd, fcntl.LOCK_UN)
+            except (OSError, IOError):
+                pass
+            try:
+                self._fd.close()
+            except (OSError, IOError):
+                pass
+            self._fd = None
+        self._acquired = False
+
+    @property
+    def is_acquired(self) -> bool:
+        return self._acquired
+
+
 class CronService:
     """Service for managing and executing scheduled jobs."""
 
     def __init__(
         self,
         store_path: Path,
-        on_job: Callable[[CronJob], Coroutine[Any, Any, str | None]] | None = None
+        on_job: Callable[[CronJob], Coroutine[Any, Any, str | None]] | None = None,
+        executor: CronExecutor | None = None,
     ):
         self.store_path = store_path
         self.on_job = on_job
+        self.executor = executor
         self._store: CronStore | None = None
         self._last_mtime: float = 0.0
         self._timer_task: asyncio.Task | None = None
+        self._watchdog_task: asyncio.Task | None = None
         self._running = False
+        self._scheduling = False  # True if this instance holds the scheduler lock
+        self._lock: _SchedulerLock | None = None
 
     def _load_store(self) -> CronStore:
         """Load jobs from disk. Reloads automatically if file was modified externally."""
@@ -107,6 +194,7 @@ class CronService:
                             deliver=j["payload"].get("deliver", False),
                             channel=j["payload"].get("channel"),
                             to=j["payload"].get("to"),
+                            target_session=j["payload"].get("targetSession"),
                         ),
                         state=CronJobState(
                             next_run_at_ms=j.get("state", {}).get("nextRunAtMs"),
@@ -154,6 +242,7 @@ class CronService:
                         "deliver": j.payload.deliver,
                         "channel": j.payload.channel,
                         "to": j.payload.to,
+                        "targetSession": j.payload.target_session,
                     },
                     "state": {
                         "nextRunAtMs": j.state.next_run_at_ms,
@@ -173,20 +262,67 @@ class CronService:
         self._last_mtime = self.store_path.stat().st_mtime
     
     async def start(self) -> None:
-        """Start the cron service."""
+        """Start the cron service with file-lock arbitration.
+
+        Tries to acquire the scheduler lock:
+        - Success → scheduling mode (arm timers, execute jobs)
+        - Failure → standby mode (manage jobs but don't schedule) + watchdog
+        """
         self._running = True
         self._load_store()
-        self._recompute_next_runs()
-        self._save_store()
-        self._arm_timer()
-        logger.info("Cron service started with {} jobs", len(self._store.jobs if self._store else []))
+
+        # Set up file lock
+        lock_path = self.store_path.parent / "scheduler.lock"
+        self._lock = _SchedulerLock(lock_path)
+
+        if self._lock.try_acquire():
+            self._scheduling = True
+            logger.info("Cron: acquired scheduler lock — entering scheduling mode")
+            self._recompute_next_runs()
+            self._save_store()
+            self._arm_timer()
+        else:
+            self._scheduling = False
+            logger.info("Cron: scheduler lock held by another process — entering standby mode")
+            self._start_watchdog()
+
+        logger.info("Cron service started with {} jobs (scheduling={})",
+                     len(self._store.jobs if self._store else []), self._scheduling)
+
+    def _start_watchdog(self) -> None:
+        """Start watchdog that periodically tries to acquire the scheduler lock."""
+        if self._watchdog_task:
+            self._watchdog_task.cancel()
+
+        async def _watchdog_loop():
+            while self._running and not self._scheduling:
+                await asyncio.sleep(_WATCHDOG_INTERVAL_S)
+                if not self._running:
+                    break
+                if self._lock and self._lock.try_acquire():
+                    self._scheduling = True
+                    logger.info("Cron: watchdog acquired scheduler lock — switching to scheduling mode")
+                    self._load_store()
+                    self._recompute_next_runs()
+                    self._save_store()
+                    self._arm_timer()
+                    break
+
+        self._watchdog_task = asyncio.create_task(_watchdog_loop())
 
     def stop(self) -> None:
         """Stop the cron service."""
         self._running = False
+        self._scheduling = False
         if self._timer_task:
             self._timer_task.cancel()
             self._timer_task = None
+        if self._watchdog_task:
+            self._watchdog_task.cancel()
+            self._watchdog_task = None
+        if self._lock:
+            self._lock.release()
+            self._lock = None
 
     def _recompute_next_runs(self) -> None:
         """Recompute next run times for all enabled jobs."""
@@ -206,9 +342,12 @@ class CronService:
         return min(times) if times else None
 
     def _arm_timer(self) -> None:
-        """Schedule the next timer tick."""
+        """Schedule the next timer tick. Only active in scheduling mode."""
         if self._timer_task:
             self._timer_task.cancel()
+
+        if not self._scheduling:
+            return
 
         next_wake = self._get_next_wake_ms()
         if not next_wake or not self._running:
@@ -219,7 +358,7 @@ class CronService:
 
         async def tick():
             await asyncio.sleep(delay_s)
-            if self._running:
+            if self._running and self._scheduling:
                 await self._on_timer()
 
         self._timer_task = asyncio.create_task(tick())
@@ -243,13 +382,43 @@ class CronService:
         self._arm_timer()
 
     async def _execute_job(self, job: CronJob) -> None:
-        """Execute a single job."""
+        """Execute a single job via executor or legacy on_job callback."""
         start_ms = _now_ms()
         logger.info("Cron: executing job '{}' ({})", job.name, job.id)
 
         try:
             response = None
-            if self.on_job:
+
+            if job.payload.target_session:
+                # Route to target session
+                # target_session stores session_id format; convert to session_key for executor
+                target_session_key = job.payload.target_session.replace("_", ":", 1)
+                if self.executor:
+                    ok = await self.executor.send_to_session(
+                        target_session_key,
+                        job.payload.message,
+                        source=f"cron:{job.id}",
+                    )
+                    if not ok:
+                        job.state.last_status = "error"
+                        job.state.last_error = f"Failed to send to session {job.payload.target_session}"
+                        logger.warning("Cron: job '{}' failed to send to target session '{}'",
+                                       job.name, job.payload.target_session)
+                        job.state.last_run_at_ms = start_ms
+                        job.updated_at_ms = _now_ms()
+                        self._advance_schedule(job)
+                        return
+                else:
+                    logger.warning("Cron: job '{}' has target_session but no executor", job.name)
+                    job.state.last_status = "skipped"
+                    job.state.last_error = "No executor available for target_session"
+                    job.state.last_run_at_ms = start_ms
+                    job.updated_at_ms = _now_ms()
+                    self._advance_schedule(job)
+                    return
+            elif self.executor:
+                response = await self.executor.execute_job(job)
+            elif self.on_job:
                 response = await self.on_job(job)
 
             job.state.last_status = "ok"
@@ -263,8 +432,10 @@ class CronService:
 
         job.state.last_run_at_ms = start_ms
         job.updated_at_ms = _now_ms()
+        self._advance_schedule(job)
 
-        # Handle one-shot jobs
+    def _advance_schedule(self, job: CronJob) -> None:
+        """Advance job schedule after execution (or handle one-shot cleanup)."""
         if job.schedule.kind == "at":
             if job.delete_after_run:
                 self._store.jobs = [j for j in self._store.jobs if j.id != job.id]
@@ -292,6 +463,7 @@ class CronService:
         channel: str | None = None,
         to: str | None = None,
         delete_after_run: bool = False,
+        target_session: str | None = None,
     ) -> CronJob:
         """Add a new job."""
         store = self._load_store()
@@ -309,6 +481,7 @@ class CronService:
                 deliver=deliver,
                 channel=channel,
                 to=to,
+                target_session=target_session,
             ),
             state=CronJobState(next_run_at_ms=_compute_next_run(schedule, now)),
             created_at_ms=now,
@@ -318,7 +491,8 @@ class CronService:
 
         store.jobs.append(job)
         self._save_store()
-        self._arm_timer()
+        if self._scheduling:
+            self._arm_timer()
 
         logger.info("Cron: added job '{}' ({})", name, job.id)
         return job
@@ -332,7 +506,8 @@ class CronService:
 
         if removed:
             self._save_store()
-            self._arm_timer()
+            if self._scheduling:
+                self._arm_timer()
             logger.info("Cron: removed job {}", job_id)
 
         return removed
@@ -349,7 +524,8 @@ class CronService:
                 else:
                     job.state.next_run_at_ms = None
                 self._save_store()
-                self._arm_timer()
+                if self._scheduling:
+                    self._arm_timer()
                 return job
         return None
 
@@ -362,7 +538,8 @@ class CronService:
                     return False
                 await self._execute_job(job)
                 self._save_store()
-                self._arm_timer()
+                if self._scheduling:
+                    self._arm_timer()
                 return True
         return False
 
@@ -371,6 +548,7 @@ class CronService:
         store = self._load_store()
         return {
             "enabled": self._running,
+            "scheduling": self._scheduling,
             "jobs": len(store.jobs),
             "next_wake_at_ms": self._get_next_wake_ms(),
         }

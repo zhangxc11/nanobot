@@ -234,7 +234,8 @@ class AgentLoop:
 
         if cron_tool := _tools.get("cron"):
             if isinstance(cron_tool, CronTool):
-                cron_tool.set_context(channel, chat_id)
+                cron_tool.set_context(channel, chat_id, session_key=session_key, session_id=session_key.replace(":", "_"),
+                                      sessions_dir=self.workspace / "sessions")
 
         # Audit context: session_key + channel + chat_id
         _tools.set_audit_context(

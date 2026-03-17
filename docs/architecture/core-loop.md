@@ -849,3 +849,27 @@ Session ID: subagent_webchat_1773250094_a1b2c3d4
 > Session Key 仅在 nanobot core 内部（`get_or_create()`、analytics DB）中使用。面向用户展示、命令参数、缓存存储等外部接口一律使用 Session ID。
 >
 > `/session` 命令参数语法：`#N` = 序号引用（来自 list），`%session_id` = 直接引用，纯数字 = 数值参数。
+
+---
+
+## Session 识别规则
+
+### Tool Context 中的 session_id
+
+`_set_tool_context()` 为需要 session 感知的 tool 设置上下文：
+
+```python
+cron_tool.set_context(channel, chat_id,
+                      session_key=session_key,
+                      session_id=session_key.replace(":", "_"))
+```
+
+CronTool 内部使用 `session_id` 进行 target_session 校验（通过 `session/parents.py` 的 `is_child_of()`），CronService 在执行时将 session_id 转回 session_key 传给 executor。
+
+### session_id 与 session_key 转换
+
+| 方向 | 方法 | 示例 |
+|------|------|------|
+| key → id | `key.replace(":", "_")` | `webchat:1773591411` → `webchat_1773591411` |
+| id → key | `id.replace("_", ":", 1)` | `webchat_1773591411` → `webchat:1773591411` |
+| subagent | `id.replace("_", ":", 1)` | `subagent_webchat_xxx_a1b2` → `subagent:webchat_xxx_a1b2` |

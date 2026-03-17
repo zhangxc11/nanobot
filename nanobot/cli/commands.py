@@ -408,36 +408,66 @@ def gateway(
         spawn_max_concurrency=config.spawn.max_concurrency,
     )
 
-    # Set cron callback (needs agent)
-    async def on_cron_job(job: CronJob) -> str | None:
-        """Execute a cron job through the agent."""
-        from nanobot.agent.tools.message import MessageTool
-        reminder_note = (
-            "[Scheduled Task] Timer finished.\n\n"
-            f"Task '{job.name}' has been triggered.\n"
-            f"Scheduled instruction: {job.payload.message}"
-        )
+    # Set cron executor (needs agent + bus)
+    class GatewayCronExecutor:
+        """CronExecutor for gateway mode — executes jobs via agent.process_direct."""
 
-        response = await agent.process_direct(
-            reminder_note,
-            session_key=f"cron:{job.id}",
-            channel=job.payload.channel or "cli",
-            chat_id=job.payload.to or "direct",
-        )
+        def __init__(self, agent_loop, message_bus):
+            self._agent = agent_loop
+            self._bus = message_bus
 
-        message_tool = agent.tools.get("message")
-        if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
+        async def execute_job(self, job: CronJob) -> str | None:
+            """Create a new cron session and execute the job."""
+            from nanobot.agent.tools.message import MessageTool
+            reminder_note = (
+                "[Scheduled Task] Timer finished.\n\n"
+                f"Task '{job.name}' has been triggered.\n"
+                f"Scheduled instruction: {job.payload.message}"
+            )
+
+            response = await self._agent.process_direct(
+                reminder_note,
+                session_key=f"cron:{job.id}",
+                channel=job.payload.channel or "cli",
+                chat_id=job.payload.to or "direct",
+            )
+
+            message_tool = self._agent.tools.get("message")
+            if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
+                return response
+
+            if job.payload.deliver and job.payload.to and response:
+                from nanobot.bus.events import OutboundMessage
+                await self._bus.publish_outbound(OutboundMessage(
+                    channel=job.payload.channel or "cli",
+                    chat_id=job.payload.to,
+                    content=response
+                ))
             return response
 
-        if job.payload.deliver and job.payload.to and response:
-            from nanobot.bus.events import OutboundMessage
-            await bus.publish_outbound(OutboundMessage(
-                channel=job.payload.channel or "cli",
-                chat_id=job.payload.to,
-                content=response
-            ))
-        return response
-    cron.on_job = on_cron_job
+        async def send_to_session(self, target_session_key: str, message: str, source: str | None = None) -> bool:
+            """Send a message to an existing session via the gateway agent."""
+            try:
+                if source:
+                    prefixed = f"[Scheduled Task from {source}]\n{message}"
+                else:
+                    prefixed = message
+
+                from nanobot.bus.events import InboundMessage
+                msg = InboundMessage(
+                    channel="cron",
+                    sender_id=source or "cron",
+                    chat_id=target_session_key,
+                    content=prefixed,
+                    session_key_override=target_session_key,
+                )
+                await self._bus.publish_inbound(msg)
+                return True
+            except Exception as e:
+                logger.error("GatewayCronExecutor.send_to_session failed: {}", e)
+                return False
+
+    cron.executor = GatewayCronExecutor(agent, bus)
 
     # Create channel manager
     channels = ChannelManager(config, bus)

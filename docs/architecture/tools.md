@@ -451,3 +451,32 @@ config.json → Config.tools.read_file_hard_limit
 
 ---
 
+
+---
+
+## 十五、Session 识别规则 — Tool 参数接口层
+
+### 15.1 规范
+
+Tool 参数接口层（即 agent 调用 tool 时传入的参数）**统一使用 session_id 格式**（下划线分隔），不使用 session_key 格式（冒号分隔）。
+
+转换关系：
+- `session_id = session_key.replace(":", "_")`
+- `session_key = session_id.replace("_", ":", 1)`（只替换第一个下划线）
+
+### 15.2 适用范围
+
+| Tool | 参数 | 格式 |
+|------|------|------|
+| `cron` | `target_session` | session_id（如 `webchat_1773591411`） |
+| `spawn` | 内部使用 session_key，不暴露给 agent | — |
+
+### 15.3 内部转换
+
+Tool 内部（如 CronTool）存储 `_session_id` 用于校验。CronService 在调用 `executor.send_to_session()` 时将 session_id 转为 session_key。
+
+### 15.4 约束：不使用 system role 注入 cron 消息
+
+Cron 触发的消息以 **user role** 注入到目标 session，不使用 system role。
+
+**原因**：litellm 对 system prompt 有组装逻辑（合并、重排），多个 system 消息可能导致不可预期的行为。此约束已在实践中验证，不可回退。

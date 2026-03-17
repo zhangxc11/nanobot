@@ -95,6 +95,9 @@ local    ← 本地自定义改动（基于 main）
 | §50 | Inject 队列 Drain — 防止消息丢失 | ✅ | [requirements/s50-s59.md](requirements/s50-s59.md) |
 | §51 | Runtime Context 注入 Session ID | ✅ | [requirements/s50-s59.md](requirements/s50-s59.md) |
 | §52 | /session 子命令体系 + session_id 全链路统一 | ✅ | [requirements/s50-s59.md](requirements/s50-s59.md) |
+| §53 | Cron target_session 修复 — session_id 统一 | ✅ | [requirements/s50-s59.md](requirements/s50-s59.md) |
+| §54 | Session 父子关系解析统一到核心 | ✅ | [requirements/s50-s59.md](requirements/s50-s59.md) |
+| §55 | Cron name 参数 + 消息格式优化 | ✅ | [requirements/s50-s59.md](requirements/s50-s59.md) |
 
 ---
 

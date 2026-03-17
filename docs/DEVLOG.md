@@ -73,6 +73,8 @@
 | Phase 46: Tool Result 截断阈值扩大 (§49) | ✅ 已完成 | local |
 | Phase 47: Inject 队列 Drain 修复 (§50) | ✅ 已完成 | local |
 | Phase 48: Runtime Context 注入 Session ID (§51) | ✅ 已完成 | local |
+| Phase 49: Cron name 参数 + 消息格式优化 (§54) | ✅ 已完成 | feat/batch-20260313-plan-core-cron |
+| Phase 50: Session 父子关系解析统一到核心 (§53) | ✅ 已完成 | feat/batch-20260313-plan-core-cron |
 
 ---
 
@@ -138,91 +140,16 @@
 | 41 | §40 SubagentManager 单例化 + 跨进程 follow_up 恢复 | ✅ | [devlog/phase-41-45.md](devlog/phase-41-45.md) |
 | 42 | §41-§45 核心层基础改动 (Phase 42) | ✅ | [devlog/phase-41-45.md](devlog/phase-41-45.md) |
 | 43 | Spawn 并发限制 (§46) | ✅ | [devlog/phase-41-45.md](devlog/phase-41-45.md) |
-| 44 | SubagentEventCallback 协议 (§47) | ✅ | *主文件* |
-| 45 | 日志增强 + 标记修正 + Budget 优化 (§48) | ✅ | *主文件* |
-| 45h | Subagent 返回消息 prompt 精简 | ✅ | *主文件* |
-| 46 | Tool Result 截断阈值扩大 (§49) | ✅ | *主文件* |
-| 47 | Inject 队列 Drain 修复 (§50) | ✅ | *主文件* |
+| 44 | SubagentEventCallback 协议 (§47) | ✅ | [devlog/phase-41-45.md](devlog/phase-41-45.md) |
+| 45 | 日志增强 + 标记修正 + Budget 优化 (§48) | ✅ | [devlog/phase-41-45.md](devlog/phase-41-45.md) |
+| 45h | Subagent 返回消息 prompt 精简 | ✅ | [devlog/phase-41-45.md](devlog/phase-41-45.md) |
+| 46 | Tool Result 截断阈值扩大 (§49) | ✅ | [devlog/phase-46-50.md](devlog/phase-46-50.md) |
+| 47 | Inject 队列 Drain 修复 (§50) | ✅ | [devlog/phase-46-50.md](devlog/phase-46-50.md) |
+| 48 | Runtime Context 注入 Session ID (§51) | ✅ | *主文件* |
+| 49 | Cron name 参数 + 消息格式优化 (§54) | ✅ | *主文件* |
+| 50 | Session 父子关系解析统一到核心 (§53) | ✅ | *主文件* |
 
 ---
-
-## Phase 46: Tool Result 截断阈值扩大 (§49) ✅
-
-**日期**: 2026-03-12
-**需求**: §49（`requirements/s40-s49.md`）
-**Commit**: `89e8e49`
-
-### 背景
-
-`_TOOL_RESULT_MAX_CHARS = 500` 导致约 40-44% 的 tool result 被截断，
-后续 turn 的 LLM 历史上下文丢失有用信息。经分析，扩大到 2000 是成本与信息保留的平衡点。
-
-### 任务清单
-
-- [x] **T46.1** `nanobot/session/manager.py` — `_TOOL_RESULT_MAX_CHARS` 从 500 改为 2000
-- [x] **T46.2** `tests/test_image_storage.py` — 测试用长内容从 1000→3000（确保仍触发截断）
-- [x] **T46.3** 测试通过
-- [x] **T46.4** Git commit
-
-### 改动文件
-
-| 文件 | 改动 |
-|------|------|
-| `nanobot/session/manager.py` | `_TOOL_RESULT_MAX_CHARS = 2000`（原 500） |
-| `tests/test_image_storage.py` | `test_tool_result_truncation_still_works` 长内容 1000→3000 |
-
-### 决策记录
-
-- **为什么 2000 而非 5000？** 分析显示 5000 会导致 session 文件增长 30-60%，历史上下文 token 从 ~6K 膨胀到 ~60K（最坏情况）。2000 是平衡点：覆盖大多数有意义输出，同时控制膨胀在 15-30%。
-- **截断只影响跨 turn 历史**：当前 turn 内 LLM 始终看到完整原始 tool result（截断发生在持久化到 JSONL 时）。
-- **后续可考虑**：token 级 context 安全阀（当前仅按消息条数 memory_window=100 限制）。
-
----
-
-## Phase 47: Inject 队列 Drain 修复 (§50) ✅
-
-**日期**: 2026-03-12
-**需求**: inject 队列竞态导致用户消息丢失
-**Commit**: `449cdd7`（核心）+ `7d61082`（web-chat 日志）
-
-### 背景
-
-用户在 webchat session 中发送 inject 消息时，恰好与 2 个 subagent 结果同时到达 inject 队列。
-由于 `check_user_input()` 每次 checkpoint 只取一条消息，且 LLM 最终文本响应分支没有 checkpoint，
-导致用户消息永久留在队列中，task 结束后丢失。
-
-**时间线复原**：
-```
-10:45:25  LLM → sleep 60              队列: []
-10:45:31  subagent_80d6 结果 → 队列    队列: [msg1]
-10:45:51  subagent_0d46 结果 → 队列    队列: [msg1, msg2]
-10:46:25  sleep完成 → checkpoint取msg1  队列: [msg2]
-10:46:25  用户POST inject → 队列       队列: [msg2, msg3_user]
-10:46:34  LLM tool_call → checkpoint取msg2  队列: [msg3_user]
-10:47:21  LLM 纯文本 → break           队列: [msg3_user] ← 永久丢失
-```
-
-### 任务清单
-
-- [x] **T47.1** `nanobot/agent/loop.py` — tool-call checkpoint 从单次改为 while-loop drain
-- [x] **T47.2** `nanobot/agent/loop.py` — final-response 分支新增 drain checkpoint + continue
-- [x] **T47.3** `tests/test_inject_drain.py` — 5 个新测试
-- [x] **T47.4** 全量回归 706 passed ✅
-- [x] **T47.5** web-chat 日志截断修复（webserver.py + worker.py，[:80] → 全量）
-
-### 改动文件
-
-| 文件 | 改动 |
-|------|------|
-| `nanobot/agent/loop.py` | tool-call checkpoint: `while True` drain；final-response: 新增 drain + continue |
-| `tests/test_inject_drain.py` | 5 个测试：多消息 drain、单消息回归、late inject 继续、无 inject 正常退出、混合类型 |
-| `web-chat/webserver.py` | 2 处日志 `[:80]` → 全量 |
-| `web-chat/worker.py` | 3 处日志 `[:80]` → 全量 |
-
-### 决策记录
-
-- **final-response 有 pending 时 continue 而非 break**：用户发了消息就期望 LLM 处理，不能静默丢弃
-- **日志全量记录**：日志成本远低于丢失消息后无法排查的代价
 
 ---
 
@@ -255,3 +182,117 @@ Agent 需要可靠获取自己的 session 标识。当前 Runtime Context 只注
 | `nanobot/agent/loop.py` | 两个 `build_messages` 调用点传入 `session_id=key.replace(":", "_")` |
 | `nanobot/agent/subagent.py` | `_build_subagent_prompt(session_key)` 传入 subagent session key |
 | `tests/test_session_id_context.py` | 7 个新测试 |
+
+---
+
+## Phase 49: Cron name 参数 + 消息格式优化 (§54) ✅
+
+**日期**: 2026-03-16
+**需求**: §54（`requirements/s50-s59.md`）
+**Commit**: nanobot `db5aaa0` / web-chat `e8bd58f`
+
+### 背景
+
+1. **G1 消息内容重复**：`_add_job()` 中 `name = message[:30]`，当 message ≤ 30 字符时 name == message，导致 executor 端消息中 job.name 和 message 重复显示
+2. **G3 文档缺失**：`tz` 参数仅对 `cron_expr` 生效，不对 `at` 生效，但 SKILL.md 和 tool schema 未说明
+3. **G5 session 列表无区分度**：所有 cron session 显示为 `[Scheduled Task] Timer finished.`
+
+### 任务清单
+
+- [x] **T49.1** CronTool schema 新增 `name` 参数（可选），LLM 传入时使用，未传时 fallback `message[:50]`
+- [x] **T49.2** CronTool `tz` description 改为明确仅对 `cron_expr` 生效
+- [x] **T49.3** SKILL.md 补充 tz + at 不兼容说明
+- [x] **T49.4** web-chat WorkerCronExecutor `execute_job()` 消息格式简化：`⏰ {job.name}\n\n{message}`
+- [x] **T49.5** web-chat WorkerCronExecutor `send_to_session()` 前缀简化：`⏰ [cron:{source}] {message}`
+- [x] **T49.6** web-chat 前端 `isCronNotification()` 检测逻辑从 `[Scheduled Task` 改为 `⏰` 前缀
+- [x] **T49.7** web-chat 前端 `parseCronNotification()` 适配新旧两种格式
+- [x] **T49.8** 新增 7 个测试（name 参数 5 个 + tz description 1 个 + schema 1 个）
+- [x] **T49.9** 全量回归 780 passed, 1 skipped ✅
+
+### 改动文件
+
+**nanobot**:
+
+| 文件 | 改动 |
+|------|------|
+| `nanobot/agent/tools/cron.py` | schema 新增 `name` 参数；`execute()` + `_add_job()` 签名新增 `name`；fallback `message[:50]`；`tz` description 更新 |
+| `nanobot/skills/cron/SKILL.md` | 补充 tz 仅对 cron_expr 生效说明 |
+| `tests/test_cron_service.py` | 新增 `TestCronToolNameParameter`（5 个测试）+ `TestCronToolTzDescription`（1 个测试） |
+
+**web-chat**:
+
+| 文件 | 改动 |
+|------|------|
+| `worker.py` | `execute_job()` 消息格式简化；`send_to_session()` 前缀简化 |
+| `frontend/src/pages/chat/MessageItem.tsx` | `isCronNotification()` 检测 `⏰` 前缀；`parseCronNotification()` 支持新旧格式 |
+
+### 决策记录
+
+- **name fallback 从 `[:30]` 扩大到 `[:50]`**：30 字符对中文消息太短，50 字符更合理
+- **前端保留 legacy 格式兼容**：旧 cron session 的历史消息仍以 `[Scheduled Task` 开头，parseCronNotification 保留对旧格式的解析能力
+
+---
+
+## Phase 50: Session 父子关系解析统一到核心 (§53) ✅
+
+**日期**: 2026-03-16
+**需求**: §53（`requirements/s50-s59.md`）
+**Commit**: `0266e67`
+
+### 背景
+
+Session 父子关系的解析逻辑在 web-chat 前端 `resolveParent()` (~80 行 TS) 和 CronTool `_validate_target_session()` 各自独立实现，长期会分叉。将启发式逻辑统一到 nanobot 核心，成为 single source of truth。
+
+### 任务清单
+
+- [x] **T50.1** 新建 `nanobot/session/parents.py` — 4 个公共接口
+- [x] **T50.2** 更新 `nanobot/session/__init__.py` — 导出新接口
+- [x] **T50.3** `tests/test_session_parents.py` — 32 个测试全部通过
+- [x] **T50.4** 全量回归 780 passed, 1 skipped ✅
+- [x] **T50.5** Git commit `0266e67`
+
+### 改动文件
+
+| 文件 | 改动 |
+|------|------|
+| `nanobot/session/parents.py` | 新建：`load_manual_overrides`、`resolve_parent`、`build_parent_map`、`is_child_of` |
+| `nanobot/session/__init__.py` | 导出 4 个新接口 |
+| `tests/test_session_parents.py` | 32 个测试：7 个测试类覆盖 subagent/webchat/manual/root/is_child_of/build_parent_map |
+
+### 决策记录
+
+- **优先级排序确定性**：前端 Set 迭代顺序不确定，Python set 同理。当 priority a 有多个候选时，按长度排序取最短（最可能是 root session），确保结果确定性。
+- **subagent parent 不验证存在性**：与前端行为一致，即使 parent session 文件不存在也返回解析结果。
+- **不改 CronTool**：CronTool 消费改动属于独立任务（§53 消费方改动），本 Phase 只做核心模块。
+
+---
+
+## Phase 51: CronTool 改用 session/parents.py 验证 target_session (§52 R2) ✅
+
+**日期**: 2026-03-16
+**需求**: §52 R2
+**Commit**: `edcce71`
+
+### 背景
+
+Phase 50 新增了 `nanobot/session/parents.py` 核心模块。本 Phase 将 CronTool `_validate_target_session()` 从子串匹配 (`self._session_id in target_session`) 改为调用 `is_child_of()` 做正式的父子关系验证。
+
+### 任务清单
+
+- [x] **T51.1** `nanobot/agent/tools/cron.py` — import `is_child_of`；`set_context()` 新增 `sessions_dir` 参数；`_validate_target_session()` 改用 `is_child_of()`；`clone()` 复制 `_sessions_dir`
+- [x] **T51.2** `nanobot/agent/loop.py` — `_set_tool_context()` 中传入 `sessions_dir=self.workspace / "sessions"`
+- [x] **T51.3** `tests/test_cron_service.py` — 更新测试 helper `_make_tool` 支持 `sessions_dir`；subagent/foreign 测试创建 `.jsonl` 文件；新增 `test_validate_target_session_no_sessions_dir_rejects`
+- [x] **T51.4** 全量回归 781 passed, 1 skipped ✅
+
+### 改动文件
+
+| 文件 | 改动 |
+|------|------|
+| `nanobot/agent/tools/cron.py` | `set_context()` 新增 `sessions_dir` 参数；`_validate_target_session()` 用 `is_child_of()` 替代子串匹配；`clone()` 复制 `_sessions_dir` |
+| `nanobot/agent/loop.py` | `_set_tool_context()` 传入 `sessions_dir=self.workspace / "sessions"` |
+| `tests/test_cron_service.py` | 更新 `_make_tool` helper；新增 `_make_sessions_dir` helper；subagent/foreign 测试改用 `tmp_path`；新增无 sessions_dir 拒绝测试 |
+
+### 决策记录
+
+- **sessions_dir 参数可选且 None 安全**：`set_context()` 中 `sessions_dir` 默认 None，仅当非 None 时更新。`_validate_target_session()` 在 `_sessions_dir` 为 None 时跳过 `is_child_of` 检查，直接拒绝非 self/非 cron 目标——这是安全的降级行为。
+- **cron_ 前缀检查在 is_child_of 之前**：避免不必要的文件系统扫描。
