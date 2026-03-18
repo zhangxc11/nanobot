@@ -78,7 +78,7 @@
 | Phase 52: Subagent Provider 继承 (§56) | ✅ 已完成 | feat/batch-20260313-plan-core-fixes |
 | Phase 53: 飞书语音消息 recognition 提取 (§57) | ✅ 已完成 | feat/batch-20260313-plan-core-fixes |
 | Phase 54: follow_up resume 缺少 event_callback (§58) | ✅ 已完成 | local |
-| Phase 55: Turn 内 Consolidation + 截断预警/通知 (§59) | 🔜 进行中 | feat/turn-consolidation |
+| Phase 55: Turn 内 Consolidation + 截断预警/通知 (§59) | ✅ 已完成 | feat/turn-consolidation |
 
 ---
 
@@ -156,7 +156,7 @@
 | 52 | Subagent Provider 继承 (§56) | ✅ | [devlog/phase-51-55.md](devlog/phase-51-55.md) |
 | 53 | 飞书语音消息 recognition 提取 (§57) | ✅ | *主文件* |
 | 54 | follow_up resume 缺少 event_callback (§58) | ✅ | *主文件* |
-| 55 | Turn 内 Consolidation + 截断预警/通知 (§59) | 🔜 | *主文件* |
+| 55 | Turn 内 Consolidation + 截断预警/通知 (§59) | ✅ | *主文件* |
 
 ---
 
@@ -216,7 +216,7 @@
 
 ---
 
-## Phase 55: Turn 内 Consolidation + 截断预警/通知 (§59) 🔜
+## Phase 55: Turn 内 Consolidation + 截断预警/通知 (§59) ✅
 
 **日期**: 2026-03-18
 **需求**: §59（`requirements/s50-s59.md`）
@@ -229,15 +229,40 @@ Consolidation 触发检查只在 `_process_message()` 的 turn 入口，但消�
 
 ### 任务清单
 
-- [ ] **T55.0** `nanobot/agent/memory.py` — `consolidate()` 新增 `detail_logger` 和 `usage_recorder` 参数，LLM 调用后记录
-- [ ] **T55.1** `nanobot/agent/loop.py` — 新增实例变量 `_pending_consolidation_done`
-- [ ] **T55.2** `nanobot/agent/loop.py` — `_run_agent_loop` 循环头部插入 Step 1/2/3 检查
-- [ ] **T55.3** `nanobot/agent/loop.py` — 新增 `_do_mid_turn_consolidation()` 方法
-- [ ] **T55.4** `nanobot/agent/loop.py` — 新增 `_trim_consolidated_messages()` 方法
-- [ ] **T55.5** `nanobot/agent/loop.py` — 新增 `_find_tool_aligned_cut()` 方法
-- [ ] **T55.6** `nanobot/agent/loop.py` — 新增 `_build_truncation_notice()` 方法
-- [ ] **T55.7** `nanobot/agent/loop.py` — 移除 `_process_message` 中旧的 turn 入口 consolidation 逻辑
-- [ ] **T55.8** `nanobot/agent/loop.py` — `_consolidate_memory()` 传入 `detail_logger` 和 `usage_recorder`
-- [ ] **T55.9** `nanobot/session/manager.py` — `get_history()` 头部注入截断通知（`last_consolidated > 0` 时）
-- [ ] **T55.10** 测试验证（import 不报错、基本逻辑正确）
-- [ ] **T55.11** Git commit
+- [x] **T55.0** `nanobot/agent/memory.py` — `consolidate()` 新增 `detail_logger` 和 `usage_recorder` 参数，LLM 调用后记录
+- [x] **T55.1** `nanobot/agent/loop.py` — 新增实例变量 `_pending_consolidation_done`
+- [x] **T55.2** `nanobot/agent/loop.py` — `_run_agent_loop` 循环头部插入 Step 1/2/3 检查
+- [x] **T55.3** `nanobot/agent/loop.py` — 新增 `_do_mid_turn_consolidation()` 方法
+- [x] **T55.4** `nanobot/agent/loop.py` — 新增 `_trim_consolidated_messages()` 方法
+- [x] **T55.5** `nanobot/agent/loop.py` — 新增 `_find_tool_aligned_cut()` 方法
+- [x] **T55.6** `nanobot/agent/loop.py` — 新增 `_build_truncation_notice()` 方法
+- [x] **T55.7** `nanobot/agent/loop.py` — 移除 `_process_message` 中旧的 turn 入口 consolidation 逻辑
+- [x] **T55.8** `nanobot/agent/loop.py` — `_consolidate_memory()` 传入 `detail_logger` 和 `usage_recorder`
+- [x] **T55.9** `nanobot/session/manager.py` — `get_history()` 头部注入截断通知（`last_consolidated > 0` 时）
+- [x] **T55.10** 测试验证（import 不报错、基本逻辑正确）
+- [x] **T55.11** Git commit
+
+### 实现结果
+
+**5 commits**（经 rebase 整理）：
+```
+1efff1d fix: protect user messages from consolidation trim (§59.1)
+7d77f87 fix: consolidation system prompt + detail_logger (§59)
+811bef6 improve: consolidation reuses session context + config (§59)
+e08061c fix: consolidation failure handling + hard-truncation notice (§59)
+4399c0e feat: Turn-内 Consolidation + 截断预警/通知 (§59)
+```
+
+**改动统计**: 10 files changed, 655 insertions(+), 73 deletions(-)
+
+**关键实现**:
+- Turn 内 mid-turn consolidation（`_run_agent_loop` 循环头部 Step 1/2/3）
+- 截断预警 + 截断通知（`_build_truncation_notice` + session summary 展开）
+- Consolidation 复用 session context 提升 cache 命中率
+- §59.1: 保护用户消息不被 trim 删除（v2 拼接策略 + 语义分隔符）
+- Subagent 场景完整覆盖（`_MID_TURN_PREFIXES` 匹配 parent injection）
+
+**已知遗留（P0/P1/P2）**:
+- P0: consolidation max_tokens 可能不足（大 session）
+- P1: consolidation 失败后重试策略待优化
+- P2: consolidation 输入无上限

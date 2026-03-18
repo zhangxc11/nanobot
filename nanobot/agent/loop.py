@@ -112,7 +112,7 @@ class AgentLoop:
         max_iterations: int = 40,
         temperature: float = 0.1,
         max_tokens: int = 4096,
-        memory_window: int = 40,
+        memory_window: int = 100,
         reasoning_effort: str | None = None,
         brave_api_key: str | None = None,
         web_proxy: str | None = None,
@@ -2069,6 +2069,14 @@ class AgentLoop:
         if archive_cut <= 0 or archive_cut >= len(messages):
             logger.debug("§59: Skipping trim — archive_cut={} out of range (messages={})", archive_cut, len(messages))
             return warned_this_turn
+
+        # §59.1: Protect real user messages in the trim range [1:archive_cut]
+        protected: list[dict] = []
+        for i in range(1, archive_cut):
+            msg = messages[i]
+            if msg.get("role") == "user" and not self._is_system_injected(msg):
+                protected.append(msg)
+
         del messages[1:archive_cut]
         notice = self._build_truncation_notice(session, self.workspace)
         messages.insert(1, {
@@ -2076,8 +2084,124 @@ class AgentLoop:
             "content": notice,
             "timestamp": datetime.now().isoformat(),
         })
+
+        # §59.1 v2: Consolidate protected user messages into at most 2 slots
+        #   Slot 1: historical user messages (earlier turn triggers, NOT current turn)
+        #   Slot 2: current turn messages (trigger + mid-turn injections)
+        #
+        # The trigger of the current turn is the LAST non-mid-turn user message
+        # in the protected list (build_messages is chronological).
+        if protected:
+            _MID_TURN_PREFIXES = (
+                "[Message from user during execution]",
+                "[Message from parent session during execution]",
+            )
+
+            # Separate non-injection messages from injection messages
+            non_injection: list[dict] = []
+            injection: list[dict] = []
+            for msg in protected:
+                content = msg.get("content", "")
+                if isinstance(content, str) and any(content.startswith(p) for p in _MID_TURN_PREFIXES):
+                    injection.append(msg)
+                else:
+                    non_injection.append(msg)
+
+            # The last non-injection message = current turn trigger
+            # Everything before it = historical user messages from earlier turns
+            if non_injection:
+                trigger_msg = non_injection[-1]
+                history_msgs = non_injection[:-1]
+            else:
+                # Edge case: all protected are mid-turn injections (no trigger in trim range)
+                trigger_msg = None
+                history_msgs = []
+
+            # Current turn = trigger + mid-turn injections
+            current_turn_msgs: list[dict] = []
+            if trigger_msg:
+                current_turn_msgs.append(trigger_msg)
+            current_turn_msgs.extend(injection)
+
+            insert_pos = 2  # right after truncation notice
+
+            # Helper: extract text from a message (handles multimodal)
+            def _extract_text(m: dict) -> str:
+                c = m.get("content", "")
+                if isinstance(c, list):
+                    pieces = [item.get("text", "") for item in c
+                              if isinstance(item, dict) and item.get("type") == "text" and item.get("text")]
+                    return "\n".join(pieces) if pieces else "[non-text content]"
+                return c if isinstance(c, str) and c else "[empty message]"
+
+            # Slot 1: historical user messages from earlier turns
+            if history_msgs:
+                if len(history_msgs) == 1 and not current_turn_msgs:
+                    # Only 1 total protected msg and it's historical → keep as-is
+                    messages.insert(insert_pos, history_msgs[0])
+                else:
+                    _SEP_NEXT = "\n---- next message ----\n"
+                    parts = [_extract_text(m) for m in history_msgs]
+                    messages.insert(insert_pos, {
+                        "role": "user",
+                        "content": "[Preserved user messages from earlier turns]\n" + _SEP_NEXT.join(parts),
+                        "timestamp": datetime.now().isoformat(),
+                    })
+                insert_pos += 1
+
+            # Slot 2: current turn messages (trigger + mid-turn injections)
+            if current_turn_msgs:
+                if len(current_turn_msgs) == 1 and not history_msgs:
+                    # Only 1 total protected msg and it's current turn → keep as-is
+                    messages.insert(insert_pos, current_turn_msgs[0])
+                elif len(current_turn_msgs) == 1:
+                    messages.insert(insert_pos, current_turn_msgs[0])
+                else:
+                    _SEP_INJECTED = "\n---- injected during execution ----\n"
+                    # First item is trigger (if present), rest are injections
+                    assembled = _extract_text(current_turn_msgs[0])
+                    for m in current_turn_msgs[1:]:
+                        assembled += _SEP_INJECTED + _extract_text(m)
+                    messages.insert(insert_pos, {
+                        "role": "user",
+                        "content": "[Preserved current-turn user messages]\n" + assembled,
+                        "timestamp": datetime.now().isoformat(),
+                    })
+
+            slots_used = (1 if history_msgs else 0) + (1 if current_turn_msgs else 0)
+            logger.info("§59: Protected {} user messages from trim "
+                        "(history={}, current_turn={} [trigger={}, injection={}], {} slot(s))",
+                        len(protected), len(history_msgs), len(current_turn_msgs),
+                        1 if trigger_msg else 0, len(injection), slots_used)
+
         logger.info("§59: Trimmed {} messages, injected truncation notice", archive_cut)
         return False
+
+    @staticmethod
+    def _is_system_injected(msg: dict) -> bool:
+        """§59.1: Check if a user-role message is system-injected (not a real user question).
+
+        System-injected messages (returns True):
+          - Content starts with '⚠️' (truncation notice, budget alert, etc.)
+          - Content starts with '[Runtime Context' (runtime context metadata)
+
+        Real user messages (returns False):
+          - Ordinary user text
+          - '[Message from user during execution]\\n...' (mid-turn injection containing real user content)
+          - Multimodal content with no recognizable system prefix
+        """
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            # Multi-modal content — check first text part
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    content = part.get("text", "")
+                    break
+            else:
+                return False  # No text part found — treat as real user message
+        if not isinstance(content, str):
+            return False
+        return content.startswith("⚠️") or content.startswith("[Runtime Context")
 
     def _find_tool_aligned_cut(self, messages: list[dict], start: int, target_count: int) -> int:
         """§59: Find a safe cut point that doesn't split tool_call/tool_result pairs.

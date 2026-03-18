@@ -931,3 +931,23 @@ Turn 级（_run_agent_loop 局部变量）：
 #### 移除旧逻辑
 
 `_process_message` 中第 1812-1830 行的 turn 入口 consolidation 检查移除，统一到 `_run_agent_loop` 内部。
+
+#### §59.1 用户消息保护
+
+**问题**: `_trim_consolidated_messages()` 的 `del messages[1:archive_cut]` 不区分消息类型，真实用户消息被当作普通旧消息删除。
+
+**保护机制**:
+1. Trim 前扫描 `messages[1:archive_cut]`，识别真实 user 消息（排除系统注入）
+2. `_is_system_injected()` 过滤：`⚠️` 开头 / `[Runtime Context` 开头 → 系统消息，不保护
+3. 保护的消息合并为最多 2 个 Slot，插入到保留区域
+
+**Slot 分类**:
+| Slot | 内容 | 分隔符 |
+|------|------|--------|
+| Slot 1 | 历史 turn 的 user 消息 | `---- next message ----` |
+| Slot 2 | 当前 turn trigger + mid-turn injections | `---- injected during execution ----` |
+
+**Subagent 覆盖**:
+- `_MID_TURN_PREFIXES` 匹配 `[Message from user during execution]` 和 `[Message from parent session during execution]`
+- follow_up resume 消息（纯文本）→ 保护 ✅
+- inject_queue 消息（`[Message from parent session...]`）→ 保护 + 归入 Slot 2 ✅
