@@ -110,12 +110,13 @@ class MemoryStore:
             stripped = [{k: v for k, v in m.items() if k in _KEEP_KEYS} for m in old_messages]
             consolidation_instruction = (
                 "The preceding messages are being archived from the active session context. "
-                "Please call the save_memory tool with:\n"
+                "You MUST call the save_memory tool with:\n"
                 "- history_entry: A 2-5 sentence summary starting with [YYYY-MM-DD HH:MM], "
                 "grep-searchable, covering key events/decisions/topics from the archived messages.\n"
                 "- memory_update: Full updated long-term memory as markdown (existing facts plus any new ones). "
                 "Return unchanged if nothing new.\n\n"
-                "Only call the save_memory tool. Do NOT call any other tools.\n\n"
+                "IMPORTANT: You MUST call the save_memory tool. Do NOT respond with text. "
+                "Do NOT call any other tools. Only call save_memory.\n\n"
                 f"## Current Long-term Memory\n{current_memory or '(empty)'}"
             )
             messages = [session_system_msg] + stripped + [{"role": "user", "content": consolidation_instruction}]
@@ -152,22 +153,28 @@ class MemoryStore:
             _call_ts = _dt.now().isoformat()
             if detail_logger is not None and response.usage:
                 try:
+                    # Build a compact representation of consolidation messages for logging.
+                    # In cache-friendly path, `messages` is the actual list sent to LLM;
+                    # in fallback path, it's also `messages`. Truncate content for storage.
+                    _log_messages = []
+                    for _m in messages:
+                        _content = _m.get("content", "")
+                        if isinstance(_content, str) and len(_content) > 300:
+                            _content = _content[:300] + "..."
+                        _log_messages.append({"role": _m.get("role", "unknown"), "content": _content})
                     detail_logger.log_call(
                         session_key=session.key,
                         model=model,
                         iteration=0,
-                        messages=[
-                            {"role": "system", "content": "You are a memory consolidation agent."},
-                            {"role": "user", "content": prompt[:200] + "..."},
-                        ],
-                        response_content=response.content,
+                        messages=_log_messages,
+                        response_content=response.content if isinstance(response.content, str) else str(response.content),
                         response_tool_calls=None,
                         response_finish_reason=response.finish_reason if hasattr(response, "finish_reason") else "stop",
                         response_usage=response.usage,
                         provider=getattr(provider, "provider_name", ""),
                     )
                 except Exception:
-                    logger.debug("Failed to log consolidation LLM call to detail_logger")
+                    logger.exception("Failed to log consolidation LLM call to detail_logger")
             if usage_recorder is not None and response.usage:
                 try:
                     usage_recorder.record(

@@ -1993,10 +1993,10 @@ class AgentLoop:
         _model = model or self.model
         _tools = tools or self.tools
 
-        # Extract system message from session for cache-friendly consolidation
-        _system_msg = None
-        if session.messages and session.messages[0].get("role") == "system":
-            _system_msg = session.messages[0]
+        # Build system message from context (same as normal chat) for cache-friendly consolidation.
+        # NOTE: session.messages does NOT contain the system prompt — it's generated
+        # dynamically by build_system_prompt() each turn. We must use context here.
+        _system_msg = {"role": "system", "content": self.context.build_system_prompt()}
 
         _tool_defs = _tools.get_definitions() if _tools else None
 
