@@ -186,6 +186,7 @@ class Session:
     updated_at: datetime = field(default_factory=datetime.now)
     metadata: dict[str, Any] = field(default_factory=dict)
     last_consolidated: int = 0  # Number of messages already consolidated to files
+    workspace: Path | None = None  # §59: needed for truncation notice injection
 
     def add_message(self, role: str, content: str, **kwargs: Any) -> None:
         """Add a message to the session."""
@@ -219,8 +220,19 @@ class Session:
         3. **Error messages** — assistant messages whose ``content`` starts
            with ``"Error calling LLM:"`` are stripped, as they are diagnostic
            artefacts from previous failed turns that would confuse the model.
+
+        4. **§59: Truncation notice** — when ``last_consolidated > 0``, a
+           notice is injected as the first user message so the LLM knows
+           earlier context was archived.
         """
         unconsolidated = self.messages[self.last_consolidated:]
+        # §59: consolidation handles archival; only apply max_messages as a
+        # hard safety cap, not as the primary truncation mechanism.
+        _hard_truncated = len(unconsolidated) > max_messages
+        if _hard_truncated:
+            logger.warning("§59: get_history hard-truncation triggered (unconsolidated={}, max_messages={}, last_consolidated={}). "
+                           "This should not happen if consolidation is working correctly.",
+                           len(unconsolidated), max_messages, self.last_consolidated)
         sliced = unconsolidated[-max_messages:]
 
         # ── Phase 1: Align start boundary ──
@@ -279,7 +291,21 @@ class Session:
             # Restore file:/// references back to data: base64 for LLM input
             entry["content"] = _restore_image_refs(entry["content"])
             out.append(entry)
+
+        # ── Phase 4: §59 Truncation notice injection ──
+        # When earlier messages have been consolidated/archived OR hard-truncated
+        # by max_messages, inject a notice so the LLM knows context was lost.
+        hard_dropped = (len(unconsolidated) - max_messages) if _hard_truncated else 0
+        if (self.last_consolidated > 0 or _hard_truncated) and self.workspace is not None:
+            notice = self._build_truncation_notice(hard_dropped=hard_dropped)
+            out.insert(0, {"role": "user", "content": notice})
+
         return out
+
+    def _build_truncation_notice(self, *, hard_dropped: int = 0) -> str:
+        """§59: Build truncation notice for get_history(), reading session summary if available."""
+        from nanobot.agent.loop import AgentLoop
+        return AgentLoop._build_truncation_notice(self, self.workspace, hard_dropped=hard_dropped)
 
     @staticmethod
     def _trim_incomplete_tool_tail(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -380,7 +406,7 @@ class SessionManager:
 
         session = self._load(key)
         if session is None:
-            session = Session(key=key)
+            session = Session(key=key, workspace=self.workspace)
 
         self._cache[key] = session
         return session
@@ -426,7 +452,8 @@ class SessionManager:
                 messages=messages,
                 created_at=created_at or datetime.now(),
                 metadata=metadata,
-                last_consolidated=last_consolidated
+                last_consolidated=last_consolidated,
+                workspace=self.workspace,
             )
         except Exception as e:
             logger.warning("Failed to load session {}: {}", key, e)
@@ -624,7 +651,7 @@ class SessionManager:
         logger.info("Routing {} → {} (old session: {})", natural_key, new_key, old_key)
 
         # Create fresh session with the new key
-        new_session = Session(key=new_key)
+        new_session = Session(key=new_key, workspace=self.workspace)
         self.save(new_session)
 
         return new_key

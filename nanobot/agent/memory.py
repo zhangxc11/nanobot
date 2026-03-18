@@ -13,6 +13,8 @@ from nanobot.utils.helpers import ensure_dir
 if TYPE_CHECKING:
     from nanobot.providers.base import LLMProvider
     from nanobot.session.manager import Session
+    from nanobot.usage.detail_logger import LLMDetailLogger
+    from nanobot.usage.recorder import UsageRecorder
 
 
 _SAVE_MEMORY_TOOL = [
@@ -74,6 +76,11 @@ class MemoryStore:
         *,
         archive_all: bool = False,
         memory_window: int = 50,
+        detail_logger: LLMDetailLogger | None = None,
+        usage_recorder: UsageRecorder | None = None,
+        session_system_msg: dict | None = None,
+        session_tools: list[dict] | None = None,
+        max_tokens: int | None = None,
     ) -> bool:
         """Consolidate old messages into MEMORY.md + HISTORY.md via LLM tool call.
 
@@ -94,31 +101,97 @@ class MemoryStore:
                 return True
             logger.info("Memory consolidation: {} to consolidate, {} keep", len(old_messages), keep_count)
 
-        lines = []
-        for m in old_messages:
-            if not m.get("content"):
-                continue
-            tools = f" [tools: {', '.join(m['tools_used'])}]" if m.get("tools_used") else ""
-            lines.append(f"[{m.get('timestamp', '?')[:16]}] {m['role'].upper()}{tools}: {m['content']}")
-
         current_memory = self.read_long_term()
-        prompt = f"""Process this conversation and call the save_memory tool with your consolidation.
 
-## Current Long-term Memory
-{current_memory or "(empty)"}
+        _KEEP_KEYS = {"role", "content", "tool_calls", "tool_call_id", "name"}
 
-## Conversation to Process
-{chr(10).join(lines)}"""
+        if session_system_msg is not None and session_tools is not None:
+            # Cache-friendly path: reuse session prefix so Anthropic cache hits
+            stripped = [{k: v for k, v in m.items() if k in _KEEP_KEYS} for m in old_messages]
+            consolidation_instruction = (
+                "The preceding messages are being archived from the active session context. "
+                "You MUST call the save_memory tool with:\n"
+                "- history_entry: A 2-5 sentence summary starting with [YYYY-MM-DD HH:MM], "
+                "grep-searchable, covering key events/decisions/topics from the archived messages.\n"
+                "- memory_update: Full updated long-term memory as markdown (existing facts plus any new ones). "
+                "Return unchanged if nothing new.\n\n"
+                "IMPORTANT: You MUST call the save_memory tool. Do NOT respond with text. "
+                "Do NOT call any other tools. Only call save_memory.\n\n"
+                f"## Current Long-term Memory\n{current_memory or '(empty)'}"
+            )
+            messages = [session_system_msg] + stripped + [{"role": "user", "content": consolidation_instruction}]
+            tools = session_tools + _SAVE_MEMORY_TOOL
+        else:
+            # Fallback: independent system prompt (no cache hit)
+            lines = []
+            for m in old_messages:
+                if not m.get("content"):
+                    continue
+                tools_used = f" [tools: {', '.join(m['tools_used'])}]" if m.get("tools_used") else ""
+                lines.append(f"[{m.get('timestamp', '?')[:16]}] {m['role'].upper()}{tools_used}: {m['content']}")
+            prompt = (
+                "Process this conversation and call the save_memory tool with your consolidation.\n\n"
+                f"## Current Long-term Memory\n{current_memory or '(empty)'}\n\n"
+                f"## Conversation to Process\n{chr(10).join(lines)}"
+            )
+            messages = [
+                {"role": "system", "content": "You are a memory consolidation agent. Call the save_memory tool with your consolidation of the conversation."},
+                {"role": "user", "content": prompt},
+            ]
+            tools = _SAVE_MEMORY_TOOL
 
         try:
             response = await provider.chat(
-                messages=[
-                    {"role": "system", "content": "You are a memory consolidation agent. Call the save_memory tool with your consolidation of the conversation."},
-                    {"role": "user", "content": prompt},
-                ],
-                tools=_SAVE_MEMORY_TOOL,
+                messages=messages,
+                tools=tools,
                 model=model,
+                max_tokens=max_tokens or 16384,
             )
+
+            # Record consolidation LLM call to llm-logs and analytics.db
+            from datetime import datetime as _dt
+            _call_ts = _dt.now().isoformat()
+            if detail_logger is not None and response.usage:
+                try:
+                    # Build a compact representation of consolidation messages for logging.
+                    # In cache-friendly path, `messages` is the actual list sent to LLM;
+                    # in fallback path, it's also `messages`. Truncate content for storage.
+                    _log_messages = []
+                    for _m in messages:
+                        _content = _m.get("content", "")
+                        if isinstance(_content, str) and len(_content) > 300:
+                            _content = _content[:300] + "..."
+                        _log_messages.append({"role": _m.get("role", "unknown"), "content": _content})
+                    detail_logger.log_call(
+                        session_key=session.key,
+                        model=model,
+                        iteration=0,
+                        messages=_log_messages,
+                        response_content=response.content if isinstance(response.content, str) else str(response.content),
+                        response_tool_calls=None,
+                        response_finish_reason=response.finish_reason if hasattr(response, "finish_reason") else "stop",
+                        response_usage=response.usage,
+                        provider=getattr(provider, "provider_name", ""),
+                    )
+                except Exception:
+                    logger.exception("Failed to log consolidation LLM call to detail_logger")
+            if usage_recorder is not None and response.usage:
+                try:
+                    usage_recorder.record(
+                        session_key=session.key,
+                        model=model,
+                        prompt_tokens=response.usage.get("prompt_tokens", 0),
+                        completion_tokens=response.usage.get("completion_tokens", 0),
+                        total_tokens=response.usage.get("total_tokens", 0),
+                        llm_calls=1,
+                        started_at=_call_ts,
+                        finished_at=_call_ts,
+                        cache_creation_input_tokens=response.usage.get("cache_creation_input_tokens", 0),
+                        cache_read_input_tokens=response.usage.get("cache_read_input_tokens", 0),
+                        provider=getattr(provider, "provider_name", ""),
+                    )
+                except Exception:
+                    logger.debug("Failed to record consolidation usage")
 
             if not response.has_tool_calls:
                 logger.warning("Memory consolidation: LLM did not call save_memory, skipping")
