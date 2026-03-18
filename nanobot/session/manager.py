@@ -228,6 +228,11 @@ class Session:
         unconsolidated = self.messages[self.last_consolidated:]
         # §59: consolidation handles archival; only apply max_messages as a
         # hard safety cap, not as the primary truncation mechanism.
+        _hard_truncated = len(unconsolidated) > max_messages
+        if _hard_truncated:
+            logger.warning("§59: get_history hard-truncation triggered (unconsolidated={}, max_messages={}, last_consolidated={}). "
+                           "This should not happen if consolidation is working correctly.",
+                           len(unconsolidated), max_messages, self.last_consolidated)
         sliced = unconsolidated[-max_messages:]
 
         # ── Phase 1: Align start boundary ──
@@ -288,18 +293,19 @@ class Session:
             out.append(entry)
 
         # ── Phase 4: §59 Truncation notice injection ──
-        # When earlier messages have been consolidated/archived, inject a
-        # notice as the first user message so the LLM is aware of the gap.
-        if self.last_consolidated > 0 and self.workspace is not None:
-            notice = self._build_truncation_notice()
+        # When earlier messages have been consolidated/archived OR hard-truncated
+        # by max_messages, inject a notice so the LLM knows context was lost.
+        hard_dropped = (len(unconsolidated) - max_messages) if _hard_truncated else 0
+        if (self.last_consolidated > 0 or _hard_truncated) and self.workspace is not None:
+            notice = self._build_truncation_notice(hard_dropped=hard_dropped)
             out.insert(0, {"role": "user", "content": notice})
 
         return out
 
-    def _build_truncation_notice(self) -> str:
+    def _build_truncation_notice(self, *, hard_dropped: int = 0) -> str:
         """§59: Build truncation notice for get_history(), reading session summary if available."""
         from nanobot.agent.loop import AgentLoop
-        return AgentLoop._build_truncation_notice(self, self.workspace)
+        return AgentLoop._build_truncation_notice(self, self.workspace, hard_dropped=hard_dropped)
 
     @staticmethod
     def _trim_incomplete_tool_tail(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

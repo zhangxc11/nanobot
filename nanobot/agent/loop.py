@@ -73,7 +73,7 @@ Write a session summary to `{workspace}/sessions/session_summary/{session_id}.md
 This file will be your primary context recovery source after archival."""
 
 _TRUNCATION_NOTICE_WITH_SUMMARY = """⚠️ [Context Truncation Notice]
-{archived_count} earlier messages in this session have been archived.
+{archived_count}
 
 --- Session Summary ---
 {summary_content}
@@ -83,7 +83,7 @@ Full session log: `{workspace}/sessions/{session_id}.jsonl` (for precise lookup 
 Do NOT re-do work that may have been completed in the archived portion — check files and git history first."""
 
 _TRUNCATION_NOTICE_NO_SUMMARY = """⚠️ [Context Truncation Notice]
-{archived_count} earlier messages in this session have been archived.
+{archived_count}
 No session summary was written before archival.
 Full session log: `{workspace}/sessions/{session_id}.jsonl` (use grep/parse for context recovery)
 Do NOT re-do work that may have been completed in the archived portion — check files and git history first."""
@@ -1819,7 +1819,9 @@ class AgentLoop:
             session = self.sessions.get_or_create(key)
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"),
                                    session_key=key, tools=_tools)
-            history = session.get_history(max_messages=self.memory_window)
+            # §59: hard cap is a safety net, not the primary truncation mechanism.
+            # Set it well above CONSOLIDATION_LINE to allow async consolidation time.
+            history = session.get_history(max_messages=self.memory_window * 2)
             messages = self.context.build_messages(
                 history=history,
                 current_message=msg.content, channel=channel, chat_id=chat_id,
@@ -1905,7 +1907,8 @@ class AgentLoop:
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
 
-        history = session.get_history(max_messages=self.memory_window)
+        # §59: hard cap — same reasoning as the other call site.
+        history = session.get_history(max_messages=self.memory_window * 2)
         initial_messages = self.context.build_messages(
             history=history,
             current_message=msg.content,
@@ -2006,15 +2009,32 @@ class AgentLoop:
                 )
             if success:
                 logger.info("§59: Mid-turn consolidation succeeded for {} (last_consolidated={})", session.key, session.last_consolidated)
-                self._pending_consolidation_done[session.key] = {
-                    "archive_cut": archive_cut,
-                    "last_consolidated": session.last_consolidated,
-                    "messages_len": len(messages),
-                }
             else:
-                logger.warning("§59: Mid-turn consolidation returned False for {}", session.key)
+                # Non-transient failure (e.g. LLM truncated, didn't call tool).
+                # Advance last_consolidated anyway — session summary provides safety net.
+                session.last_consolidated = len(session.messages) - (self.memory_window // 2)
+                if session.last_consolidated < 0:
+                    session.last_consolidated = 0
+                logger.warning("§59: Mid-turn consolidation failed for {}, advancing last_consolidated to {} (non-retriable)",
+                               session.key, session.last_consolidated)
+            # Always schedule trim — whether consolidation succeeded or failed,
+            # we need to trim the in-memory messages and inject truncation notice.
+            self._pending_consolidation_done[session.key] = {
+                "archive_cut": archive_cut,
+                "last_consolidated": session.last_consolidated,
+                "messages_len": len(messages),
+            }
         except Exception:
-            logger.exception("§59: Mid-turn consolidation failed for {}", session.key)
+            logger.exception("§59: Mid-turn consolidation exception for {}", session.key)
+            # Same treatment as non-transient failure: advance and trim.
+            session.last_consolidated = len(session.messages) - (self.memory_window // 2)
+            if session.last_consolidated < 0:
+                session.last_consolidated = 0
+            self._pending_consolidation_done[session.key] = {
+                "archive_cut": archive_cut,
+                "last_consolidated": session.last_consolidated,
+                "messages_len": len(messages),
+            }
         finally:
             self._consolidating.discard(session.key)
 
@@ -2065,16 +2085,26 @@ class AgentLoop:
         return cut
 
     @staticmethod
-    def _build_truncation_notice(session: Session, workspace: Path) -> str:
+    def _build_truncation_notice(session: Session, workspace: Path, *, hard_dropped: int = 0) -> str:
         """§59: Build truncation notice, expanding session summary if available."""
         session_id = session.key.replace(":", "_")
         archived_count = session.last_consolidated
+        # Build the "what happened" description
+        parts: list[str] = []
+        if archived_count > 0:
+            parts.append(f"{archived_count} earlier messages were archived via consolidation.")
+        if hard_dropped > 0:
+            parts.append(f"{hard_dropped} additional messages were dropped by hard truncation (consolidation may have failed).")
+        if not parts:
+            parts.append("Some earlier messages in this session are no longer in context.")
+        context_line = " ".join(parts)
+
         summary_path = workspace / "sessions" / "session_summary" / f"{session_id}.md"
         try:
             if summary_path.exists():
                 summary_content = summary_path.read_text(encoding="utf-8").strip()
                 return _TRUNCATION_NOTICE_WITH_SUMMARY.format(
-                    archived_count=archived_count,
+                    archived_count=context_line,
                     summary_content=summary_content,
                     workspace=str(workspace),
                     session_id=session_id,
@@ -2082,7 +2112,7 @@ class AgentLoop:
         except Exception:
             logger.debug("§59: Failed to read session summary from {}", summary_path)
         return _TRUNCATION_NOTICE_NO_SUMMARY.format(
-            archived_count=archived_count,
+            archived_count=context_line,
             workspace=str(workspace),
             session_id=session_id,
         )
