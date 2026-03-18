@@ -112,7 +112,7 @@ class AgentLoop:
         max_iterations: int = 40,
         temperature: float = 0.1,
         max_tokens: int = 4096,
-        memory_window: int = 100,
+        memory_window: int = 40,
         reasoning_effort: str | None = None,
         brave_api_key: str | None = None,
         web_proxy: str | None = None,
@@ -473,7 +473,7 @@ class AgentLoop:
                 logger.info("§59: Triggering mid-turn consolidation (msg_count={}, archive_cut={})", _msg_count, _archive_cut)
                 _task = asyncio.create_task(
                     self._do_mid_turn_consolidation(session, messages, _archive_cut,
-                                                    provider=_provider, model=_model)
+                                                    provider=_provider, model=_model, tools=_tools)
                 )
                 self._consolidation_tasks.add(_task)
                 _task.add_done_callback(self._consolidation_tasks.discard)
@@ -1861,6 +1861,7 @@ class AgentLoop:
                         if not await self._consolidate_memory(
                             temp, archive_all=True,
                             provider=_provider, model=_model,
+                            tools=_tools,
                         ):
                             return OutboundMessage(
                                 channel=msg.channel, chat_id=msg.chat_id,
@@ -1985,27 +1986,41 @@ class AgentLoop:
 
     async def _consolidate_memory(self, session, archive_all: bool = False,
                                   provider: LLMProvider | None = None,
-                                  model: str | None = None) -> bool:
+                                  model: str | None = None,
+                                  tools: ToolRegistry | None = None) -> bool:
         """Delegate to MemoryStore.consolidate(). Returns True on success."""
         _provider = provider or self.provider
         _model = model or self.model
+        _tools = tools or self.tools
+
+        # Extract system message from session for cache-friendly consolidation
+        _system_msg = None
+        if session.messages and session.messages[0].get("role") == "system":
+            _system_msg = session.messages[0]
+
+        _tool_defs = _tools.get_definitions() if _tools else None
+
         return await MemoryStore(self.workspace).consolidate(
             session, _provider, _model,
             archive_all=archive_all, memory_window=self.memory_window,
             detail_logger=self.detail_logger,
             usage_recorder=self.usage_recorder,
+            session_system_msg=_system_msg,
+            session_tools=_tool_defs,
+            max_tokens=self.max_tokens,
         )
 
     async def _do_mid_turn_consolidation(
         self, session: Session, messages: list[dict], archive_cut: int,
         *, provider: LLMProvider | None = None, model: str | None = None,
+        tools: ToolRegistry | None = None,
     ) -> None:
         """§59: Run consolidation asynchronously, store result in pending dict."""
         try:
             lock = self._consolidation_locks.setdefault(session.key, asyncio.Lock())
             async with lock:
                 success = await self._consolidate_memory(
-                    session, provider=provider, model=model,
+                    session, provider=provider, model=model, tools=tools,
                 )
             if success:
                 logger.info("§59: Mid-turn consolidation succeeded for {} (last_consolidated={})", session.key, session.last_consolidated)
