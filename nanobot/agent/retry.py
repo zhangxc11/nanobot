@@ -112,6 +112,14 @@ def is_retryable(error: Exception) -> bool:
         if pattern in msg_lower:
             return False
 
+    # §63: HTTP 400 Bad Request — client error, retry is pointless.
+    # Check early because litellm may wrap 400 in a retryable-looking class name
+    # (e.g. BadRequestError), and orphan tool_result messages cause 400 from
+    # Anthropic. Retrying 400 leads to infinite loops.
+    _status_early = getattr(error, "status_code", None) or getattr(error, "status", None)
+    if isinstance(_status_early, int) and _status_early == 400:
+        return False
+
     cls_name = type(error).__name__
     if cls_name in _RETRYABLE_CLASSES:
         return True

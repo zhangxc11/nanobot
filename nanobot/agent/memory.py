@@ -99,6 +99,20 @@ class MemoryStore:
             old_messages = session.messages[session.last_consolidated:-keep_count]
             if not old_messages:
                 return True
+
+            # §63: Strip orphan tool_result messages from the beginning of the slice.
+            # When the slice boundary cuts a tool_use/tool_result pair, the tool_result
+            # ends up at the start without its matching assistant tool_use, causing
+            # Anthropic to return 400 BadRequestError.
+            _stripped_orphans = 0
+            while old_messages and old_messages[0].get("role") == "tool":
+                old_messages = old_messages[1:]
+                _stripped_orphans += 1
+            if _stripped_orphans:
+                logger.debug("Consolidation: stripped {} orphan tool_result(s) from start of slice", _stripped_orphans)
+            if not old_messages:
+                return True
+
             logger.info("Memory consolidation: {} to consolidate, {} keep", len(old_messages), keep_count)
 
         current_memory = self.read_long_term()
