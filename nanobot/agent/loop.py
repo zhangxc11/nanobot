@@ -325,6 +325,7 @@ class AgentLoop:
         temperature: float,
         max_tokens: int,
         reasoning_effort: str | None = None,
+        read_timeout: float | None = None,
         progress_fn: Callable[..., Awaitable[None]] | None = None,
         session_key: str = "",
     ):
@@ -341,14 +342,24 @@ class AgentLoop:
         reasoning_effort:
             Optional reasoning effort hint passed to the provider.
         """
-        from nanobot.agent.retry import is_fast_retryable, compute_retry_delay
+        from nanobot.agent.retry import is_fast_retryable, compute_retry_delay, is_timeout_error, ping_api, wait_for_recovery
 
         _provider = provider or self.provider
         max_retries = 7
 
         # §60: Extract provider diagnostics for timeout/error logging
         _prov_name = getattr(_provider, "provider_name", None) or type(_provider).__name__
-        _prov_base = getattr(_provider, "api_base", None) or "?"
+        # Get api_base from the active provider instance (ProviderPool wraps it)
+        _active_providers = getattr(_provider, "_providers", {})
+        if _active_providers:
+            _active_name = getattr(_provider, "_active_provider", None)
+            if _active_name and _active_name in _active_providers:
+                _inner_provider, _ = _active_providers[_active_name]
+                _prov_base = getattr(_inner_provider, "api_base", None) or "?"
+            else:
+                _prov_base = "?"
+        else:
+            _prov_base = getattr(_provider, "api_base", None) or "?"
 
         for attempt in range(max_retries + 1):
             try:
@@ -361,10 +372,73 @@ class AgentLoop:
                 )
                 if reasoning_effort is not None:
                     kwargs["reasoning_effort"] = reasoning_effort
+                # §61: Pass extended timeout if provided
+                if read_timeout is not None:
+                    import httpx as _httpx
+                    kwargs["timeout"] = _httpx.Timeout(connect=30.0, read=read_timeout, write=30.0, pool=30.0)
                 return await _provider.chat(**kwargs)
             except Exception as e:
                 if not self._is_retryable(e) or attempt >= max_retries:
                     raise
+
+                # §61: Timeout-specific diagnosis — ping to determine cause
+                if is_timeout_error(e):
+                    # Get api_base from inner provider if ProviderPool
+                    _active_providers_inner = getattr(_provider, "_providers", {})
+                    if _active_providers_inner:
+                        _active_name_inner = getattr(_provider, "_active_provider", None)
+                        if _active_name_inner and _active_name_inner in _active_providers_inner:
+                            _inner_prov, _ = _active_providers_inner[_active_name_inner]
+                            _api_base = getattr(_inner_prov, "api_base", None) or ""
+                        else:
+                            _api_base = ""
+                    else:
+                        _api_base = getattr(_provider, "api_base", None) or ""
+                    reachable = await ping_api(_api_base)
+
+                    if reachable:
+                        # Network fine → content too large, retry won't help
+                        logger.warning(
+                            "§61: Timeout but API reachable (content too large). "
+                            "provider={}, api_base={}, session={}",
+                            _prov_name, _prov_base, session_key,
+                        )
+                        if progress_fn:
+                            try:
+                                await progress_fn("⏳ 请求超时（API 可达），将建议模型缩短输出...")
+                            except Exception:
+                                pass
+                        from nanobot.providers.base import LLMResponse
+                        return LLMResponse(content=None, finish_reason="timeout")
+                    else:
+                        # Network issue → wait for recovery then retry
+                        logger.warning(
+                            "§61: Timeout + API unreachable (network issue). "
+                            "provider={}, api_base={}, session={}. Waiting for recovery...",
+                            _prov_name, _prov_base, session_key,
+                        )
+                        if progress_fn:
+                            try:
+                                await progress_fn("⏳ 网络不可达，等待恢复...")
+                            except Exception:
+                                pass
+                        recovered = await wait_for_recovery(_api_base, max_wait=20.0)
+                        if recovered:
+                            logger.info("§61: Network recovered, retrying LLM call")
+                            if progress_fn:
+                                try:
+                                    await progress_fn("✅ 网络恢复，重试中...")
+                                except Exception:
+                                    pass
+                            continue  # retry the for loop
+                        else:
+                            logger.warning(
+                                "§61: Network still unreachable after recovery wait. "
+                                "Falling through to retry loop."
+                            )
+                            # Fall through to normal retry logic below
+                            # (network jitter may resolve with retry delays)
+
                 fast = is_fast_retryable(e)
                 delay = compute_retry_delay(attempt, fast)
                 retry_type = "fast" if fast else "slow"
@@ -380,7 +454,7 @@ class AgentLoop:
                 )
                 if progress_fn:
                     try:
-                        label = "网络断连" if fast else "API 限流"
+                        label = "网络断连" if fast else ("API 过载" if "overload" in str(e).lower() else "API 错误")
                         await progress_fn(
                             f"⏳ {label}，等待 {delay:.0f}s 后重试 ({attempt + 1}/{max_retries})"
                         )
@@ -453,6 +527,12 @@ class AgentLoop:
             async def _cb_progress(text: str, *, tool_hint: bool = False) -> None:
                 await callbacks.on_progress(text, tool_hint=tool_hint)
             _progress_fn = _cb_progress
+
+        # §61: Consecutive timeout counter — abort after too many consecutive timeouts
+        consecutive_timeouts = 0
+        _MAX_CONSECUTIVE_TIMEOUTS = 2  # max 2 timeout hints, 3rd time → abort
+        # §61: Dynamic timeout extension — double read timeout after each timeout-but-reachable
+        current_read_timeout: float | None = None  # None = use provider default
 
         # How many messages existed before the loop — used to determine
         # which messages are "new" for realtime persistence.
@@ -531,6 +611,7 @@ class AgentLoop:
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
                 reasoning_effort=self.reasoning_effort,
+                read_timeout=current_read_timeout,
                 progress_fn=_progress_fn,
                 session_key=session.key if session is not None else "",
             )
@@ -614,13 +695,71 @@ class AgentLoop:
                 }
                 messages.append(hint_msg)
 
-                # Persist the hint message
-                if session is not None:
-                    self.sessions.append_message(session, hint_msg)
+                # §62: Do NOT persist — hint is ephemeral (only for current turn LLM context).
+                # Persisting would cause it to display as a user message on session reload.
                 if callbacks is not None:
                     await callbacks.on_message(hint_msg)
 
                 continue  # skip to next iteration without executing tools
+
+            # §61: Timeout detection — LLM request timed out but API was reachable,
+            # meaning output was too large for the timeout window.
+            if response.finish_reason == "timeout":
+                consecutive_timeouts += 1
+
+                # §61: Extend read timeout for next call (double, capped at 600s)
+                from nanobot.providers.litellm_provider import _LLM_TIMEOUT as _default_timeout
+                _base_read = current_read_timeout if current_read_timeout is not None else getattr(_default_timeout, 'read', 300.0)
+                current_read_timeout = min(_base_read * 2, 600.0)
+                logger.info("§61: Extended read timeout to {:.0f}s for next call", current_read_timeout)
+
+                if consecutive_timeouts > _MAX_CONSECUTIVE_TIMEOUTS:
+                    logger.error(
+                        "§61: Consecutive timeout limit reached ({}/{}). Aborting.",
+                        consecutive_timeouts, _MAX_CONSECUTIVE_TIMEOUTS,
+                    )
+                    error_msg = (
+                        f"⏱️ 连续 {consecutive_timeouts} 次 LLM 请求超时，"
+                        "模型输出过大无法在超时窗口内完成。请尝试简化任务或拆分为更小的步骤。"
+                    )
+                    if callbacks is not None:
+                        try:
+                            await callbacks.on_message({"role": "assistant", "content": error_msg})
+                        except Exception:
+                            pass
+                    break  # exit iteration loop
+
+                logger.warning(
+                    "§61: LLM timeout (API reachable) — injecting timeout hint ({}/{})",
+                    consecutive_timeouts, _MAX_CONSECUTIVE_TIMEOUTS,
+                )
+                timeout_hint = (
+                    "[System] ⚠️ Your previous LLM call timed out — your intended output was too large. "
+                    f"This is timeout #{consecutive_timeouts}/{_MAX_CONSECUTIVE_TIMEOUTS} — "
+                    f"if this happens {_MAX_CONSECUTIVE_TIMEOUTS - consecutive_timeouts} more time(s), the task will be aborted. "
+                    "You MUST reduce your output size. Strategies:\n"
+                    "1. Write code to files using exec with heredoc (exec tool), not inline\n"
+                    "2. Split large operations into multiple smaller tool calls\n"
+                    "3. Process data in batches instead of all at once\n"
+                    "Do NOT repeat the same large output — it will timeout again."
+                )
+                hint_msg = {
+                    "role": "user",
+                    "content": timeout_hint,
+                    "timestamp": datetime.now().isoformat(),
+                }
+                messages.append(hint_msg)
+                # §62: Do NOT persist — hint is ephemeral (counter is in-memory state).
+                if callbacks is not None:
+                    try:
+                        await callbacks.on_message(hint_msg)
+                    except Exception:
+                        pass
+                continue  # next iteration
+
+            # §61: Reset consecutive timeout counter and read timeout on successful response
+            consecutive_timeouts = 0
+            current_read_timeout = None
 
             if response.has_tool_calls:
                 if _progress_fn:

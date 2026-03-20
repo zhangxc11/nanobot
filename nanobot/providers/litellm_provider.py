@@ -224,6 +224,7 @@ class LiteLLMProvider(LLMProvider):
         max_tokens: int = 4096,
         temperature: float = 0.7,
         reasoning_effort: str | None = None,
+        timeout: Any = None,
     ) -> LLMResponse:
         """
         Send a chat completion request via LiteLLM.
@@ -280,7 +281,8 @@ class LiteLLMProvider(LLMProvider):
             kwargs["tool_choice"] = "auto"
 
         # Phase 28: Weak-network resilience — timeout + litellm-level retries
-        kwargs["timeout"] = _LLM_TIMEOUT
+        # §61: Allow caller to override timeout (e.g. extended read timeout after diagnosis)
+        kwargs["timeout"] = timeout if timeout is not None else _LLM_TIMEOUT
         kwargs["num_retries"] = _LLM_NUM_RETRIES
 
         try:

@@ -80,6 +80,8 @@
 | Phase 54: follow_up resume 缺少 event_callback (§58) | ✅ 已完成 | local |
 | Phase 55: Turn 内 Consolidation + 截断预警/通知 (§59) | ✅ 已完成 | feat/turn-consolidation |
 | Phase 56: Streaming Timeout 修复与鲁棒性增强 (§60) | ✅ 已完成 | fix/s60-timeout-and-robustness |
+| Phase 57: Timeout 智能诊断与恢复 (§61) | ✅ 已完成 | local `c2eb217` |
+| Phase 58: 系统 Hint 消息不落盘 (§62) | ✅ 已完成 | local `c2eb217` |
 
 ---
 
@@ -159,6 +161,7 @@
 | 54 | follow_up resume 缺少 event_callback (§58) | ✅ | *主文件* |
 | 55 | Turn 内 Consolidation + 截断预警/通知 (§59) | ✅ | *主文件* |
 | 56 | Streaming Timeout 修复与鲁棒性增强 (§60) | ✅ | *主文件* |
+| 57 | Timeout 智能诊断与恢复 (§61) | 🔜 | *主文件* |
 
 ---
 
@@ -296,3 +299,73 @@ ad2d74a feat: truncation detection + spawn max_tokens (§60)
 ### 已知遗留
 
 - P1: 300s 是临时方案，后续需要更智能的 timeout 策略（如基于模型/请求大小动态调整）
+
+---
+
+## Phase 57: Timeout 智能诊断与恢复 (§61) ✅
+
+**日期**: 2026-03-20
+**需求**: §61（`requirements/s60-s69.md`）
+**分支**: `local`（直接提交，改动跨多个 sub-phase）
+
+### 背景
+
+§60 的 300s timeout 是临时方案。Timeout 后盲目重试浪费时间，需要先诊断（ping API）再决策（内容太多→hint / 网络断→等恢复）。
+
+### 任务清单
+
+- [x] **T57.1** `agent/retry.py` — 新增 `is_timeout_error()` 函数
+- [x] **T57.2** `agent/retry.py` — 新增 `ping_api()` 异步函数
+- [x] **T57.3** `agent/retry.py` — 新增 `wait_for_recovery()` 异步函数
+- [x] **T57.4** `agent/loop.py` — `_chat_with_retry` 中 timeout 诊断逻辑
+- [x] **T57.5** `agent/loop.py` — `_run_agent_loop` 中 `finish_reason="timeout"` hint 注入
+- [x] **T57.6** `agent/subagent.py` — `_chat_with_retry` 中 timeout 诊断逻辑
+- [x] **T57.7** `agent/subagent.py` — iteration loop 中 `finish_reason="timeout"` hint 注入
+- [x] **T57.8** 语法检查 + import 验证
+- [x] **T57.9** Git commit `5db4066`
+- [x] **T57.10** Phase 2-4: consecutive limit + dynamic timeout + merge — commits `c626875`→`6cb195b`→`aa97436`→`2f0068d`→`4e19413`
+- [x] **T57.11** 网络中断修复: recovery 失败 fall through + "cannot connect" fast pattern + label — commit `57b984a`
+
+### Commits
+
+| Commit | 描述 |
+|--------|------|
+| `5db4066` | Phase 1: ping 诊断 + finish_reason="timeout" + hint 注入 |
+| `c626875` | Phase 2: consecutive timeout limit (MAX=2) |
+| `6cb195b` | Phase 3: hint 注入到 subagent |
+| `aa97436` | Phase 4: dynamic timeout extension |
+| `2f0068d`→`4e19413` | merge commits |
+| `57b984a` | fix: 网络断连 recovery 失败 fall through + fast retry pattern |
+
+---
+
+## Phase 58: 系统 Hint 消息不落盘 (§62) ✅
+
+**日期**: 2026-03-20
+**需求**: §62 — 系统注入的 hint 消息（truncation hint / timeout hint）以 `role: "user"` 落盘到 JSONL，前端重新加载时被当作普通用户消息气泡显示。
+
+### 背景
+
+`loop.py` 中两类 hint 消息通过 `append_message` 落盘：
+- **截断 hint** (L692): `[System] Your previous output was truncated...`（finish_reason=length 时注入）
+- **超时 hint** (L748): `[System] ⚠️ Your previous LLM call timed out...`（§61 timeout 时注入）
+
+这些 hint 只需在当前 turn 的内存 messages 中存在（让 LLM 看到），不需要持久化。落盘后前端会错误地显示为用户消息。
+
+### 分析
+
+- 截断 hint: 即时效果，告诉 LLM 拆分输出，session 重建后不需要
+- 超时 hint: 带计数器 `#1/2`，但 `consecutive_timeouts` 是内存变量，重建后重置，落盘的计数信息语义过期
+- 其他 user role 系统消息（截断预警、budget alert、truncation notice、preserved messages）确认都是仅内存，不涉及
+
+### 任务清单
+
+- [x] **T58.1** `agent/loop.py` L692 — 删除截断 hint 的 `append_message` 调用
+- [x] **T58.2** `agent/loop.py` L748 — 删除超时 hint 的 `append_message` 调用
+- [x] **T58.3** Git commit `1517243`
+
+### 改动文件
+
+| 文件 | 改动 |
+|------|------|
+| `nanobot/agent/loop.py` | 删除 2 处 `self.sessions.append_message(session, hint_msg)`，保留 `messages.append`（内存）和 `callbacks.on_message`（SSE 推送） |

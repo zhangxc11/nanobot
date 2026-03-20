@@ -103,6 +103,8 @@ local    ← 本地自定义改动（基于 main）
 | §58 | follow_up 恢复路径缺少 event_callback 通知 | ✅ | [requirements/s50-s59.md](requirements/s50-s59.md) |
 | §59 | Turn 内 Consolidation + 截断预警/通知 | ✅ | [requirements/s50-s59.md](requirements/s50-s59.md) |
 | §60 | Streaming Timeout 修复与鲁棒性增强 | ✅ | [requirements/s60-s69.md](requirements/s60-s69.md) |
+| §61 | Timeout 智能诊断与恢复 | ✅ | [requirements/s60-s69.md](requirements/s60-s69.md) |
+| §62 | 系统 Hint 消息不落盘 | ✅ | [requirements/s60-s69.md](requirements/s60-s69.md) |
 
 ---
 
