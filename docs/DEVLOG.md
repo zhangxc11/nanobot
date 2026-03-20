@@ -79,6 +79,7 @@
 | Phase 53: 飞书语音消息 recognition 提取 (§57) | ✅ 已完成 | feat/batch-20260313-plan-core-fixes |
 | Phase 54: follow_up resume 缺少 event_callback (§58) | ✅ 已完成 | local |
 | Phase 55: Turn 内 Consolidation + 截断预警/通知 (§59) | ✅ 已完成 | feat/turn-consolidation |
+| Phase 56: Streaming Timeout 修复与鲁棒性增强 (§60) | ✅ 已完成 | fix/s60-timeout-and-robustness |
 
 ---
 
@@ -154,39 +155,14 @@
 | 50 | Session 父子关系解析统一到核心 (§54) | ✅ | [devlog/phase-46-50.md](devlog/phase-46-50.md) |
 | 51 | CronTool 改用 session/parents.py 验证 target_session (§53 R2) | ✅ | [devlog/phase-51-55.md](devlog/phase-51-55.md) |
 | 52 | Subagent Provider 继承 (§56) | ✅ | [devlog/phase-51-55.md](devlog/phase-51-55.md) |
-| 53 | 飞书语音消息 recognition 提取 (§57) | ✅ | *主文件* |
+| 53 | 飞书语音消息 recognition 提取 (§57) | ✅ | [devlog/phase-51-55.md](devlog/phase-51-55.md) |
 | 54 | follow_up resume 缺少 event_callback (§58) | ✅ | *主文件* |
 | 55 | Turn 内 Consolidation + 截断预警/通知 (§59) | ✅ | *主文件* |
+| 56 | Streaming Timeout 修复与鲁棒性增强 (§60) | ✅ | *主文件* |
 
 ---
 
 ---
-
----
-
-## Phase 53: 飞书语音消息 recognition 提取 (§57) ✅
-
-**日期**: 2026-03-16
-**需求**: §57（`requirements/s50-s59.md`）
-
-### 背景
-
-飞书语音消息的 `content` JSON 中包含 `recognition` 字段（语音转文字），但 nanobot 飞书通道代码在处理 `audio` 类型消息时完全没有提取该字段。
-
-### 任务清单
-
-- [x] **T53.1** `feishu.py` 直接 audio 消息处理：提取 `recognition` 字段
-- [x] **T53.2** `feishu.py` merge_forward audio 子消息处理：提取 `recognition` 字段
-- [x] **T53.3** 新增单元测试
-- [x] **T53.4** 全量回归测试通过
-- [x] **T53.5** Git commit
-
-### 改动文件
-
-| 文件 | 改动 |
-|------|------|
-| `nanobot/channels/feishu.py` | 两处 audio 处理后追加 recognition 提取（各 3 行） |
-| `tests/test_feishu_audio_recognition.py` | 新增 6 个测试覆盖 recognition 提取 |
 
 ---
 
@@ -266,3 +242,57 @@ e08061c fix: consolidation failure handling + hard-truncation notice (§59)
 - P0: consolidation max_tokens 可能不足（大 session）
 - P1: consolidation 失败后重试策略待优化
 - P2: consolidation 输入无上限
+
+---
+
+## Phase 56: Streaming Timeout 修复与鲁棒性增强 (§60) ✅
+
+**日期**: 2026-03-20
+**需求**: §60（`requirements/s60-s69.md`）
+**分支**: `fix/s60-timeout-and-robustness`
+
+### 背景
+
+API 代理（apia/ppapi）均不支持 streaming 透传，全量缓冲模式下 Claude Opus 大请求 TTFB 可达 192s，超过原 `read=120s` timeout。同时存在截断死循环、spawn 无法自定义 max_tokens、retry 日志缺少诊断信息等鲁棒性问题。
+
+### 任务清单
+
+- [x] **T56.1** `litellm_provider.py` — read timeout 120→300s + usage missing warning
+- [x] **T56.2** `loop.py` — 截断检测（finish_reason=length + tool_calls → skip + inject split hint）
+- [x] **T56.3** `loop.py` — non-dict tool args 防御
+- [x] **T56.4** `subagent.py` + `spawn.py` — spawn max_tokens 参数支持
+- [x] **T56.5** `loop.py` — retry/error 日志增加 provider name/api_base/session_key
+- [x] **T56.6** `registry.py` — non-dict params 防御 + audit 异常隔离
+- [x] **T56.7** `detail_logger.py` — 增加 finish_reason/content/tool_calls 字段
+
+### Commits
+
+```
+838ccbb fix: increase read timeout to 300s + usage missing warning (§60)
+ad2d74a feat: truncation detection + spawn max_tokens (§60)
+44c65b1 fix: enhanced retry/error logging + defensive tool registry (§60)
+```
+
+### 改动统计
+
+**6 files changed, 173 insertions(+), 27 deletions(-)**
+
+| 文件 | 改动 |
+|------|------|
+| `nanobot/providers/litellm_provider.py` | read timeout 300s + usage missing warning |
+| `nanobot/agent/loop.py` | 截断检测 + non-dict args 防御 + retry 日志增强 |
+| `nanobot/agent/subagent.py` | max_tokens 参数透传 |
+| `nanobot/agent/tools/spawn.py` | max_tokens 参数定义 |
+| `nanobot/agent/tools/registry.py` | non-dict params 防御 + audit 异常隔离 |
+| `nanobot/usage/detail_logger.py` | 增加 finish_reason/content/tool_calls 字段 |
+
+### 决策记录
+
+- **关闭 streaming**（`stream=False` + `read=300s`）：代理都不支持 streaming 透传
+- **截断时 skip 而非 retry**：retry 可能再次截断，skip + hint 让 LLM 主动拆分更有效
+- **不保留 §60-diag 诊断代码**：临时诊断代码不适合长期保留
+- **不保留 partial usage extraction**：usage 缺失时记录 warning 即可
+
+### 已知遗留
+
+- P1: 300s 是临时方案，后续需要更智能的 timeout 策略（如基于模型/请求大小动态调整）

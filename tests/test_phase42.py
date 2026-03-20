@@ -195,11 +195,11 @@ class TestLLMTimeoutSplit:
 
         assert _LLM_TIMEOUT.connect == 30.0
 
-    def test_read_timeout_120s(self):
-        """Read timeout should be 120 seconds."""
+    def test_read_timeout_300s(self):
+        """Read timeout should be 300 seconds (§60: increased for API proxy buffering)."""
         from nanobot.providers.litellm_provider import _LLM_TIMEOUT
 
-        assert _LLM_TIMEOUT.read == 120.0
+        assert _LLM_TIMEOUT.read == 300.0
 
     def test_write_timeout_30s(self):
         """Write timeout should be 30 seconds."""

@@ -94,6 +94,14 @@ class SpawnTool(Tool):
                         "Use higher values for complex multi-step tasks."
                     ),
                 },
+                "max_tokens": {
+                    "type": "integer",
+                    "description": (
+                        "Maximum tokens for LLM response in the subagent. "
+                        "Defaults to the global config value. "
+                        "Use higher values (e.g. 16384) for code generation tasks."
+                    ),
+                },
                 "persist": {
                     "type": "boolean",
                     "description": (
@@ -136,6 +144,7 @@ class SpawnTool(Tool):
         task: str,
         label: str | None = None,
         max_iterations: int | None = None,
+        max_tokens: int | None = None,
         persist: bool = True,
         follow_up: str | None = None,
         stop: str | None = None,
@@ -147,7 +156,7 @@ class SpawnTool(Tool):
         # (e.g. LLM passes a param from docs that isn't implemented yet)
         if kwargs:
             unknown = ", ".join(sorted(kwargs.keys()))
-            return f"Error: Unknown parameter(s): {unknown}. Valid parameters: task, label, max_iterations, persist, follow_up, stop, status."
+            return f"Error: Unknown parameter(s): {unknown}. Valid parameters: task, label, max_iterations, max_tokens, persist, follow_up, stop, status."
         # §38: Mutual exclusion check for all operation modes
         ops = {"follow_up": follow_up, "stop": stop, "status": status}
         active_ops = [name for name, val in ops.items() if val]
@@ -190,6 +199,7 @@ class SpawnTool(Tool):
             session_key=self._session_key,
             max_iterations=max_iterations,
             persist=persist,
+            max_tokens=max_tokens,
         )
 
     def clone(self) -> "SpawnTool":

@@ -60,3 +60,29 @@ Gateway 模式下，主 session 通过 per-session override 使用 `anthropic_pr
 - [x] **T52.9** `tests/test_subagent_provider_inherit.py` — 新增单元测试
 - [x] **T52.10** 全量回归测试通过
 - [x] **T52.11** Git commit
+
+---
+
+## Phase 53: 飞書语音消息 recognition 提取 (§57) ✅
+
+**日期**: 2026-03-16
+**需求**: §57（`requirements/s50-s59.md`）
+
+### 背景
+
+飞书语音消息的 `content` JSON 中包含 `recognition` 字段（语音转文字），但 nanobot 飞书通道代码在处理 `audio` 类型消息时完全没有提取该字段。
+
+### 任务清单
+
+- [x] **T53.1** `feishu.py` 直接 audio 消息处理：提取 `recognition` 字段
+- [x] **T53.2** `feishu.py` merge_forward audio 子消息处理：提取 `recognition` 字段
+- [x] **T53.3** 新增单元测试
+- [x] **T53.4** 全量回归测试通过
+- [x] **T53.5** Git commit
+
+### 改动文件
+
+| 文件 | 改动 |
+|------|------|
+| `nanobot/channels/feishu.py` | 两处 audio 处理后追加 recognition 提取（各 3 行） |
+| `tests/test_feishu_audio_recognition.py` | 新增 6 个测试覆盖 recognition 提取 |

@@ -130,6 +130,8 @@ class SubagentMeta:
     error_count: int = 0
     last_error: str | None = None
     last_error_time: str | None = None
+    # §60: per-subagent max_tokens override
+    max_tokens: int | None = None
 
 
 @dataclass
@@ -154,6 +156,8 @@ class QueuedSpawn:
     # §56: Provider snapshot from parent session
     resolved_provider: LLMProvider | None = None
     resolved_model: str | None = None
+    # §60: per-subagent max_tokens override
+    max_tokens: int | None = None
 
 
 class SubagentManager:
@@ -272,6 +276,7 @@ class SubagentManager:
         session_key: str | None = None,
         # Phase 26 additions
         max_iterations: int | None = None,
+        max_tokens: int | None = None,  # §60: per-subagent override
         persist: bool = True,
     ) -> str:
         """Spawn a subagent to execute a task in the background.
@@ -317,6 +322,9 @@ class SubagentManager:
             MAX_SUBAGENT_ITERATIONS,
         )
 
+        # §60: Resolve effective max_tokens (None means use self.max_tokens in _chat_with_retry)
+        effective_max_tokens = max_tokens if max_tokens is not None else None
+
         # §56: Resolve parent session's provider/model (snapshot)
         resolved_provider, resolved_model = self._resolve_provider(session_key)
 
@@ -333,6 +341,7 @@ class SubagentManager:
                 max_iterations=effective_max,
                 persist=persist,
                 created_at=datetime.now().isoformat(),
+                max_tokens=effective_max_tokens,  # §60
             )
             self._task_meta[task_id] = meta
             if session_key:
@@ -349,6 +358,7 @@ class SubagentManager:
                 subagent_session_key=subagent_key,
                 resolved_provider=resolved_provider,   # §56
                 resolved_model=resolved_model,         # §56
+                max_tokens=effective_max_tokens,       # §60
             )
             self._queue.append(queued)
             position = len(self._queue)
@@ -378,6 +388,7 @@ class SubagentManager:
             max_iterations=effective_max,
             persist=persist,
             created_at=datetime.now().isoformat(),  # §38
+            max_tokens=effective_max_tokens,        # §60
         )
         self._task_meta[task_id] = meta
 
@@ -392,7 +403,8 @@ class SubagentManager:
                                   effective_max, persist, subagent_key,
                                   session_key, meta,
                                   resolved_provider=resolved_provider,
-                                  resolved_model=resolved_model)
+                                  resolved_model=resolved_model,
+                                  max_tokens=effective_max_tokens)
 
         logger.info("Spawned subagent [{}]: {} (max_iterations={}, persist={})",
                      task_id, display_label, effective_max, persist)
@@ -411,6 +423,7 @@ class SubagentManager:
         meta: SubagentMeta,
         resolved_provider: LLMProvider | None = None,
         resolved_model: str | None = None,
+        max_tokens: int | None = None,
     ) -> None:
         """§46: Start an asyncio task for a subagent and register cleanup.
 
@@ -425,7 +438,8 @@ class SubagentManager:
                                parent_session_key=session_key,
                                inject_queue=meta.inject_queue,
                                resolved_provider=resolved_provider,
-                               resolved_model=resolved_model)
+                               resolved_model=resolved_model,
+                               max_tokens=max_tokens)
         )
         self._running_tasks[task_id] = bg_task
         if session_key:
@@ -481,6 +495,7 @@ class SubagentManager:
                 meta=meta,
                 resolved_provider=queued.resolved_provider,   # §56
                 resolved_model=queued.resolved_model,         # §56
+                max_tokens=queued.max_tokens,
             )
 
     async def _run_subagent(
@@ -497,6 +512,7 @@ class SubagentManager:
         resume_messages: list[dict[str, Any]] | None = None,
         resolved_provider: LLMProvider | None = None,
         resolved_model: str | None = None,
+        max_tokens: int | None = None,
     ) -> None:
         """Execute the subagent task and announce the result.
 
@@ -594,7 +610,8 @@ class SubagentManager:
 
                 # LLM call with retry
                 response = await self._chat_with_retry(messages, tools, task_id=task_id,
-                                                       provider=_provider, model=_model)
+                                                       provider=_provider, model=_model,
+                                                       max_tokens=max_tokens)
 
                 # ── Usage recording ──
                 if response.usage and self.usage_recorder:
@@ -635,6 +652,38 @@ class SubagentManager:
                         response_usage=response.usage if response.usage else None,
                         provider=getattr(_provider, "provider_name", ""),
                     )
+
+                # §60: Truncation detection — finish_reason=length with tool_calls
+                # means output was cut off mid-JSON. json_repair may have produced
+                # incomplete arguments. Skip execution, tell LLM to split the task.
+                if response.finish_reason == "length" and response.has_tool_calls:
+                    logger.warning(
+                        "Subagent [{}] output truncated (finish_reason=length) with {} tool call(s) — "
+                        "skipping execution, injecting split hint",
+                        task_id, len(response.tool_calls),
+                    )
+                    attempted = ", ".join(f"{tc.name}(...)" for tc in response.tool_calls)
+                    truncation_hint = (
+                        f"[System] Your previous response was truncated (finish_reason=length) "
+                        f"while generating tool calls: {attempted}. "
+                        f"The tool call arguments were incomplete and could not be executed. "
+                        f"Please break your response into smaller steps — "
+                        f"for example, write code in smaller chunks, use exec to write files via "
+                        f"heredoc, or split a large file into multiple sequential writes. "
+                        f"Do NOT retry the same approach that caused truncation."
+                    )
+                    hint_msg = {
+                        "role": "user",
+                        "content": truncation_hint,
+                        "timestamp": datetime.now().isoformat(),
+                    }
+                    messages.append(hint_msg)
+
+                    # Persist the hint
+                    if session and self.session_manager:
+                        self.session_manager.append_message(session, hint_msg)
+
+                    continue  # skip to next iteration without executing tools
 
                 if response.has_tool_calls:
                     # Build assistant message with tool calls
@@ -826,6 +875,7 @@ class SubagentManager:
         task_id: str | None = None,
         provider: LLMProvider | None = None,
         model: str | None = None,
+        max_tokens: int | None = None,
     ) -> Any:
         """Call provider.chat() with exponential backoff retry for transient errors.
 
@@ -851,7 +901,7 @@ class SubagentManager:
                     tools=tools.get_definitions(),
                     model=_model,
                     temperature=self.temperature,
-                    max_tokens=self.max_tokens,
+                    max_tokens=max_tokens if max_tokens is not None else self.max_tokens,
                 )
                 if self.reasoning_effort is not None:
                     kwargs["reasoning_effort"] = self.reasoning_effort
@@ -1180,6 +1230,7 @@ class SubagentManager:
                     resume_messages=resume_msgs,
                     resolved_provider=resolved_provider,   # §56
                     resolved_model=resolved_model,         # §56
+                    max_tokens=meta.max_tokens,
                 )
             )
             self._running_tasks[task_id] = bg_task
