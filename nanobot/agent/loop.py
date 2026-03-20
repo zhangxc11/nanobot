@@ -326,6 +326,7 @@ class AgentLoop:
         max_tokens: int,
         reasoning_effort: str | None = None,
         progress_fn: Callable[..., Awaitable[None]] | None = None,
+        session_key: str = "",
     ):
         """Call provider.chat() with exponential backoff for transient errors.
 
@@ -345,6 +346,10 @@ class AgentLoop:
         _provider = provider or self.provider
         max_retries = 7
 
+        # §60: Extract provider diagnostics for timeout/error logging
+        _prov_name = getattr(_provider, "provider_name", None) or type(_provider).__name__
+        _prov_base = getattr(_provider, "api_base", None) or "?"
+
         for attempt in range(max_retries + 1):
             try:
                 kwargs: dict = dict(
@@ -363,9 +368,15 @@ class AgentLoop:
                 fast = is_fast_retryable(e)
                 delay = compute_retry_delay(attempt, fast)
                 retry_type = "fast" if fast else "slow"
+                _msg_count = len(messages) if messages else 0
+                _msg_chars = sum(len(str(m.get("content", ""))) for m in messages) if messages else 0
                 logger.warning(
-                    "LLM call failed (attempt {}/{}, {} retry): {}. Retrying in {:.0f}s...",
-                    attempt + 1, max_retries, retry_type, str(e)[:200], delay,
+                    "LLM call failed (attempt {}/{}, {} retry) [session={}]: {}. "
+                    "provider={}, api_base={}, model={}, context={}msgs/{}chars. "
+                    "Retrying in {:.0f}s...",
+                    attempt + 1, max_retries, retry_type, session_key, str(e)[:200],
+                    _prov_name, _prov_base, model, _msg_count, _msg_chars,
+                    delay,
                 )
                 if progress_fn:
                     try:
@@ -521,6 +532,7 @@ class AgentLoop:
                 max_tokens=self.max_tokens,
                 reasoning_effort=self.reasoning_effort,
                 progress_fn=_progress_fn,
+                session_key=session.key if session is not None else "",
             )
 
             # Record token usage from this LLM call — immediately to SQLite
@@ -573,6 +585,42 @@ class AgentLoop:
                     response_usage=response.usage if response.usage else None,
                     provider=getattr(_provider, "provider_name", ""),
                 )
+
+            # §60: Truncation detection — finish_reason=length with tool_calls
+            # means output was cut off mid-JSON. json_repair may have produced
+            # incomplete arguments. Skip execution, tell LLM to split the task.
+            if response.finish_reason == "length" and response.has_tool_calls:
+                logger.warning(
+                    "Output truncated (finish_reason=length) with {} tool call(s) — "
+                    "skipping execution, injecting split hint",
+                    len(response.tool_calls),
+                )
+                attempted = ", ".join(
+                    f"{tc.name}(...)" for tc in response.tool_calls
+                )
+                truncation_hint = (
+                    f"[System] Your previous response was truncated (finish_reason=length) "
+                    f"while generating tool calls: {attempted}. "
+                    f"The tool call arguments were incomplete and could not be executed. "
+                    f"Please break your response into smaller steps — "
+                    f"for example, write code in smaller chunks, use exec to write files via "
+                    f"heredoc, or split a large file into multiple sequential writes. "
+                    f"Do NOT retry the same approach that caused truncation."
+                )
+                hint_msg = {
+                    "role": "user",
+                    "content": truncation_hint,
+                    "timestamp": datetime.now().isoformat(),
+                }
+                messages.append(hint_msg)
+
+                # Persist the hint message
+                if session is not None:
+                    self.sessions.append_message(session, hint_msg)
+                if callbacks is not None:
+                    await callbacks.on_message(hint_msg)
+
+                continue  # skip to next iteration without executing tools
 
             if response.has_tool_calls:
                 if _progress_fn:
