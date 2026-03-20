@@ -369,3 +369,51 @@ ad2d74a feat: truncation detection + spawn max_tokens (§60)
 | 文件 | 改动 |
 |------|------|
 | `nanobot/agent/loop.py` | 删除 2 处 `self.sessions.append_message(session, hint_msg)`，保留 `messages.append`（内存）和 `callbacks.on_message`（SSE 推送） |
+
+---
+
+## Phase 59: Consolidation 孤儿修复 + 截断预警改进 (§63 + §64) ✅
+
+**日期**: 2026-03-21
+**需求**: §63 (dc7c3987) — Consolidation 孤儿 tool_result → 400 死循环
+**需求**: §64 (4fad1354) — 截断预警 Prompt 改进 + 静默清理
+
+### §63 背景
+
+`memory.py` 的 `consolidate()` 按索引切片时，切片起始处可能包含孤儿 `tool_result`（对应的 assistant tool_use 在切片之前），导致 Anthropic 返回 400。而 `retry.py` 将 400 视为可重试错误，造成死循环。
+
+### §63 任务清单
+
+- [x] **T59.1** `agent/memory.py` — `consolidate()` 中 strip 切片开头的 orphan tool_result
+- [x] **T59.2** `agent/retry.py` — `is_retryable()` 中 400 status code 提前返回 False
+- [x] **T59.3** `tests/test_consolidation_orphan.py` — 新增 7 个 retry 测试 + 4 个 consolidation 测试
+
+### §64 背景
+
+§59 的截断预警 prompt 过于冗长，模型写完 summary 后 3 条消息留在内存中浪费上下文。
+
+### §64 任务清单
+
+- [x] **T59.4** `agent/loop.py` — `_TRUNCATION_WARNING_TEMPLATE` 改为简洁的系统提示风格
+- [x] **T59.5** `agent/loop.py` — 新增 silent cleanup 逻辑（tool 执行后检测 summary write 并清理 3 条消息）
+- [x] **T59.6** `tests/test_consolidation_orphan.py` — 新增 template 格式验证测试
+
+### 改动文件
+
+| 文件 | 改动 |
+|------|------|
+| `nanobot/agent/memory.py` | `consolidate()` 中切片后 while 循环 strip 开头 role=="tool" 的消息 |
+| `nanobot/agent/retry.py` | `is_retryable()` 中在 class name 检查前增加 400 status 检查 |
+| `nanobot/agent/loop.py` | 更新 `_TRUNCATION_WARNING_TEMPLATE`；tool 执行循环后新增 silent cleanup |
+| `tests/test_consolidation_orphan.py` | 新增 12 个测试用例 |
+| `docs/REQUIREMENTS.md` | 索引表增加 §63、§64 |
+| `docs/requirements/s60-s69.md` | 新增 §63、§64 完整需求 |
+
+### 自验收
+
+- ✅ 全量测试通过（1 个 pre-existing 失败，与本次改动无关）
+- ✅ §63: consolidation 输入不包含孤儿 tool_result
+- ✅ §63: 400 BadRequestError 不再被 retry
+- ✅ §64: `_TRUNCATION_WARNING_TEMPLATE` 已更新
+- ✅ §64: 静默清理逻辑正确删除 3 条消息
+- ✅ §64: 降级场景安全

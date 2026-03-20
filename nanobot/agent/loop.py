@@ -46,31 +46,16 @@ def _format_tokens(n: int) -> str:
     return str(n)
 
 
-_TRUNCATION_WARNING_TEMPLATE = """⚠️ [Context Approaching Limit]
-This session has {current} messages in context. The limit is {max}.
-Older messages will be archived soon. To preserve important context:
+_TRUNCATION_WARNING_TEMPLATE = """⚠️ [System — Context Approaching Limit]
+This session has {current} messages. Archival triggers at {max}.
 
-Write a session summary to `{workspace}/sessions/session_summary/{session_id}.md` with the following structure:
+Immediately write a session summary using write_file to:
+  `{workspace}/sessions/session_summary/{session_id}.md`
 
-## Current Task
-(What is being worked on right now)
+Structure: Current Task / Key Decisions / Completed Work / Pending Items / \
+Important Constraints / Open Questions
 
-## Key Decisions
-(Important decisions made in this session, with reasoning)
-
-## Completed Work
-(What has been done so far — files modified, commits made, tests passed)
-
-## Pending Items
-(What still needs to be done)
-
-## Important Constraints
-(Rules, warnings, or constraints that must not be forgotten)
-
-## Open Questions
-(Unresolved questions or issues)
-
-This file will be your primary context recovery source after archival."""
+After writing the summary, continue your current task without interruption."""
 
 _TRUNCATION_NOTICE_WITH_SUMMARY = """⚠️ [Context Truncation Notice]
 {archived_count}
@@ -810,6 +795,41 @@ class AgentLoop:
                         self.sessions.append_message(session, messages[-1])
                     if callbacks is not None:
                         await callbacks.on_message(messages[-1])
+
+                # ── §64: Silent cleanup — remove warning + summary write from memory ──
+                # When the model obediently wrote a session summary in response to
+                # the truncation warning (and did nothing else), we remove the
+                # 3 ephemeral messages (warning, assistant write_file call, tool result)
+                # from in-memory messages to keep context clean.
+                if (_warned_this_turn
+                        and len(response.tool_calls) == 1
+                        and response.tool_calls[0].name == "write_file"):
+                    _tc_args = response.tool_calls[0].arguments
+                    _tc_path = _tc_args.get("path", "") if isinstance(_tc_args, dict) else ""
+                    if "session_summary/" in _tc_path and _tc_path.endswith(".md"):
+                        # Check that the tool result (last message) indicates success
+                        _last_msg = messages[-1] if messages else {}
+                        _last_content = _last_msg.get("content", "")
+                        _is_error = (isinstance(_last_content, str)
+                                     and _last_content.startswith("Error"))
+                        if not _is_error:
+                            # Find and remove: warning (user) + assistant + tool result
+                            # Search backwards for the warning message
+                            _warn_idx = None
+                            for _i in range(len(messages) - 1, -1, -1):
+                                _m = messages[_i]
+                                if (_m.get("role") == "user"
+                                        and isinstance(_m.get("content"), str)
+                                        and "Context Approaching Limit" in _m["content"]):
+                                    _warn_idx = _i
+                                    break
+                            if (_warn_idx is not None
+                                    and _warn_idx + 2 < len(messages)
+                                    and messages[_warn_idx + 1].get("role") == "assistant"
+                                    and messages[_warn_idx + 2].get("role") == "tool"):
+                                del messages[_warn_idx:_warn_idx + 3]
+                                _warned_this_turn = False
+                                logger.info("§64: Silent cleanup — removed warning + summary write + tool result from memory")
 
                 # ── User injection checkpoint ──
                 # After all tools in this round complete, drain ALL pending
