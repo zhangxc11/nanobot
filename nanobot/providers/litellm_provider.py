@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 import json_repair
 import litellm
+from loguru import logger
 from litellm import acompletion
 
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
@@ -17,7 +18,10 @@ from nanobot.providers.registry import find_by_model, find_gateway
 # §42: Split connect/read timeout for faster failure detection on
 # connection-level issues while preserving generous read timeout for
 # large-context completions.
-_LLM_TIMEOUT = httpx.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0)
+# §60: Increased read timeout from 120s to 300s — Claude Opus tool_use
+# generation can cause 158-192s server-side silent periods before
+# the proxy forwards the buffered response.
+_LLM_TIMEOUT = httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)
 _LLM_NUM_RETRIES = 0  # let _chat_with_retry() handle retries
 
 # Standard chat-completion message keys.
@@ -317,6 +321,14 @@ class LiteLLMProvider(LLMProvider):
                 if isinstance(args, str):
                     args = json_repair.loads(args)
 
+                # Defensive: json_repair may produce a list instead of dict for truncated JSON
+                if not isinstance(args, dict):
+                    logger.warning(
+                        "json_repair produced non-dict args for tool '{}': type={}",
+                        tc.function.name, type(args).__name__,
+                    )
+                    args = {"_raw": args}
+
                 tool_calls.append(ToolCallRequest(
                     id=_short_tool_id(),
                     name=tc.function.name,
@@ -334,6 +346,9 @@ class LiteLLMProvider(LLMProvider):
                 "cache_creation_input_tokens": getattr(response.usage, "cache_creation_input_tokens", 0) or 0,
                 "cache_read_input_tokens": getattr(response.usage, "cache_read_input_tokens", 0) or 0,
             }
+        else:
+            _model_id = getattr(response, "model", "unknown")
+            logger.warning("LLM response missing usage data (model={})", _model_id)
 
         reasoning_content = getattr(message, "reasoning_content", None) or None
         thinking_blocks = getattr(message, "thinking_blocks", None) or None

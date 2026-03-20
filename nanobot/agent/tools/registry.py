@@ -30,6 +30,16 @@ def _extract_audit_fields(tool_name: str, params: dict[str, Any], result: str) -
     Returns a dict with keys: action, params (sanitised), result (summary),
     resolved_path, error.
     """
+    # Defensive check: params may not be a dict (e.g. json_repair produced a list)
+    if not isinstance(params, dict):
+        return {
+            "action": tool_name,
+            "params": {"_raw_type": type(params).__name__},
+            "result": {"success": not (isinstance(result, str) and result.startswith("Error"))},
+            "resolved_path": None,
+            "error": result.split("\n")[0] if isinstance(result, str) and result.startswith("Error") else None,
+        }
+
     is_error = isinstance(result, str) and result.startswith("Error")
     error_msg = result.split("\n")[0] if is_error else None
 
@@ -295,6 +305,12 @@ class ToolRegistry:
             return result
 
         start = time.monotonic()
+        # Type check: params must be a dict
+        if not isinstance(params, dict):
+            result = f"Error: Tool '{name}' received non-dict params (type={type(params).__name__}). This usually means the LLM output was truncated and json_repair produced invalid arguments."
+            elapsed = (time.monotonic() - start) * 1000
+            self._audit_record(name, params, result, elapsed)
+            return result
         try:
             errors = tool.validate_params(params)
             if errors:
@@ -320,24 +336,28 @@ class ToolRegistry:
         if self._audit_logger is None:
             return
 
-        from nanobot.audit.logger import AuditEntry
+        try:
+            from nanobot.audit.logger import AuditEntry
 
-        fields = _extract_audit_fields(tool_name, params, result)
+            fields = _extract_audit_fields(tool_name, params, result)
 
-        entry = AuditEntry(
-            timestamp=datetime.now().isoformat(),
-            session_key=self._audit_context.get("session_key", ""),
-            channel=self._audit_context.get("channel", ""),
-            chat_id=self._audit_context.get("chat_id", ""),
-            tool=tool_name,
-            action=fields["action"],
-            params=fields["params"],
-            result=fields["result"],
-            resolved_path=fields.get("resolved_path"),
-            error=fields.get("error"),
-            duration_ms=round(duration_ms, 2),
-        )
-        self._audit_logger.log(entry)
+            entry = AuditEntry(
+                timestamp=datetime.now().isoformat(),
+                session_key=self._audit_context.get("session_key", ""),
+                channel=self._audit_context.get("channel", ""),
+                chat_id=self._audit_context.get("chat_id", ""),
+                tool=tool_name,
+                action=fields["action"],
+                params=fields["params"],
+                result=fields["result"],
+                resolved_path=fields.get("resolved_path"),
+                error=fields.get("error"),
+                duration_ms=round(duration_ms, 2),
+            )
+            self._audit_logger.log(entry)
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning("_audit_record failed: %s", exc)
 
     # ── Cloning for concurrent sessions ──
 
