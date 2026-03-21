@@ -82,6 +82,8 @@
 | Phase 56: Streaming Timeout 修复与鲁棒性增强 (§60) | ✅ 已完成 | fix/s60-timeout-and-robustness |
 | Phase 57: Timeout 智能诊断与恢复 (§61) | ✅ 已完成 | local `c2eb217` |
 | Phase 58: 系统 Hint 消息不落盘 (§62) | ✅ 已完成 | local `c2eb217` |
+| Phase 59: Consolidation 孤儿修复 + 截断预警改进 (§63 + §64) | ✅ 已完成 | feat/batch-20260320-plan-core |
+| Phase 60: Tool 配对切割修复 + Warning 频率控制 (§65) | ✅ 已完成 | feat/batch-20260320-plan-core |
 
 ---
 
@@ -369,3 +371,101 @@ ad2d74a feat: truncation detection + spawn max_tokens (§60)
 | 文件 | 改动 |
 |------|------|
 | `nanobot/agent/loop.py` | 删除 2 处 `self.sessions.append_message(session, hint_msg)`，保留 `messages.append`（内存）和 `callbacks.on_message`（SSE 推送） |
+
+---
+
+## Phase 59: Consolidation 孤儿修复 + 截断预警改进 (§63 + §64) ✅
+
+**日期**: 2026-03-21
+**需求**: §63 (dc7c3987) — Consolidation 孤儿 tool_result → 400 死循环
+**需求**: §64 (4fad1354) — 截断预警 Prompt 改进 + 静默清理
+
+### §63 背景
+
+`memory.py` 的 `consolidate()` 按索引切片时，切片起始处可能包含孤儿 `tool_result`（对应的 assistant tool_use 在切片之前），导致 Anthropic 返回 400。而 `retry.py` 将 400 视为可重试错误，造成死循环。
+
+### §63 任务清单
+
+- [x] **T59.1** `agent/memory.py` — `consolidate()` 中 strip 切片开头的 orphan tool_result
+- [x] **T59.2** `agent/retry.py` — `is_retryable()` 中 400 status code 提前返回 False
+- [x] **T59.3** `tests/test_consolidation_orphan.py` — 新增 7 个 retry 测试 + 4 个 consolidation 测试
+
+### §64 背景
+
+§59 的截断预警 prompt 过于冗长，模型写完 summary 后 3 条消息留在内存中浪费上下文。
+
+### §64 任务清单
+
+- [x] **T59.4** `agent/loop.py` — `_TRUNCATION_WARNING_TEMPLATE` 改为简洁的系统提示风格
+- [x] **T59.5** `agent/loop.py` — 新增 silent cleanup 逻辑（tool 执行后检测 summary write 并清理 3 条消息）
+- [x] **T59.6** `tests/test_consolidation_orphan.py` — 新增 template 格式验证测试
+
+### 改动文件
+
+| 文件 | 改动 |
+|------|------|
+| `nanobot/agent/memory.py` | `consolidate()` 中切片后 while 循环 strip 开头 role=="tool" 的消息 |
+| `nanobot/agent/retry.py` | `is_retryable()` 中在 class name 检查前增加 400 status 检查 |
+| `nanobot/agent/loop.py` | 更新 `_TRUNCATION_WARNING_TEMPLATE`；tool 执行循环后新增 silent cleanup |
+| `tests/test_consolidation_orphan.py` | 新增 12 个测试用例 |
+| `docs/REQUIREMENTS.md` | 索引表增加 §63、§64 |
+| `docs/requirements/s60-s69.md` | 新增 §63、§64 完整需求 |
+
+### 自验收
+
+- ✅ 全量测试通过（1 个 pre-existing 失败，与本次改动无关）
+- ✅ §63: consolidation 输入不包含孤儿 tool_result
+- ✅ §63: 400 BadRequestError 不再被 retry
+- ✅ §64: `_TRUNCATION_WARNING_TEMPLATE` 已更新
+- ✅ §64: 静默清理逻辑正确删除 3 条消息
+- ✅ §64: 降级场景安全
+
+### §64 Hotfix: Silent cleanup 无限循环修复
+
+**日期**: 2026-03-21
+
+Silent cleanup 代码块在删除 warning + assistant + tool_result 3 条消息后，将 `_warned_this_turn` 重置为 `False`。这导致同一 turn 内 warning 被重复注入 → LLM 重复写 summary → 无限循环。
+
+**修复**: 移除 `_warned_this_turn = False` 赋值，让 `_warned_this_turn` 在 cleanup 后保持 `True`，阻止同一 turn 内再次注入截断预警。
+
+**新增测试**: `test_silent_cleanup_does_not_reset_warned_this_turn` — 通过源码检查确保 cleanup 块不包含 `_warned_this_turn = False`。
+
+---
+
+## Phase 60: Tool 配对切割修复 + Warning 频率控制 (§65) ✅
+
+**日期**: 2026-03-21
+**需求**: §65
+**分支**: feat/batch-20260320-plan-core
+
+### 背景
+
+两个问题在长 session 中叠加导致 consolidation 效率低下：
+1. `_find_tool_aligned_cut` 把 tool result 当不合法切点回退，连续多个 tool results 时切点一路退到底
+2. 截断预警没有频率控制，跨 turn 时重复注入
+
+### 任务清单
+
+- [x] **T60.1** `agent/loop.py` — `_find_tool_aligned_cut` 去掉 `role=="tool"` 回退
+- [x] **T60.2** `agent/loop.py` — warning 增加 `last_warning_msg_index` 频率控制
+- [x] **T60.3** 确认 Step 2 (warning) 在 Step 3 (consolidation) 之前
+- [x] **T60.4** 检查其他 tool 配对逻辑（get_history、_trim_incomplete_tool_tail、memory.py）— 均无类似 bug
+- [x] **T60.5** `tests/test_tool_aligned_cut.py` — 新增 15 个测试用例
+
+### 改动文件
+
+| 文件 | 改动 |
+|------|------|
+| `nanobot/agent/loop.py` | `_find_tool_aligned_cut` 修复 + warning 频率控制 |
+| `tests/test_tool_aligned_cut.py` | 新增 15 个测试用例 |
+| `docs/REQUIREMENTS.md` | 索引表增加 §65 |
+| `docs/requirements/s60-s69.md` | 新增 §65 完整需求 |
+
+### 自验收
+
+- ✅ 全量测试通过（900 passed, 1 pre-existing failure unrelated）
+- ✅ `_find_tool_aligned_cut`: tool result 作为最后一条不再回退
+- ✅ `_find_tool_aligned_cut`: assistant(tool_calls) 作为最后一条仍正确回退
+- ✅ warning 频率控制: `last_warning_msg_index` 正确存储和检查
+- ✅ Step 2/3 顺序正确（先 warning 再 consolidation）
+- ✅ 其他 tool 配对逻辑检查通过，无类似 bug
