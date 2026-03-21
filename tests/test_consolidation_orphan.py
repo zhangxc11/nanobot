@@ -332,3 +332,37 @@ def test_truncation_warning_template_updated():
     assert "{max}" in _TRUNCATION_WARNING_TEMPLATE
     assert "{workspace}" in _TRUNCATION_WARNING_TEMPLATE
     assert "{session_id}" in _TRUNCATION_WARNING_TEMPLATE
+
+
+def test_silent_cleanup_does_not_reset_warned_this_turn():
+    """§64 fix: After silent cleanup, _warned_this_turn must stay True.
+
+    If the cleanup block resets _warned_this_turn to False, the same turn
+    will re-inject the warning → LLM writes another summary → cleanup again
+    → infinite loop.  This test inspects the source code to ensure the bug
+    is not reintroduced.
+    """
+    import inspect
+    from nanobot.agent import loop as loop_module
+
+    source = inspect.getsource(loop_module.AgentLoop._run_agent_loop)
+
+    # Locate the silent cleanup block
+    assert "§64: Silent cleanup" in source, "Silent cleanup block not found in AgentLoop._run_agent_loop"
+
+    # Find the cleanup block and verify _warned_this_turn is NOT reset to False
+    # We look for the pattern: after `del messages[_warn_idx:_warn_idx + 3]`
+    # there should be NO `_warned_this_turn = False`
+    cleanup_start = source.index("§64: Silent cleanup")
+    # Get the code from cleanup start to the next major section marker
+    # (look for "User injection checkpoint" or end of method)
+    next_section = source.find("User injection checkpoint", cleanup_start)
+    if next_section == -1:
+        cleanup_block = source[cleanup_start:]
+    else:
+        cleanup_block = source[cleanup_start:next_section]
+
+    assert "_warned_this_turn = False" not in cleanup_block, (
+        "BUG: _warned_this_turn is reset to False in silent cleanup block. "
+        "This causes an infinite warn→write→cleanup→warn loop."
+    )

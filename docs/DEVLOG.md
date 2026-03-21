@@ -417,3 +417,13 @@ ad2d74a feat: truncation detection + spawn max_tokens (§60)
 - ✅ §64: `_TRUNCATION_WARNING_TEMPLATE` 已更新
 - ✅ §64: 静默清理逻辑正确删除 3 条消息
 - ✅ §64: 降级场景安全
+
+### §64 Hotfix: Silent cleanup 无限循环修复
+
+**日期**: 2026-03-21
+
+Silent cleanup 代码块在删除 warning + assistant + tool_result 3 条消息后，将 `_warned_this_turn` 重置为 `False`。这导致同一 turn 内 warning 被重复注入 → LLM 重复写 summary → 无限循环。
+
+**修复**: 移除 `_warned_this_turn = False` 赋值，让 `_warned_this_turn` 在 cleanup 后保持 `True`，阻止同一 turn 内再次注入截断预警。
+
+**新增测试**: `test_silent_cleanup_does_not_reset_warned_this_turn` — 通过源码检查确保 cleanup 块不包含 `_warned_this_turn = False`。

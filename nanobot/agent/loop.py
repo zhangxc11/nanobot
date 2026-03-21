@@ -828,7 +828,9 @@ class AgentLoop:
                                     and messages[_warn_idx + 1].get("role") == "assistant"
                                     and messages[_warn_idx + 2].get("role") == "tool"):
                                 del messages[_warn_idx:_warn_idx + 3]
-                                _warned_this_turn = False
+                                # NOTE: Keep _warned_this_turn=True so the warning
+                                # is NOT re-injected on the same turn (prevents
+                                # infinite warn→write→cleanup→warn loop).
                                 logger.info("§64: Silent cleanup — removed warning + summary write + tool result from memory")
 
                 # ── User injection checkpoint ──
