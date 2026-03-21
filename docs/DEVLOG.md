@@ -82,6 +82,8 @@
 | Phase 56: Streaming Timeout 修复与鲁棒性增强 (§60) | ✅ 已完成 | fix/s60-timeout-and-robustness |
 | Phase 57: Timeout 智能诊断与恢复 (§61) | ✅ 已完成 | local `c2eb217` |
 | Phase 58: 系统 Hint 消息不落盘 (§62) | ✅ 已完成 | local `c2eb217` |
+| Phase 59: Consolidation 孤儿修复 + 截断预警改进 (§63 + §64) | ✅ 已完成 | feat/batch-20260320-plan-core |
+| Phase 60: Tool 配对切割修复 + Warning 频率控制 (§65) | ✅ 已完成 | feat/batch-20260320-plan-core |
 
 ---
 
@@ -427,3 +429,43 @@ Silent cleanup 代码块在删除 warning + assistant + tool_result 3 条消息�
 **修复**: 移除 `_warned_this_turn = False` 赋值，让 `_warned_this_turn` 在 cleanup 后保持 `True`，阻止同一 turn 内再次注入截断预警。
 
 **新增测试**: `test_silent_cleanup_does_not_reset_warned_this_turn` — 通过源码检查确保 cleanup 块不包含 `_warned_this_turn = False`。
+
+---
+
+## Phase 60: Tool 配对切割修复 + Warning 频率控制 (§65) ✅
+
+**日期**: 2026-03-21
+**需求**: §65
+**分支**: feat/batch-20260320-plan-core
+
+### 背景
+
+两个问题在长 session 中叠加导致 consolidation 效率低下：
+1. `_find_tool_aligned_cut` 把 tool result 当不合法切点回退，连续多个 tool results 时切点一路退到底
+2. 截断预警没有频率控制，跨 turn 时重复注入
+
+### 任务清单
+
+- [x] **T60.1** `agent/loop.py` — `_find_tool_aligned_cut` 去掉 `role=="tool"` 回退
+- [x] **T60.2** `agent/loop.py` — warning 增加 `last_warning_msg_index` 频率控制
+- [x] **T60.3** 确认 Step 2 (warning) 在 Step 3 (consolidation) 之前
+- [x] **T60.4** 检查其他 tool 配对逻辑（get_history、_trim_incomplete_tool_tail、memory.py）— 均无类似 bug
+- [x] **T60.5** `tests/test_tool_aligned_cut.py` — 新增 15 个测试用例
+
+### 改动文件
+
+| 文件 | 改动 |
+|------|------|
+| `nanobot/agent/loop.py` | `_find_tool_aligned_cut` 修复 + warning 频率控制 |
+| `tests/test_tool_aligned_cut.py` | 新增 15 个测试用例 |
+| `docs/REQUIREMENTS.md` | 索引表增加 §65 |
+| `docs/requirements/s60-s69.md` | 新增 §65 完整需求 |
+
+### 自验收
+
+- ✅ 全量测试通过（900 passed, 1 pre-existing failure unrelated）
+- ✅ `_find_tool_aligned_cut`: tool result 作为最后一条不再回退
+- ✅ `_find_tool_aligned_cut`: assistant(tool_calls) 作为最后一条仍正确回退
+- ✅ warning 频率控制: `last_warning_msg_index` 正确存储和检查
+- ✅ Step 2/3 顺序正确（先 warning 再 consolidation）
+- ✅ 其他 tool 配对逻辑检查通过，无类似 bug

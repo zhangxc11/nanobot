@@ -107,6 +107,7 @@ local    ← 本地自定义改动（基于 main）
 | §62 | 系统 Hint 消息不落盘 | ✅ | [requirements/s60-s69.md](requirements/s60-s69.md) |
 | §63 | Consolidation 孤儿 tool_result 修复 + 400 不重试 | ✅ | [requirements/s60-s69.md](requirements/s60-s69.md) |
 | §64 | 截断预警 Prompt 改进 + 静默清理 | ✅ | [requirements/s60-s69.md](requirements/s60-s69.md) |
+| §65 | Tool 配对切割修复 + Warning 频率控制 | ✅ | [requirements/s60-s69.md](requirements/s60-s69.md) |
 
 ---
 

@@ -535,30 +535,26 @@ class AgentLoop:
                     pass  # Callback errors must not break the agent loop
 
             # §59: Step 1 — Consolidation just completed? Trim messages.
+            if session is not None:
+                _has_pending = session.key in self._pending_consolidation_done
+                _in_consolidating = session.key in self._consolidating
+                logger.debug("§59-DBG: iter={} msg_count={} pending={} consolidating={}", iteration, len(messages)-1, _has_pending, _in_consolidating)
             if session is not None and session.key in self._pending_consolidation_done:
                 info = self._pending_consolidation_done.pop(session.key)
                 _warned_this_turn = self._trim_consolidated_messages(messages, info, session, _warned_this_turn)
 
-            # §59: Step 2 — Need to trigger consolidation?
+            # §59/§65: Step 2 — Need to warn?
             _msg_count = len(messages) - 1  # exclude system prompt at messages[0]
-            if (session is not None
-                    and _msg_count >= _CONSOLIDATION_LINE
-                    and session.key not in self._consolidating):
-                self._consolidating.add(session.key)
-                _archive_cut = self._find_tool_aligned_cut(messages, 1, self.memory_window // 2)
-                logger.info("§59: Triggering mid-turn consolidation (msg_count={}, archive_cut={})", _msg_count, _archive_cut)
-                _task = asyncio.create_task(
-                    self._do_mid_turn_consolidation(session, messages, _archive_cut,
-                                                    provider=_provider, model=_model, tools=_tools)
-                )
-                self._consolidation_tasks.add(_task)
-                _task.add_done_callback(self._consolidation_tasks.discard)
-
-            # §59: Step 3 — Need to warn?
-            _msg_count = len(messages) - 1
+            # §65: Frequency control — don't warn again until enough new messages
+            # have accumulated since the last warning.  Uses session.messages
+            # length (JSONL append-only, monotonically increasing) as the counter.
+            _last_warn_idx = session.metadata.get("last_warning_msg_index", 0) if session else 0
+            _current_msg_total = len(session.messages) if session else 0
+            _enough_new_msgs = (_current_msg_total - _last_warn_idx) >= (self.memory_window // 2)
             if (session is not None
                     and _msg_count >= _WARNING_LINE
                     and not _warned_this_turn
+                    and _enough_new_msgs
                     and session.key not in self._consolidating):
                 _session_id = session.key.replace(":", "_")
                 _warn_msg = {
@@ -573,7 +569,27 @@ class AgentLoop:
                 }
                 messages.append(_warn_msg)
                 _warned_this_turn = True
-                logger.info("§59: Injected truncation warning (msg_count={})", _msg_count)
+                # §65: Record when we last warned, so we don't warn again too soon
+                if session:
+                    session.metadata["last_warning_msg_index"] = len(session.messages)
+                logger.info("§65: Injected truncation warning (msg_count={}, last_warn_idx={})",
+                            _msg_count, len(session.messages) if session else 0)
+
+            # §59: Step 3 — Need to trigger consolidation?
+            # Re-count after warning inject (may have appended 1 message)
+            _msg_count = len(messages) - 1
+            if (session is not None
+                    and _msg_count >= _CONSOLIDATION_LINE
+                    and session.key not in self._consolidating):
+                self._consolidating.add(session.key)
+                _archive_cut = self._find_tool_aligned_cut(messages, 1, self.memory_window // 2)
+                logger.info("§59: Triggering mid-turn consolidation (msg_count={}, archive_cut={})", _msg_count, _archive_cut)
+                _task = asyncio.create_task(
+                    self._do_mid_turn_consolidation(session, messages, _archive_cut,
+                                                    provider=_provider, model=_model, tools=_tools)
+                )
+                self._consolidation_tasks.add(_task)
+                _task.add_done_callback(self._consolidation_tasks.discard)
 
             # ── Budget alert: warn LLM when iterations are running low ──
             # §43: Use "user" role so the alert is visible to the LLM at the
@@ -2413,19 +2429,23 @@ class AgentLoop:
         return content.startswith("⚠️") or content.startswith("[Runtime Context")
 
     def _find_tool_aligned_cut(self, messages: list[dict], start: int, target_count: int) -> int:
-        """§59: Find a safe cut point that doesn't split tool_call/tool_result pairs.
+        """§59/§65: Find a safe cut point that doesn't split tool_call/tool_result pairs.
 
-        Archives messages[start:cut], so we check messages[cut-1] (the last archived message)
-        to ensure it's not a tool result or an assistant message with tool_calls.
+        Archives messages[start:cut], so we check messages[cut-1] (the last archived message).
+
+        The only invalid ending is an assistant message with tool_calls — its
+        corresponding tool results would be *after* the cut point, breaking the
+        pair.  A tool result as the last archived message is perfectly fine
+        because the assistant(tool_calls) that produced it is earlier in the
+        archive range (tool results always follow their assistant immediately).
+
+        §65: Removed the incorrect ``role == "tool"`` retreat that caused the
+        cut to walk all the way back through long tool-result sequences.
         """
         cut = min(start + target_count, len(messages) - 1)
         while cut > start:
             last_archived = messages[cut - 1]
-            # Cannot end with a tool result (would break pairing with preceding assistant tool_calls)
-            if last_archived.get("role") == "tool":
-                cut -= 1
-                continue
-            # Cannot end with assistant(tool_calls) (corresponding tool results are after cut)
+            # Cannot end with assistant(tool_calls) — corresponding tool results are after cut
             if last_archived.get("role") == "assistant" and last_archived.get("tool_calls"):
                 cut -= 1
                 continue
