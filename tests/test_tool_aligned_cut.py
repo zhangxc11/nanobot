@@ -235,23 +235,103 @@ class TestWarningConsolidationOrdering:
 # ---------------------------------------------------------------------------
 
 class TestNoToolRoleRetreat:
-    """Ensure the old buggy role=='tool' check is removed."""
+    """Ensure the old buggy role=='tool' retreat check is removed."""
 
     def test_no_tool_role_retreat_in_source(self):
-        """§65: The method should NOT retreat on role=='tool'."""
+        """§65/§70: The method should NOT retreat (cut -= 1) on role=='tool'.
+
+        §70 adds Pass 2 which legitimately checks role=='tool' for
+        forward-extension (cut += 1), so we only flag the retreat pattern.
+        """
         import inspect
         from nanobot.agent.loop import AgentLoop
         source = inspect.getsource(AgentLoop._find_tool_aligned_cut)
-        # The old buggy code had lines like:
-        #   if last_archived.get("role") == "tool":
-        #       cut -= 1
-        # After fix, this pattern should not exist in the executable code.
-        # We check for the specific retreat pattern (not docstring mentions).
         lines = source.split('\n')
         for i, line in enumerate(lines):
             stripped = line.strip()
-            # Skip comments and docstrings
             if stripped.startswith('#') or stripped.startswith('"""') or stripped.startswith("'''"):
                 continue
-            assert 'get("role") == "tool"' not in stripped, \
-                f"§65: _find_tool_aligned_cut still has role=='tool' retreat at line {i}: {stripped}"
+            # The old buggy pattern: check role=='tool' followed by cut -= 1
+            if 'get("role") == "tool"' in stripped and 'cut -= 1' in stripped:
+                raise AssertionError(
+                    f"§65: _find_tool_aligned_cut still has role=='tool' retreat at line {i}: {stripped}"
+                )
+
+
+# ---------------------------------------------------------------------------
+# §70 Pass 2: Forward-extend to include orphaned tool_results
+# ---------------------------------------------------------------------------
+
+class TestPass2ForwardExtend:
+    """§70: _find_tool_aligned_cut should extend cut to include tool_results
+    whose assistant is in the archived range."""
+
+    def test_forward_extend_orphan_tool_results(self):
+        """If assistant(tc1,tc2) is in archive range but tool_result(tc2) is after cut,
+        cut should extend to include it."""
+        loop = _make_loop()
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "tc1", "type": "function", "function": {"name": "f", "arguments": "{}"}},
+                {"id": "tc2", "type": "function", "function": {"name": "f", "arguments": "{}"}},
+            ]},
+            {"role": "tool", "tool_call_id": "tc1", "content": "r1"},
+            {"role": "tool", "tool_call_id": "tc2", "content": "r2"},
+            {"role": "assistant", "content": "done"},
+            {"role": "user", "content": "q2"},
+        ]
+        # target_count=3 → initial cut = min(1+3, 6) = 4
+        # messages[3] = tool(tc1) — Pass 1 OK (not assistant with tool_calls)
+        # But messages[2] (assistant tc1,tc2) is in [1:4], so tc1,tc2 are archived_tc_ids
+        # messages[4] = tool(tc2) which belongs to archived assistant → extend to 5
+        cut = loop._find_tool_aligned_cut(messages, 1, 3)
+        assert cut == 5, f"Expected 5, got {cut}"
+
+    def test_no_extend_when_tool_results_belong_to_kept_assistant(self):
+        """Tool results after cut that belong to a kept assistant should NOT extend cut."""
+        loop = _make_loop()
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "q2"},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "tc1", "type": "function", "function": {"name": "f", "arguments": "{}"}},
+            ]},
+            {"role": "tool", "tool_call_id": "tc1", "content": "r1"},
+            {"role": "assistant", "content": "done"},
+        ]
+        # target_count=3 → initial cut = min(1+3, 6) = 4
+        # messages[3] = user — OK
+        # messages[4] = assistant(tc1) is NOT in [1:4], so tc1 not in archived_tc_ids
+        # messages[4].tool(tc1) should NOT extend
+        cut = loop._find_tool_aligned_cut(messages, 1, 3)
+        assert cut == 4, f"Expected 4, got {cut}"
+
+    def test_forward_extend_multiple_orphans(self):
+        """Multiple consecutive orphan tool_results should all be included."""
+        loop = _make_loop()
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "tc1", "type": "function", "function": {"name": "f", "arguments": "{}"}},
+                {"id": "tc2", "type": "function", "function": {"name": "f", "arguments": "{}"}},
+                {"id": "tc3", "type": "function", "function": {"name": "f", "arguments": "{}"}},
+            ]},
+            {"role": "tool", "tool_call_id": "tc1", "content": "r1"},
+            # cut initially lands here (after tc1 result)
+            {"role": "tool", "tool_call_id": "tc2", "content": "r2"},
+            {"role": "tool", "tool_call_id": "tc3", "content": "r3"},
+            {"role": "user", "content": "next"},
+        ]
+        # target_count=2 → initial cut = min(1+2, 5) = 3
+        # messages[2] = tool(tc1) — Pass 1 OK
+        # assistant(tc1,tc2,tc3) at idx 1 is in [1:3], so all tc_ids in archived set
+        # messages[3] = tool(tc2) → extend to 4
+        # messages[4] = tool(tc3) → extend to 5
+        # messages[5] = user → stop
+        cut = loop._find_tool_aligned_cut(messages, 1, 2)
+        assert cut == 5, f"Expected 5, got {cut}"
+
