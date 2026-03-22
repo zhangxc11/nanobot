@@ -192,10 +192,18 @@ class MemoryStore:
             if update != current_memory:
                 self.write_long_term(update)
 
-        # ── 8. Update session bookmark ────────────────────────────────
-        session.last_consolidated = (
-            0 if archive_all else len(session.messages) - keep_count
-        )
+        # ── 8. Update session bookmark (tool-aligned) ─────────────────
+        if archive_all:
+            session.last_consolidated = 0
+        else:
+            raw_lc = len(session.messages) - keep_count
+            # §70-R3: Ensure last_consolidated doesn't split tool_call/tool_result pairs.
+            # If messages[raw_lc] is a tool_result, advance past all consecutive
+            # tool_results to avoid orphans when get_history() starts from here.
+            while (raw_lc < len(session.messages)
+                   and session.messages[raw_lc].get("role") == "tool"):
+                raw_lc += 1
+            session.last_consolidated = raw_lc
         logger.info(
             "Memory consolidation done: {} messages, last_consolidated={}",
             len(session.messages), session.last_consolidated,
