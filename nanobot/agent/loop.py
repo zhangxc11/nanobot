@@ -46,7 +46,18 @@ def _format_tokens(n: int) -> str:
     return str(n)
 
 
-_TRUNCATION_WARNING_TEMPLATE = """⚠️ [System — Context Approaching Limit]
+_TRUNCATION_WARNING_NO_SUMMARY = """⚠️ [System — Context Approaching Limit]
+This session has {current} messages. Archival triggers at {max}.
+
+Write a session summary using write_file to:
+  `{workspace}/sessions/session_summary/{session_id}.md`
+
+Structure: Current Task / Key Decisions / Completed Work / Pending Items / \
+Important Constraints / Open Questions
+
+After writing the summary, continue your current task without interruption."""
+
+_TRUNCATION_WARNING_WITH_SUMMARY = """⚠️ [System — Context Approaching Limit]
 This session has {current} messages. Archival triggers at {max}.
 
 **Update** the session summary using write_file to:
@@ -566,9 +577,16 @@ class AgentLoop:
                     and _enough_new_msgs
                     and session.key not in self._consolidating):
                 _session_id = session.key.replace(":", "_")
+                # §69: Choose warning template based on whether a summary already exists
+                _summary_path = self.workspace / "sessions" / "session_summary" / f"{_session_id}.md"
+                _warn_template = (
+                    _TRUNCATION_WARNING_WITH_SUMMARY
+                    if _summary_path.is_file()
+                    else _TRUNCATION_WARNING_NO_SUMMARY
+                )
                 _warn_msg = {
                     "role": "user",
-                    "content": _TRUNCATION_WARNING_TEMPLATE.format(
+                    "content": _warn_template.format(
                         current=_msg_count,
                         max=_CONSOLIDATION_LINE,
                         workspace=str(self.workspace),
