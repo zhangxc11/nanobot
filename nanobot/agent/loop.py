@@ -2307,30 +2307,55 @@ class AgentLoop:
             consolidation_state.complete(session.key, last_consolidated=lc, success=False)
 
     def _trim_consolidated_messages(
-        self, messages: list[dict], info: dict, session: Session,
+        self, messages: list[dict], last_consolidated: int, session: Session,
         warned_this_turn: bool,
     ) -> bool:
-        """§59: Remove archived messages from in-memory list and inject truncation notice."""
+        """§70-R2: Remove archived messages and inject truncation notice.
+
+        Redesigned in §70:
+        - Accepts last_consolidated (int) instead of info dict.
+        - Computes archive_cut from current messages (not from stale pending info).
+        - Runs sanitize after trim to guarantee no orphan tool_results.
+        - Persists metadata internally.
+        """
         from datetime import datetime
-        archive_cut = info["archive_cut"]
-        saved_messages_len = info.get("messages_len")
-        # If messages were rebuilt via get_history() between turns, skip trimming
-        if saved_messages_len is not None and len(messages) < saved_messages_len - archive_cut:
-            logger.info("§59: Skipping trim — messages rebuilt between turns (saved={}, current={}, cut={})",
-                        saved_messages_len, len(messages), archive_cut)
-            return warned_this_turn
-        if archive_cut <= 0 or archive_cut >= len(messages):
-            logger.debug("§59: Skipping trim — archive_cut={} out of range (messages={})", archive_cut, len(messages))
+
+        # ── Step 1: Update session bookmark ──
+        session.last_consolidated = last_consolidated
+
+        # ── Step 2: Compute archive_cut from current messages ──
+        target_keep = self.memory_window // 2
+        if len(messages) - 1 <= target_keep:
+            logger.debug("§70: Skipping trim — only {} messages (target_keep={})",
+                         len(messages) - 1, target_keep)
             return warned_this_turn
 
-        # §59.1: Protect real user messages in the trim range [1:archive_cut]
+        archive_cut = len(messages) - target_keep
+        if archive_cut <= 1:
+            return warned_this_turn
+
+        # ── Step 3: Tool-aligned cut (best effort) ──
+        archive_cut = self._find_tool_aligned_cut(messages, 1, archive_cut - 1)
+
+        # ── Step 4: Protect real user messages in the trim range [1:archive_cut] ──
         protected: list[dict] = []
         for i in range(1, archive_cut):
             msg = messages[i]
             if msg.get("role") == "user" and not self._is_system_injected(msg):
                 protected.append(msg)
 
+        # ── Step 5: Delete archived messages ──
         del messages[1:archive_cut]
+
+        # ── Step 6: Sanitize — remove orphan tool_results at start ──
+        sanitized = 0
+        while len(messages) > 1 and messages[1].get("role") == "tool":
+            messages.pop(1)
+            sanitized += 1
+        if sanitized:
+            logger.warning("§70: Sanitized {} orphan tool_result(s) after trim", sanitized)
+
+        # ── Step 7: Inject truncation notice ──
         notice = self._build_truncation_notice(session, self.workspace)
         messages.insert(1, {
             "role": "user",
@@ -2338,97 +2363,98 @@ class AgentLoop:
             "timestamp": datetime.now().isoformat(),
         })
 
-        # §59.1 v2: Consolidate protected user messages into at most 2 slots
-        #   Slot 1: historical user messages (earlier turn triggers, NOT current turn)
-        #   Slot 2: current turn messages (trigger + mid-turn injections)
-        #
-        # The trigger of the current turn is the LAST non-mid-turn user message
-        # in the protected list (build_messages is chronological).
+        # ── Step 8: Re-insert protected user messages ──
         if protected:
-            _MID_TURN_PREFIXES = (
-                "[Message from user during execution]",
-                "[Message from parent session during execution]",
-            )
+            self._reinsert_protected_messages(messages, protected)
 
-            # Separate non-injection messages from injection messages
-            non_injection: list[dict] = []
-            injection: list[dict] = []
-            for msg in protected:
-                content = msg.get("content", "")
-                if isinstance(content, str) and any(content.startswith(p) for p in _MID_TURN_PREFIXES):
-                    injection.append(msg)
-                else:
-                    non_injection.append(msg)
+        # ── Step 9: Persist metadata ──
+        self.sessions.persist_metadata(session)
 
-            # The last non-injection message = current turn trigger
-            # Everything before it = historical user messages from earlier turns
-            if non_injection:
-                trigger_msg = non_injection[-1]
-                history_msgs = non_injection[:-1]
-            else:
-                # Edge case: all protected are mid-turn injections (no trigger in trim range)
-                trigger_msg = None
-                history_msgs = []
-
-            # Current turn = trigger + mid-turn injections
-            current_turn_msgs: list[dict] = []
-            if trigger_msg:
-                current_turn_msgs.append(trigger_msg)
-            current_turn_msgs.extend(injection)
-
-            insert_pos = 2  # right after truncation notice
-
-            # Helper: extract text from a message (handles multimodal)
-            def _extract_text(m: dict) -> str:
-                c = m.get("content", "")
-                if isinstance(c, list):
-                    pieces = [item.get("text", "") for item in c
-                              if isinstance(item, dict) and item.get("type") == "text" and item.get("text")]
-                    return "\n".join(pieces) if pieces else "[non-text content]"
-                return c if isinstance(c, str) and c else "[empty message]"
-
-            # Slot 1: historical user messages from earlier turns
-            if history_msgs:
-                if len(history_msgs) == 1 and not current_turn_msgs:
-                    # Only 1 total protected msg and it's historical → keep as-is
-                    messages.insert(insert_pos, history_msgs[0])
-                else:
-                    _SEP_NEXT = "\n---- next message ----\n"
-                    parts = [_extract_text(m) for m in history_msgs]
-                    messages.insert(insert_pos, {
-                        "role": "user",
-                        "content": "[Preserved user messages from earlier turns]\n" + _SEP_NEXT.join(parts),
-                        "timestamp": datetime.now().isoformat(),
-                    })
-                insert_pos += 1
-
-            # Slot 2: current turn messages (trigger + mid-turn injections)
-            if current_turn_msgs:
-                if len(current_turn_msgs) == 1 and not history_msgs:
-                    # Only 1 total protected msg and it's current turn → keep as-is
-                    messages.insert(insert_pos, current_turn_msgs[0])
-                elif len(current_turn_msgs) == 1:
-                    messages.insert(insert_pos, current_turn_msgs[0])
-                else:
-                    _SEP_INJECTED = "\n---- injected during execution ----\n"
-                    # First item is trigger (if present), rest are injections
-                    assembled = _extract_text(current_turn_msgs[0])
-                    for m in current_turn_msgs[1:]:
-                        assembled += _SEP_INJECTED + _extract_text(m)
-                    messages.insert(insert_pos, {
-                        "role": "user",
-                        "content": "[Preserved current-turn user messages]\n" + assembled,
-                        "timestamp": datetime.now().isoformat(),
-                    })
-
-            slots_used = (1 if history_msgs else 0) + (1 if current_turn_msgs else 0)
-            logger.info("§59: Protected {} user messages from trim "
-                        "(history={}, current_turn={} [trigger={}, injection={}], {} slot(s))",
-                        len(protected), len(history_msgs), len(current_turn_msgs),
-                        1 if trigger_msg else 0, len(injection), slots_used)
-
-        logger.info("§59: Trimmed {} messages, injected truncation notice", archive_cut)
+        logger.info("§70: Trimmed {} messages (sanitized {}), {} remaining",
+                     archive_cut, sanitized, len(messages))
         return False
+
+    def _reinsert_protected_messages(self, messages: list[dict], protected: list[dict]) -> None:
+        """§59.1 v2 / §70: Consolidate protected user messages into at most 2 slots."""
+        from datetime import datetime
+
+        _MID_TURN_PREFIXES = (
+            "[Message from user during execution]",
+            "[Message from parent session during execution]",
+        )
+
+        # Separate non-injection messages from injection messages
+        non_injection: list[dict] = []
+        injection: list[dict] = []
+        for msg in protected:
+            content = msg.get("content", "")
+            if isinstance(content, str) and any(content.startswith(p) for p in _MID_TURN_PREFIXES):
+                injection.append(msg)
+            else:
+                non_injection.append(msg)
+
+        # The last non-injection message = current turn trigger
+        # Everything before it = historical user messages from earlier turns
+        if non_injection:
+            trigger_msg = non_injection[-1]
+            history_msgs = non_injection[:-1]
+        else:
+            trigger_msg = None
+            history_msgs = []
+
+        # Current turn = trigger + mid-turn injections
+        current_turn_msgs: list[dict] = []
+        if trigger_msg:
+            current_turn_msgs.append(trigger_msg)
+        current_turn_msgs.extend(injection)
+
+        insert_pos = 2  # right after truncation notice
+
+        # Helper: extract text from a message (handles multimodal)
+        def _extract_text(m: dict) -> str:
+            c = m.get("content", "")
+            if isinstance(c, list):
+                pieces = [item.get("text", "") for item in c
+                          if isinstance(item, dict) and item.get("type") == "text" and item.get("text")]
+                return "\n".join(pieces) if pieces else "[non-text content]"
+            return c if isinstance(c, str) and c else "[empty message]"
+
+        # Slot 1: historical user messages from earlier turns
+        if history_msgs:
+            if len(history_msgs) == 1 and not current_turn_msgs:
+                messages.insert(insert_pos, history_msgs[0])
+            else:
+                _SEP_NEXT = "\n---- next message ----\n"
+                parts = [_extract_text(m) for m in history_msgs]
+                messages.insert(insert_pos, {
+                    "role": "user",
+                    "content": "[Preserved user messages from earlier turns]\n" + _SEP_NEXT.join(parts),
+                    "timestamp": datetime.now().isoformat(),
+                })
+            insert_pos += 1
+
+        # Slot 2: current turn messages (trigger + mid-turn injections)
+        if current_turn_msgs:
+            if len(current_turn_msgs) == 1 and not history_msgs:
+                messages.insert(insert_pos, current_turn_msgs[0])
+            elif len(current_turn_msgs) == 1:
+                messages.insert(insert_pos, current_turn_msgs[0])
+            else:
+                _SEP_INJECTED = "\n---- injected during execution ----\n"
+                assembled = _extract_text(current_turn_msgs[0])
+                for m in current_turn_msgs[1:]:
+                    assembled += _SEP_INJECTED + _extract_text(m)
+                messages.insert(insert_pos, {
+                    "role": "user",
+                    "content": "[Preserved current-turn user messages]\n" + assembled,
+                    "timestamp": datetime.now().isoformat(),
+                })
+
+        slots_used = (1 if history_msgs else 0) + (1 if current_turn_msgs else 0)
+        logger.info("§70: Protected {} user messages from trim "
+                    "(history={}, current_turn={} [trigger={}, injection={}], {} slot(s))",
+                    len(protected), len(history_msgs), len(current_turn_msgs),
+                    1 if trigger_msg else 0, len(injection), slots_used)
 
     @staticmethod
     def _is_system_injected(msg: dict) -> bool:
@@ -2457,27 +2483,41 @@ class AgentLoop:
         return content.startswith("⚠️") or content.startswith("[Runtime Context")
 
     def _find_tool_aligned_cut(self, messages: list[dict], start: int, target_count: int) -> int:
-        """§59/§65: Find a safe cut point that doesn't split tool_call/tool_result pairs.
+        """§59/§65/§70: Find a safe cut point that doesn't split tool_call/tool_result pairs.
 
         Archives messages[start:cut], so we check messages[cut-1] (the last archived message).
 
-        The only invalid ending is an assistant message with tool_calls — its
-        corresponding tool results would be *after* the cut point, breaking the
-        pair.  A tool result as the last archived message is perfectly fine
-        because the assistant(tool_calls) that produced it is earlier in the
-        archive range (tool results always follow their assistant immediately).
-
-        §65: Removed the incorrect ``role == "tool"`` retreat that caused the
-        cut to walk all the way back through long tool-result sequences.
+        Pass 1 (§65): Retreat backward if cut-1 is an assistant with tool_calls.
+        Pass 2 (§70): Forward-extend to include orphaned tool_results whose
+            assistant is in the archived range [start:cut].
         """
         cut = min(start + target_count, len(messages) - 1)
+
+        # Pass 1: Retreat from assistant(tool_calls) at cut-1
         while cut > start:
             last_archived = messages[cut - 1]
-            # Cannot end with assistant(tool_calls) — corresponding tool results are after cut
             if last_archived.get("role") == "assistant" and last_archived.get("tool_calls"):
                 cut -= 1
                 continue
             break
+
+        # Pass 2 (§70): Forward-extend to include orphaned tool_results
+        # Collect all tool_call_ids from assistants in [start:cut]
+        archived_tc_ids: set[str] = set()
+        for msg in messages[start:cut]:
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    if tc_id := tc.get("id"):
+                        archived_tc_ids.add(tc_id)
+
+        # Extend cut to include tool_results whose assistant will be deleted
+        while cut < len(messages):
+            msg = messages[cut]
+            if msg.get("role") == "tool" and msg.get("tool_call_id") in archived_tc_ids:
+                cut += 1
+            else:
+                break
+
         return cut
 
     @staticmethod
