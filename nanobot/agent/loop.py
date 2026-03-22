@@ -46,16 +46,35 @@ def _format_tokens(n: int) -> str:
     return str(n)
 
 
-_TRUNCATION_WARNING_TEMPLATE = """⚠️ [System — Context Approaching Limit]
+_TRUNCATION_WARNING_NO_SUMMARY = """⚠️ [System — Context Approaching Limit]
 This session has {current} messages. Archival triggers at {max}.
 
-Immediately write a session summary using write_file to:
+Write a session summary using write_file to:
   `{workspace}/sessions/session_summary/{session_id}.md`
 
 Structure: Current Task / Key Decisions / Completed Work / Pending Items / \
 Important Constraints / Open Questions
 
 After writing the summary, continue your current task without interruption."""
+
+_TRUNCATION_WARNING_WITH_SUMMARY = """⚠️ [System — Context Approaching Limit]
+This session has {current} messages. Archival triggers at {max}.
+
+**Update** the session summary using write_file to:
+  `{workspace}/sessions/session_summary/{session_id}.md`
+
+⚠️ IMPORTANT: The existing session summary is embedded in the truncation notice \
+at the beginning of this conversation (between "--- Session Summary ---" and \
+"--- End Summary ---"). You MUST:
+1. First review that existing summary carefully
+2. PRESERVE all historical information from it
+3. ADD new information from the recent conversation
+4. Structure: Current Task / Key Decisions / Completed Work / Pending Items / \
+Important Constraints / Open Questions
+
+This is an INCREMENTAL UPDATE — do NOT discard any old information.
+
+After updating the summary, continue your current task without interruption."""
 
 _TRUNCATION_NOTICE_WITH_SUMMARY = """⚠️ [Context Truncation Notice]
 {archived_count}
@@ -65,7 +84,8 @@ _TRUNCATION_NOTICE_WITH_SUMMARY = """⚠️ [Context Truncation Notice]
 --- End Summary ---
 
 Full session log: `{workspace}/sessions/{session_id}.jsonl` (for precise lookup if summary is insufficient)
-Do NOT re-do work that may have been completed in the archived portion — check files and git history first."""
+Do NOT re-do work that may have been completed in the archived portion — check files and git history first.
+When updating the session summary, PRESERVE ALL information from the above summary and add new details."""
 
 _TRUNCATION_NOTICE_NO_SUMMARY = """⚠️ [Context Truncation Notice]
 {archived_count}
@@ -557,9 +577,16 @@ class AgentLoop:
                     and _enough_new_msgs
                     and session.key not in self._consolidating):
                 _session_id = session.key.replace(":", "_")
+                # §69: Choose warning template based on whether a summary already exists
+                _summary_path = self.workspace / "sessions" / "session_summary" / f"{_session_id}.md"
+                _warn_template = (
+                    _TRUNCATION_WARNING_WITH_SUMMARY
+                    if _summary_path.is_file()
+                    else _TRUNCATION_WARNING_NO_SUMMARY
+                )
                 _warn_msg = {
                     "role": "user",
-                    "content": _TRUNCATION_WARNING_TEMPLATE.format(
+                    "content": _warn_template.format(
                         current=_msg_count,
                         max=_CONSOLIDATION_LINE,
                         workspace=str(self.workspace),
@@ -1782,6 +1809,17 @@ class AgentLoop:
         if isinstance(target_sid, OutboundMessage):
             return target_sid  # error message
 
+        # Prefer persisted summary file if available
+        summary_path = self.workspace / "sessions" / "session_summary" / f"{target_sid}.md"
+        if summary_path.is_file():
+            summary_text = summary_path.read_text(encoding="utf-8").strip()
+            if summary_text:
+                return OutboundMessage(
+                    channel=msg.channel, chat_id=msg.chat_id,
+                    content=summary_text,
+                )
+
+        # Fallback: rule-based extraction from session messages
         # Load session via its key to get messages
         # session_id -> session_key: we need to find the key for get_or_create
         # The session_id IS the filename stem, and _get_session_path(session_id)
