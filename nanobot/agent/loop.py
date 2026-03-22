@@ -5,13 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import weakref
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from loguru import logger
 
+from nanobot.agent.consolidation_state import consolidation_state
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.budget import build_budget_alert
@@ -205,10 +205,6 @@ class AgentLoop:
         self._mcp_stack: AsyncExitStack | None = None
         self._mcp_connected = False
         self._mcp_connecting = False
-        self._consolidating: set[str] = set()  # Session keys with consolidation in progress
-        self._consolidation_tasks: set[asyncio.Task] = set()  # Strong refs to in-flight tasks
-        self._consolidation_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
-        self._pending_consolidation_done: dict[str, dict] = {}  # §59: consolidation result pending trim
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
         self._processing_lock = asyncio.Lock()
         self._last_session_list: dict[str, list[str]] = {}  # chat_id -> [session_id, ...]
@@ -554,14 +550,16 @@ class AgentLoop:
                 except Exception:
                     pass  # Callback errors must not break the agent loop
 
-            # §59: Step 1 — Consolidation just completed? Trim messages.
+            # §70: Step 1 — Consolidation just completed? Trim messages.
             if session is not None:
-                _has_pending = session.key in self._pending_consolidation_done
-                _in_consolidating = session.key in self._consolidating
-                logger.debug("§59-DBG: iter={} msg_count={} pending={} consolidating={}", iteration, len(messages)-1, _has_pending, _in_consolidating)
-            if session is not None and session.key in self._pending_consolidation_done:
-                info = self._pending_consolidation_done.pop(session.key)
-                _warned_this_turn = self._trim_consolidated_messages(messages, info, session, _warned_this_turn)
+                _pending = consolidation_state.pop_pending(session.key)
+                logger.debug("§70-DBG: iter={} msg_count={} pending={} consolidating={}",
+                             iteration, len(messages)-1, _pending is not None,
+                             consolidation_state.is_consolidating(session.key))
+                if _pending is not None:
+                    _warned_this_turn = self._trim_consolidated_messages(
+                        messages, _pending.last_consolidated, session, _warned_this_turn,
+                    )
 
             # §59/§65: Step 2 — Need to warn?
             _msg_count = len(messages) - 1  # exclude system prompt at messages[0]
@@ -575,7 +573,7 @@ class AgentLoop:
                     and _msg_count >= _WARNING_LINE
                     and not _warned_this_turn
                     and _enough_new_msgs
-                    and session.key not in self._consolidating):
+                    and not consolidation_state.is_consolidating(session.key)):
                 _session_id = session.key.replace(":", "_")
                 # §69: Choose warning template based on whether a summary already exists
                 _summary_path = self.workspace / "sessions" / "session_summary" / f"{_session_id}.md"
@@ -602,21 +600,19 @@ class AgentLoop:
                 logger.info("§65: Injected truncation warning (msg_count={}, last_warn_idx={})",
                             _msg_count, len(session.messages) if session else 0)
 
-            # §59: Step 3 — Need to trigger consolidation?
+            # §70: Step 3 — Need to trigger consolidation?
             # Re-count after warning inject (may have appended 1 message)
             _msg_count = len(messages) - 1
             if (session is not None
                     and _msg_count >= _CONSOLIDATION_LINE
-                    and session.key not in self._consolidating):
-                self._consolidating.add(session.key)
-                _archive_cut = self._find_tool_aligned_cut(messages, 1, self.memory_window // 2)
-                logger.info("§59: Triggering mid-turn consolidation (msg_count={}, archive_cut={})", _msg_count, _archive_cut)
+                    and not consolidation_state.is_consolidating(session.key)):
+                lock = consolidation_state.begin(session.key)
+                logger.info("§70: Triggering mid-turn consolidation (msg_count={})", _msg_count)
                 _task = asyncio.create_task(
-                    self._do_mid_turn_consolidation(session, messages, _archive_cut,
+                    self._do_mid_turn_consolidation(session, lock,
                                                     provider=_provider, model=_model, tools=_tools)
                 )
-                self._consolidation_tasks.add(_task)
-                _task.add_done_callback(self._consolidation_tasks.discard)
+                consolidation_state.track_task(_task)
 
             # ── Budget alert: warn LLM when iterations are running low ──
             # §43: Use "user" role so the alert is visible to the LLM at the
@@ -2113,8 +2109,7 @@ class AgentLoop:
         # Slash commands
         cmd = msg.content.strip().lower()
         if cmd == "/flush":
-            lock = self._consolidation_locks.setdefault(session.key, asyncio.Lock())
-            self._consolidating.add(session.key)
+            lock = consolidation_state.begin(session.key)
             try:
                 async with lock:
                     snapshot = session.messages[session.last_consolidated:]
@@ -2137,7 +2132,7 @@ class AgentLoop:
                     content="Memory archival failed, session not cleared. Please try again.",
                 )
             finally:
-                self._consolidating.discard(session.key)
+                consolidation_state.cleanup(session.key)
 
             # Leave old session file in place (usage records stay matched).
             # Create a new session with a timestamped key and update routing.
@@ -2274,47 +2269,42 @@ class AgentLoop:
         )
 
     async def _do_mid_turn_consolidation(
-        self, session: Session, messages: list[dict], archive_cut: int,
+        self, session: Session, lock: asyncio.Lock,
         *, provider: LLMProvider | None = None, model: str | None = None,
         tools: ToolRegistry | None = None,
     ) -> None:
-        """§59: Run consolidation asynchronously, store result in pending dict."""
+        """§70: Run consolidation asynchronously, store result in ConsolidationState."""
         try:
-            lock = self._consolidation_locks.setdefault(session.key, asyncio.Lock())
             async with lock:
                 success = await self._consolidate_memory(
                     session, provider=provider, model=model, tools=tools,
                 )
             if success:
-                logger.info("§59: Mid-turn consolidation succeeded for {} (last_consolidated={})", session.key, session.last_consolidated)
+                logger.info("§70: Mid-turn consolidation succeeded for {} (last_consolidated={})",
+                            session.key, session.last_consolidated)
             else:
                 # Non-transient failure (e.g. LLM truncated, didn't call tool).
                 # Advance last_consolidated anyway — session summary provides safety net.
-                session.last_consolidated = len(session.messages) - (self.memory_window // 2)
-                if session.last_consolidated < 0:
-                    session.last_consolidated = 0
-                logger.warning("§59: Mid-turn consolidation failed for {}, advancing last_consolidated to {} (non-retriable)",
-                               session.key, session.last_consolidated)
-            # Always schedule trim — whether consolidation succeeded or failed,
-            # we need to trim the in-memory messages and inject truncation notice.
-            self._pending_consolidation_done[session.key] = {
-                "archive_cut": archive_cut,
-                "last_consolidated": session.last_consolidated,
-                "messages_len": len(messages),
-            }
+                lc = max(0, len(session.messages) - (self.memory_window // 2))
+                session.last_consolidated = lc
+                logger.warning("§70: Mid-turn consolidation failed for {}, advancing last_consolidated to {}",
+                               session.key, lc)
+
+            # §70: Immediately persist to prevent update_metadata from overwriting
+            self.sessions.persist_metadata(session)
+
+            # Store pending result for next iteration's trim
+            consolidation_state.complete(
+                session.key,
+                last_consolidated=session.last_consolidated,
+                success=success,
+            )
         except Exception:
-            logger.exception("§59: Mid-turn consolidation exception for {}", session.key)
-            # Same treatment as non-transient failure: advance and trim.
-            session.last_consolidated = len(session.messages) - (self.memory_window // 2)
-            if session.last_consolidated < 0:
-                session.last_consolidated = 0
-            self._pending_consolidation_done[session.key] = {
-                "archive_cut": archive_cut,
-                "last_consolidated": session.last_consolidated,
-                "messages_len": len(messages),
-            }
-        finally:
-            self._consolidating.discard(session.key)
+            logger.exception("§70: Mid-turn consolidation exception for {}", session.key)
+            lc = max(0, len(session.messages) - (self.memory_window // 2))
+            session.last_consolidated = lc
+            self.sessions.persist_metadata(session)
+            consolidation_state.complete(session.key, last_consolidated=lc, success=False)
 
     def _trim_consolidated_messages(
         self, messages: list[dict], info: dict, session: Session,
