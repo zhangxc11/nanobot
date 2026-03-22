@@ -469,3 +469,36 @@ Silent cleanup 代码块在删除 warning + assistant + tool_result 3 条消息�
 - ✅ warning 频率控制: `last_warning_msg_index` 正确存储和检查
 - ✅ Step 2/3 顺序正确（先 warning 再 consolidation）
 - ✅ 其他 tool 配对逻辑检查通过，无类似 bug
+
+---
+
+## Phase 69: Session Summary 增量更新（防遗忘）
+
+> 分支: `feat/summary-preserve-history` | 基于: `local` (31721e9)
+
+### 背景
+
+Session summary 在多次 consolidation 后丢失早期信息（Phase C 3-way 对比验证，invisible facts 保留率从 36.9% 提升至 87.3%）。
+
+### 任务
+
+- [x] **T69.1** Warning 模板改为引导增量更新（方案 C）— commit `2d3d0c2`
+- [x] **T69.2** `/session summary` 优先读 summary 文件 — commit `9f133a0`
+- [x] **T69.3** Warning 模板拆分为首次/增量两个版本 — commit `f5efd12`
+- [x] **T69.4** 需求文档 + DEVLOG 补全 + 合并
+
+### 改动文件
+
+| 文件 | 改动 |
+|------|------|
+| `nanobot/agent/loop.py` | 模板拆分 + 选择逻辑 + TN 强化 + /session summary 读文件 (+42/-4) |
+| `docs/REQUIREMENTS.md` | 索引表增加 §69 |
+| `docs/requirements/s60-s69.md` | 新增 §69 完整需求 |
+| `docs/DEVLOG.md` | 新增 Phase 69 |
+
+### 自验收
+
+- ✅ Phase C 3-way 对比: 方案 C 最优（invisible facts 保留率 87.3%~100%）
+- ✅ 三端（CLI/Web/飞书）行为一致（统一走 `_session_summary` 方法）
+- ✅ 首次 summary / 增量更新两种场景模板正确选用
+- ✅ 改动独立于 consolidation，无耦合风险
