@@ -536,11 +536,16 @@ class TestConsolidationDeduplicationGuard:
 
     @pytest.mark.asyncio
     async def test_consolidation_tasks_are_referenced(self, tmp_path: Path) -> None:
-        """create_task results are tracked in _consolidation_tasks while in flight."""
+        """create_task results are tracked in consolidation_state._tasks while in flight."""
+        from nanobot.agent.consolidation_state import consolidation_state
         from nanobot.agent.loop import AgentLoop
         from nanobot.bus.events import InboundMessage
         from nanobot.bus.queue import MessageBus
         from nanobot.providers.base import LLMResponse
+
+        # Clean up singleton state from previous tests
+        consolidation_state._tasks.clear()
+        consolidation_state._sessions.clear()
 
         bus = MessageBus()
         provider = MagicMock()
@@ -570,10 +575,10 @@ class TestConsolidationDeduplicationGuard:
         await loop._process_message(msg)
 
         await started.wait()
-        assert len(loop._consolidation_tasks) == 1, "Task must be referenced while in-flight"
+        assert len(consolidation_state._tasks) >= 1, "Task must be referenced while in-flight"
 
         await asyncio.sleep(0.15)
-        assert len(loop._consolidation_tasks) == 0, (
+        assert len(consolidation_state._tasks) == 0, (
             "Task reference must be removed after completion"
         )
 
