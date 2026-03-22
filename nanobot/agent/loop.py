@@ -1791,6 +1791,17 @@ class AgentLoop:
         if isinstance(target_sid, OutboundMessage):
             return target_sid  # error message
 
+        # Prefer persisted summary file if available
+        summary_path = self.workspace / "sessions" / "session_summary" / f"{target_sid}.md"
+        if summary_path.is_file():
+            summary_text = summary_path.read_text(encoding="utf-8").strip()
+            if summary_text:
+                return OutboundMessage(
+                    channel=msg.channel, chat_id=msg.chat_id,
+                    content=summary_text,
+                )
+
+        # Fallback: rule-based extraction from session messages
         # Load session via its key to get messages
         # session_id -> session_key: we need to find the key for get_or_create
         # The session_id IS the filename stem, and _get_session_path(session_id)
