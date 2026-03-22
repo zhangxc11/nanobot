@@ -49,13 +49,21 @@ def _format_tokens(n: int) -> str:
 _TRUNCATION_WARNING_TEMPLATE = """⚠️ [System — Context Approaching Limit]
 This session has {current} messages. Archival triggers at {max}.
 
-Immediately write a session summary using write_file to:
+**Update** the session summary using write_file to:
   `{workspace}/sessions/session_summary/{session_id}.md`
 
-Structure: Current Task / Key Decisions / Completed Work / Pending Items / \
+⚠️ IMPORTANT: The existing session summary is embedded in the truncation notice \
+at the beginning of this conversation (between "--- Session Summary ---" and \
+"--- End Summary ---"). You MUST:
+1. First review that existing summary carefully
+2. PRESERVE all historical information from it
+3. ADD new information from the recent conversation
+4. Structure: Current Task / Key Decisions / Completed Work / Pending Items / \
 Important Constraints / Open Questions
 
-After writing the summary, continue your current task without interruption."""
+This is an INCREMENTAL UPDATE — do NOT discard any old information.
+
+After updating the summary, continue your current task without interruption."""
 
 _TRUNCATION_NOTICE_WITH_SUMMARY = """⚠️ [Context Truncation Notice]
 {archived_count}
@@ -65,7 +73,8 @@ _TRUNCATION_NOTICE_WITH_SUMMARY = """⚠️ [Context Truncation Notice]
 --- End Summary ---
 
 Full session log: `{workspace}/sessions/{session_id}.jsonl` (for precise lookup if summary is insufficient)
-Do NOT re-do work that may have been completed in the archived portion — check files and git history first."""
+Do NOT re-do work that may have been completed in the archived portion — check files and git history first.
+When updating the session summary, PRESERVE ALL information from the above summary and add new details."""
 
 _TRUNCATION_NOTICE_NO_SUMMARY = """⚠️ [Context Truncation Notice]
 {archived_count}
