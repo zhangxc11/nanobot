@@ -112,6 +112,7 @@ def _make_provider_response(history_entry: str = "test entry", memory_update: st
     response.finish_reason = "tool_calls"
 
     tool_call = MagicMock()
+    tool_call.name = "save_memory"
     tool_call.arguments = {
         "history_entry": history_entry,
         "memory_update": memory_update,
@@ -322,16 +323,17 @@ async def test_cache_friendly_path_strips_orphans(tmp_workspace):
 # ---------------------------------------------------------------------------
 
 def test_truncation_warning_template_updated():
-    """Verify the truncation warning template has the new system-style format."""
-    from nanobot.agent.loop import _TRUNCATION_WARNING_TEMPLATE
-    assert "System — Context Approaching Limit" in _TRUNCATION_WARNING_TEMPLATE
-    assert "Immediately write a session summary" in _TRUNCATION_WARNING_TEMPLATE
-    assert "continue your current task without interruption" in _TRUNCATION_WARNING_TEMPLATE
-    # Verify placeholders are present
-    assert "{current}" in _TRUNCATION_WARNING_TEMPLATE
-    assert "{max}" in _TRUNCATION_WARNING_TEMPLATE
-    assert "{workspace}" in _TRUNCATION_WARNING_TEMPLATE
-    assert "{session_id}" in _TRUNCATION_WARNING_TEMPLATE
+    """Verify the truncation warning templates have the new system-style format."""
+    from nanobot.agent.loop import _TRUNCATION_WARNING_NO_SUMMARY, _TRUNCATION_WARNING_WITH_SUMMARY
+    for template in (_TRUNCATION_WARNING_NO_SUMMARY, _TRUNCATION_WARNING_WITH_SUMMARY):
+        assert "System — Context Approaching Limit" in template
+        assert "session summary" in template.lower()
+        assert "continue your current task without interruption" in template
+        # Verify placeholders are present
+        assert "{current}" in template
+        assert "{max}" in template
+        assert "{workspace}" in template
+        assert "{session_id}" in template
 
 
 def test_silent_cleanup_does_not_reset_warned_this_turn():

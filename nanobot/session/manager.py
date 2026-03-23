@@ -516,6 +516,37 @@ class SessionManager:
         """
         self.save(session)
 
+    def persist_metadata(self, session: Session) -> None:
+        """§70: Append a metadata line to persist last_consolidated without full rewrite.
+
+        Unlike save_metadata() which does a full file rewrite, this method
+        only appends a new metadata line to the end of the JSONL file.
+        The load() method already handles multiple metadata lines by using
+        the last one encountered, so this is safe and efficient.
+
+        Safe to call from async consolidation tasks alongside append_message()
+        since both only append to the file.
+        """
+        import os
+        path = self._get_session_path(session.key)
+        if not path.exists():
+            return
+        try:
+            metadata_line = {
+                "_type": "metadata",
+                "key": session.key,
+                "created_at": session.created_at.isoformat(),
+                "updated_at": session.updated_at.isoformat(),
+                "metadata": session.metadata,
+                "last_consolidated": session.last_consolidated,
+            }
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(metadata_line, ensure_ascii=False) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+        except Exception:
+            logger.warning("Failed to persist metadata for session {}", session.key)
+
     def _write_metadata_line(self, path: Path, session: Session) -> None:
         """Write (or overwrite) just the metadata first-line to *path*."""
         metadata_line = {
