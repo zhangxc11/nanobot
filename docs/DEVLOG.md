@@ -84,6 +84,8 @@
 | Phase 58: 系统 Hint 消息不落盘 (§62) | ✅ 已完成 | local `c2eb217` |
 | Phase 59: Consolidation 孤儿修复 + 截断预警改进 (§63 + §64) | ✅ 已完成 | feat/batch-20260320-plan-core |
 | Phase 60: Tool 配对切割修复 + Warning 频率控制 (§65) | ✅ 已完成 | feat/batch-20260320-plan-core |
+| Phase 61: Consolidation Pipeline 重写 (§66) | ✅ 已完成 | local `2c60460` |
+| Phase 62: Consolidation 统一重设计 (§70) | ✅ 已完成 | feat/consolidation-redesign → local `aee13b1` |
 
 ---
 
@@ -164,6 +166,12 @@
 | 55 | Turn 内 Consolidation + 截断预警/通知 (§59) | ✅ | *主文件* |
 | 56 | Streaming Timeout 修复与鲁棒性增强 (§60) | ✅ | *主文件* |
 | 57 | Timeout 智能诊断与恢复 (§61) | 🔜 | *主文件* |
+| 58 | 系统 Hint 消息不落盘 (§62) | ✅ | *主文件* |
+| 59 | Consolidation 孤儿修复 + 截断预警改进 (§63 + §64) | ✅ | *主文件* |
+| 60 | Tool 配对切割修复 + Warning 频率控制 (§65) | ✅ | *主文件* |
+| 61 | Consolidation Pipeline 重写 (§66) | ✅ | *主文件* |
+| 62 | Consolidation 统一重设计 (§70 R1+R2+R3) | ✅ | *主文件* |
+| 69 | Session Summary 增量更新（防遗忘） | ✅ | *主文件* |
 
 ---
 
@@ -469,6 +477,118 @@ Silent cleanup 代码块在删除 warning + assistant + tool_result 3 条消息�
 - ✅ warning 频率控制: `last_warning_msg_index` 正确存储和检查
 - ✅ Step 2/3 顺序正确（先 warning 再 consolidation）
 - ✅ 其他 tool 配对逻辑检查通过，无类似 bug
+
+---
+
+## Phase 61: Consolidation Pipeline 重写 (§66) ✅
+
+**日期**: 2026-03-22
+**需求**: §66（`requirements/s60-s69.md`）
+**Commit**: `2c60460`
+
+### 背景
+
+对 4 天（03-18 ~ 03-21）的 127 次 consolidation 调用进行数据分析，发现成功率仅约 56.7%。主要失败原因：Primary path 传入 20+ 个 session tools 导致 LLM 调错工具或不调（52.7%）、Fallback path max_tokens 默认值混乱导致截断（25.5%）、消息切片 tool_use/tool_result 配对断裂导致 API 400（Fix 6/6b）、API 超时无重试（Fix 5/7/9）。
+
+经历 v1~v10 共 10 轮测试迭代，从逐步叠 Fix（v1~v8）到综合 review + pipeline 架构重写（v9~v10），最终将 `consolidate()` 从单一函数重构为 8 步 pipeline + 5 个 helper。
+
+### 任务清单
+
+- [x] **T61.1** `agent/memory.py` — 完全重写 `consolidate()` 为 8 步 pipeline
+- [x] **T61.2** `agent/memory.py` — 新增 `_select_messages()` helper (Step 1)
+- [x] **T61.3** `agent/memory.py` — 新增 `_sanitize_slice()` helper (Step 2, 3 遍清理)
+- [x] **T61.4** `agent/memory.py` — 新增 `_build_prompt()` helper (Step 3, 只传 save_memory)
+- [x] **T61.5** `agent/memory.py` — 新增 `_call_with_retry()` helper (Step 4, 统一指数退避)
+- [x] **T61.6** `agent/memory.py` — 新增 `_record_usage()` helper (Step 5, 日志修复)
+- [x] **T61.7** `agent/memory.py` — Step 6-8: 响应验证 + 结果保存 + 书签更新
+- [x] **T61.8** `agent/memory.py` — 模块级常量: `_CONSOLIDATION_TIMEOUT(read=600s)`, `_MAX_RETRIES=3`, `_CONSOLIDATION_DEFAULT_MAX_TOKENS=16384`
+- [x] **T61.9** Dev 环境 v3/v8/v9/v10 验证全部通过（memory_window=15 快速触发）
+- [x] **T61.10** Git commit `2c60460`
+
+### 改动文件
+
+| 文件 | 改动 |
+|------|------|
+| `nanobot/agent/memory.py` | 完全重写，237→529 行（+292 行）。8 步 pipeline + 5 helper + 6 常量 |
+
+### 自验收
+
+- ✅ Dev 环境成功率从 56.7% 提升至 100%（v3/v8/v9/v10 全部成功）
+- ✅ LLM 只调 save_memory，不调其他工具
+- ✅ `_sanitize_slice` Pass 3 pull-from-keep 正确补入 7 个 tool_results
+- ✅ 大 payload 不超时（read=600s，实际耗时 ~200s）
+- ✅ 重试机制正确区分 timeout vs rate-limit vs non-retryable
+
+### 已知遗留
+
+- §67 persist_metadata、§68 跨实例状态、Bug1~4 等结构性问题由 §70 统一解决
+
+---
+
+## Phase 62: Consolidation 统一重设计 (§70 R1+R2+R3) ✅
+
+**日期**: 2026-03-23
+**需求**: §70（`requirements/s70-s79.md`）
+**分支**: `feat/consolidation-redesign`
+**Commits**: `5ac6033` (R3) → `e444402` (R1) → `4e1e34f` (R2) → `d05de42` (tests) → `3ba0648` (fix) → `aee13b1` (merge)
+
+### 背景
+
+§66 重写后 consolidation LLM 调用成功率 100%，但 dev 长跑测试暴露了 **trim 操作**的 7 个 Bug。根本原因是异步状态散布在 4 处（模块级变量、Session 对象、JSONL 文件、pending info），且 trim 操作缺少事务性保证。综合分析报告（836 行）确认：补丁越打越多的原因是 "consolidation 异步化后，状态管理仍然是同步思维"。
+
+设计方案用 3 个核心改动替代 7 个独立补丁：R1 ConsolidationState 单例、R2 Safe trim with sanitize、R3 step 8 tool-aligned。
+
+### 任务清单
+
+- [x] **T62.1** `agent/consolidation_state.py` — 新建 ConsolidationState 单例（~80 行）
+- [x] **T62.2** `agent/loop.py` — 删除 4 个模块级变量，主循环 Step 1/2/3 改用 `consolidation_state` API
+- [x] **T62.3** `agent/loop.py` — 重写 `_trim_consolidated_messages`：archive_cut 实时计算 + sanitize 兜底 + persist 内置
+- [x] **T62.4** `agent/loop.py` — 增强 `_find_tool_aligned_cut` Pass 2：向前扩展包含孤儿 tool_results
+- [x] **T62.5** `agent/loop.py` — 简化 `_do_mid_turn_consolidation`：成功/失败后立即 persist
+- [x] **T62.6** `agent/memory.py` — step 8 tool-aligned 对齐（~5 行）
+- [x] **T62.7** 单元测试适配 ConsolidationState 新接口（70 passed）
+- [x] **T62.8** Phase 1 集成测试（memory_window=4）— 4 项全部通过
+- [x] **T62.9** Phase 2 集成测试（memory_window=20）— 4 次 consolidation 正确（1 失败降级 + 3 成功）
+- [x] **T62.10** Git merge `aee13b1`
+
+### Commits
+
+| Commit | 描述 |
+|--------|------|
+| `5ac6033` | R3: consolidate step 8 tool-aligned boundary |
+| `e444402` | R1: ConsolidationState singleton for consolidation lifecycle |
+| `4e1e34f` | R2: safe trim with sanitize fallback |
+| `d05de42` | fix: adapt tests for ConsolidationState and Pass 2 forward-extension |
+| `3ba0648` | fix: adapt test_consolidation_tasks_are_referenced for ConsolidationState |
+| `aee13b1` | Merge feat/consolidation-redesign → local |
+
+### 改动统计
+
+**4 files changed, ~215 insertions**
+
+| 文件 | 改动 |
+|------|------|
+| `nanobot/agent/consolidation_state.py` | **新建** ~80 行。ConsolidationState 单例 + PendingResult + _SessionState |
+| `nanobot/agent/loop.py` | 修改 ~100 行。替换 4 个模块级变量；重写 `_trim_consolidated_messages`（实时计算 archive_cut + sanitize 兜底）；增强 `_find_tool_aligned_cut`（Pass 2 向前扩展）；简化 `_do_mid_turn_consolidation`（立即 persist） |
+| `nanobot/agent/memory.py` | 修改 ~5 行。step 8 tool-aligned（跳过连续 tool_results） |
+| `tests/` | 修改 ~30 行。适配 ConsolidationState 新接口 |
+
+### 三阶段测试结果
+
+| Phase | memory_window | 测试项 | 结果 |
+|-------|---------------|--------|------|
+| Phase 1 | 4 | 基本触发、multi-tool_call、连续 consolidation、/flush | ✅ 4/4 通过，0 orphan |
+| Phase 2 | 20 | 4 次 consolidation（含 1 次失败降级）、异步不阻塞、跨 turn 传递 | ✅ 全部通过，0 orphan |
+| Phase 3 | 100 | 生产级验证 | ✅ 通过 |
+
+### 自验收
+
+- ✅ ConsolidationState 单例正确管理跨实例状态（begin/complete/pending 对称）
+- ✅ trim 后 sanitize 兜底：所有测试中 sanitized=0（说明 `_find_tool_aligned_cut` Pass 2 已足够精确）
+- ✅ 失败降级路径正常：last_consolidated 推进 + trim 执行 + persist 持久化
+- ✅ 多工具调用（2-tool、3-tool、40-tool）无 orphan
+- ✅ 异步 consolidation 不阻塞后续消息处理
+- ✅ 70 个 consolidation 相关单元测试全部通过
 
 ---
 

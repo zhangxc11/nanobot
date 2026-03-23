@@ -109,6 +109,8 @@ local    ← 本地自定义改动（基于 main）
 | §64 | 截断预警 Prompt 改进 + 静默清理 | ✅ | [requirements/s60-s69.md](requirements/s60-s69.md) |
 | §65 | Tool 配对切割修复 + Warning 频率控制 | ✅ | [requirements/s60-s69.md](requirements/s60-s69.md) |
 | §69 | Session Summary 增量更新（防遗忘） | ✅ | [requirements/s60-s69.md](requirements/s60-s69.md) |
+| §66 | Consolidation Pipeline 重写 | ✅ | [requirements/s60-s69.md](requirements/s60-s69.md) |
+| §70 | Consolidation 统一重设计 | ✅ | [requirements/s70-s79.md](requirements/s70-s79.md) |
 
 ---
 
