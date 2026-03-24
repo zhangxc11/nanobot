@@ -80,7 +80,7 @@ class AgentRunner:
         session_manager = SessionManager(config.workspace_path)
 
         # Cron service
-        cron = CronService(data_dir / "cron")
+        cron = CronService(data_dir / "cron" / "jobs.json", process_role="web")
 
         # Usage recorder
         usage_recorder = UsageRecorder()

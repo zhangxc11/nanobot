@@ -141,6 +141,15 @@ class CronTool(Tool):
             f"Must be self ('{self._session_id}') or a child session."
         )
 
+    def _resolve_source_channel(self) -> str:
+        """Infer the executor partition from the current channel."""
+        ch = self._channel.lower()
+        if ch.startswith(("feishu", "telegram", "whatsapp", "discord", "slack")):
+            return "gateway"
+        if ch.startswith(("webchat", "web")):
+            return "web"
+        return "cli"
+
     def _add_job(
         self,
         message: str,
@@ -171,6 +180,11 @@ class CronTool(Tool):
             if error:
                 return error
 
+        # Resolve source channel and reject CLI reminders
+        source_channel = self._resolve_source_channel()
+        if target_session and source_channel == "cli":
+            return "Error: reminder 只能在常驻进程（gateway/web）中创建，CLI 不支持。"
+
         # Build schedule
         delete_after = False
         if every_seconds:
@@ -194,13 +208,11 @@ class CronTool(Tool):
             name=display_name,
             schedule=schedule,
             message=message,
-            deliver=True,
-            channel=self._channel,
-            to=self._chat_id,
             delete_after_run=delete_after,
             target_session=target_session,
+            source_channel=source_channel,
         )
-        result = f"Created job '{job.name}' (id: {job.id})"
+        result = f"Created job '{job.name}' (id: {job.id}) [source={source_channel}]"
         if target_session:
             result += f" [target: {target_session}]"
         return result

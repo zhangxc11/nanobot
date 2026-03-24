@@ -348,14 +348,32 @@ def gateway(
     from nanobot.cron.types import CronJob
     from nanobot.heartbeat.service import HeartbeatService
     from nanobot.session.manager import SessionManager
-    from loguru import logger
+    from loguru import logger as loguru_logger
     
+    # ── Logging setup ──
     if verbose:
         import logging
         logging.basicConfig(level=logging.DEBUG)
-        logger.enable("nanobot")
+        loguru_level = "DEBUG"
     else:
-        logger.disable("nanobot")
+        loguru_level = "INFO"
+
+    # Route loguru to gateway.log (same pattern as worker.py)
+    log_dir = os.environ.get(
+        "NANOBOT_LOG_DIR",
+        os.path.join(os.path.expanduser("~"), ".nanobot", "logs"),
+    )
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, "gateway.log")
+
+    loguru_logger.remove()  # remove default stderr sink
+    loguru_logger.add(
+        log_file,
+        format="[{time:YYYY-MM-DD HH:mm:ss}] {level} {message}",
+        level=loguru_level,
+        rotation=None,
+        encoding="utf-8",
+    )
     
 
     console.print(f"{__logo__} Starting nanobot gateway on port {port}...")
@@ -368,7 +386,7 @@ def gateway(
 
     # Create cron service first (callback set after agent creation)
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
-    cron = CronService(cron_store_path)
+    cron = CronService(cron_store_path, process_role="gateway")
 
     # Unified usage recorder (SQLite)
     from nanobot.usage.recorder import UsageRecorder
@@ -412,13 +430,13 @@ def gateway(
     class GatewayCronExecutor:
         """CronExecutor for gateway mode — executes jobs via agent.process_direct."""
 
-        def __init__(self, agent_loop, message_bus):
+        def __init__(self, agent_loop, message_bus, sessions_mgr):
             self._agent = agent_loop
             self._bus = message_bus
+            self._sessions = sessions_mgr
 
         async def execute_job(self, job: CronJob) -> str | None:
             """Create a new cron session and execute the job."""
-            from nanobot.agent.tools.message import MessageTool
             reminder_note = (
                 "[Scheduled Task] Timer finished.\n\n"
                 f"Task '{job.name}' has been triggered.\n"
@@ -428,22 +446,89 @@ def gateway(
             response = await self._agent.process_direct(
                 reminder_note,
                 session_key=f"cron:{job.id}",
-                channel=job.payload.channel or "cli",
-                chat_id=job.payload.to or "direct",
+                channel="cron",
+                chat_id="direct",
             )
-
-            message_tool = self._agent.tools.get("message")
-            if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
-                return response
-
-            if job.payload.deliver and job.payload.to and response:
-                from nanobot.bus.events import OutboundMessage
-                await self._bus.publish_outbound(OutboundMessage(
-                    channel=job.payload.channel or "cli",
-                    chat_id=job.payload.to,
-                    content=response
-                ))
             return response
+
+        def _resolve_channel_for_session(self, target_session_key: str) -> tuple[str, str]:
+            """Resolve real channel/chat_id for a session key from routing table.
+
+            Strategy:
+            1. Exact match: find routing entry whose routed_key == target_session_key
+               (skip internal cron: entries).
+            2. Channel prefix match: extract channel prefix from target_session_key,
+               find a routing entry whose channel matches. This handles background
+               sessions where the routing table points to a different (foreground)
+               session for the same channel.
+            3. Fallback: use natural key format or default to cron channel.
+            """
+            routing = self._sessions._load_routing()
+
+            # --- Pass 1: exact match (existing logic) ---
+            fallback_match = None
+            for natural_key, routed_key in routing.items():
+                if routed_key == target_session_key:
+                    parts = natural_key.split(":", 1)
+                    if len(parts) == 2:
+                        # Skip internal routing entries (cron:, web:, etc.)
+                        if parts[0] in ("cron",):
+                            loguru_logger.debug(
+                                "Skipping internal routing entry: {} -> {}",
+                                natural_key, routed_key,
+                            )
+                            if fallback_match is None:
+                                fallback_match = (parts[0], parts[1])
+                            continue
+                        loguru_logger.debug(
+                            "Resolved session {} -> channel={}, chat_id={} (exact match)",
+                            target_session_key, parts[0], parts[1],
+                        )
+                        return parts[0], parts[1]
+
+            # --- Pass 2: channel prefix match ---
+            # Session key format: {channel}.{timestamp} or {channel}.{chat_id}.{timestamp}
+            # Channel may contain dots (e.g. "feishu.ST"), so we match against
+            # known channels from the routing table.
+            for natural_key, routed_key in routing.items():
+                parts = natural_key.split(":", 1)
+                if len(parts) != 2:
+                    continue
+                channel, chat_id = parts[0], parts[1]
+                # Skip internal routing entries
+                if channel in ("cron",):
+                    continue
+                # Check if this channel is a prefix of target_session_key
+                # and the next char after the prefix is '.' (session key separator)
+                if (target_session_key.startswith(channel)
+                        and len(target_session_key) > len(channel)
+                        and target_session_key[len(channel)] == "."):
+                    loguru_logger.debug(
+                        "Resolved session {} -> channel={}, chat_id={} (prefix match via {})",
+                        target_session_key, channel, chat_id, natural_key,
+                    )
+                    return channel, chat_id
+
+            # --- Pass 3: fallback ---
+            if fallback_match:
+                loguru_logger.debug(
+                    "Using internal routing fallback for session {}: channel={}, chat_id={}",
+                    target_session_key, fallback_match[0], fallback_match[1],
+                )
+                return fallback_match
+            # Fallback: try natural key format
+            parts = target_session_key.split(":", 1)
+            if len(parts) == 2:
+                loguru_logger.debug(
+                    "No routing match for session {}, using natural key: channel={}, chat_id={}",
+                    target_session_key, parts[0], parts[1],
+                )
+                return parts[0], parts[1]
+            loguru_logger.debug(
+                "No routing match for session {}, defaulting to cron channel",
+                target_session_key,
+            )
+            return "cron", target_session_key
 
         async def send_to_session(self, target_session_key: str, message: str, source: str | None = None) -> bool:
             """Send a message to an existing session via the gateway agent."""
@@ -453,21 +538,78 @@ def gateway(
                 else:
                     prefixed = message
 
+                # Resolve real channel/chat_id so OutboundMessage routes correctly
+                real_channel, real_chat_id = self._resolve_channel_for_session(target_session_key)
+
+                # Check if target session is the current foreground session
+                current_key = self._sessions.resolve_session_key(f"{real_channel}:{real_chat_id}")
+                is_foreground = (current_key == target_session_key)
+
+                if not is_foreground:
+                    # Check if foreground is idle
+                    foreground_worker = self._agent.subagents.session_messenger._active.get(current_key) if hasattr(self._agent, 'subagents') and self._agent.subagents.session_messenger else None
+                    foreground_busy = foreground_worker and not foreground_worker.task.done()
+
+                    if not foreground_busy:
+                        # Foreground idle → switch to target session then send
+                        target_sid = target_session_key.replace(":", "_", 1)
+                        self._sessions.switch_session(real_channel, real_chat_id, target_sid)
+                        loguru_logger.info("GatewayCronExecutor: switched foreground to {} for reminder", target_session_key)
+
+                        # Send a system notice so the user knows the foreground was switched
+                        from nanobot.bus.events import OutboundMessage
+                        notice = f"⏰ 定时任务触发，已切换回此会话。\n\n📋 {message}"
+                        await self._bus.publish_outbound(OutboundMessage(
+                            channel=real_channel,
+                            chat_id=real_chat_id,
+                            content=notice,
+                        ))
+                        # Continue below to send InboundMessage and trigger agent turn
+                    else:
+                        # Foreground busy → background execution with notification
+                        loguru_logger.info("GatewayCronExecutor: foreground busy, executing reminder for {} in background", target_session_key)
+
+                        # Notify user about background execution
+                        target_sid = target_session_key.replace(":", "_", 1)
+                        session_name = self._sessions.get_session_name(target_sid)
+                        display = f"{session_name} ({target_sid})" if session_name else target_sid
+                        from nanobot.bus.events import OutboundMessage
+                        await self._bus.publish_outbound(OutboundMessage(
+                            channel=real_channel,
+                            chat_id=real_chat_id,
+                            content=f"⏰ 后台会话「{display}」有定时任务触发，正在后台执行。\n\n📋 {message}",
+                        ))
+
+                        # Use channel="cron" so agent replies are silently dropped
+                        # (ChannelManager has no "cron" channel → Unknown channel warning → discard)
+                        # This achieves "background silent execution" — session gets the message
+                        # and agent processes it, but replies don't appear in the user's chat.
+                        from nanobot.bus.events import InboundMessage
+                        msg = InboundMessage(
+                            channel="cron",
+                            sender_id=source or "cron",
+                            chat_id=target_session_key,
+                            content=prefixed,
+                            session_key_override=target_session_key,
+                        )
+                        await self._bus.publish_inbound(msg)
+                        return True
+
                 from nanobot.bus.events import InboundMessage
                 msg = InboundMessage(
-                    channel="cron",
+                    channel=real_channel,
                     sender_id=source or "cron",
-                    chat_id=target_session_key,
+                    chat_id=real_chat_id,
                     content=prefixed,
                     session_key_override=target_session_key,
                 )
                 await self._bus.publish_inbound(msg)
                 return True
             except Exception as e:
-                logger.error("GatewayCronExecutor.send_to_session failed: {}", e)
+                loguru_logger.error("GatewayCronExecutor.send_to_session failed: {}", e)
                 return False
 
-    cron.executor = GatewayCronExecutor(agent, bus)
+    cron.executor = GatewayCronExecutor(agent, bus, session_manager)
 
     # Create channel manager
     channels = ChannelManager(config, bus)
