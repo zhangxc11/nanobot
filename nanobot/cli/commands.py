@@ -463,8 +463,6 @@ def gateway(
                session for the same channel.
             3. Fallback: use natural key format or default to cron channel.
             """
-            from loguru import logger
-
             routing = self._sessions._load_routing()
 
             # --- Pass 1: exact match (existing logic) ---
@@ -475,14 +473,14 @@ def gateway(
                     if len(parts) == 2:
                         # Skip internal routing entries (cron:, web:, etc.)
                         if parts[0] in ("cron",):
-                            logger.debug(
+                            loguru_logger.debug(
                                 "Skipping internal routing entry: {} -> {}",
                                 natural_key, routed_key,
                             )
                             if fallback_match is None:
                                 fallback_match = (parts[0], parts[1])
                             continue
-                        logger.debug(
+                        loguru_logger.debug(
                             "Resolved session {} -> channel={}, chat_id={} (exact match)",
                             target_session_key, parts[0], parts[1],
                         )
@@ -505,7 +503,7 @@ def gateway(
                 if (target_session_key.startswith(channel)
                         and len(target_session_key) > len(channel)
                         and target_session_key[len(channel)] == "."):
-                    logger.debug(
+                    loguru_logger.debug(
                         "Resolved session {} -> channel={}, chat_id={} (prefix match via {})",
                         target_session_key, channel, chat_id, natural_key,
                     )
@@ -513,7 +511,7 @@ def gateway(
 
             # --- Pass 3: fallback ---
             if fallback_match:
-                logger.debug(
+                loguru_logger.debug(
                     "Using internal routing fallback for session {}: channel={}, chat_id={}",
                     target_session_key, fallback_match[0], fallback_match[1],
                 )
@@ -521,12 +519,12 @@ def gateway(
             # Fallback: try natural key format
             parts = target_session_key.split(":", 1)
             if len(parts) == 2:
-                logger.debug(
+                loguru_logger.debug(
                     "No routing match for session {}, using natural key: channel={}, chat_id={}",
                     target_session_key, parts[0], parts[1],
                 )
                 return parts[0], parts[1]
-            logger.debug(
+            loguru_logger.debug(
                 "No routing match for session {}, defaulting to cron channel",
                 target_session_key,
             )

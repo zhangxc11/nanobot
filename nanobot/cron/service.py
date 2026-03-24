@@ -180,7 +180,12 @@ class CronService:
         self._poll_task: asyncio.Task | None = None
         self._watchdog_task: asyncio.Task | None = None
         self._running = False
-        self._scheduling = False  # True if this instance holds the scheduler lock (for task/PUBLIC jobs)
+        # _scheduling: indicates this instance holds the scheduler lock.
+        # Currently used only for log output and status reporting — it does NOT guard
+        # the execution path. Each process always executes its own partition's jobs
+        # (determined by process_role + classify_job). The lock + watchdog are retained
+        # for a future cross-partition fallback mechanism (e.g. PUBLIC task partition).
+        self._scheduling = False
         self._lock: _SchedulerLock | None = None
 
     def _load_store(self) -> CronStore:
@@ -366,10 +371,14 @@ class CronService:
         """Get the earliest next run time for this partition's jobs."""
         if not self._store:
             return None
-        # TODO: classify_job() maps source_channel="gateway" → GATEWAY, all others → WEB.
-        # Task-type jobs (no target_session) with source_channel="web"/"cli"/None all land in WEB
-        # partition. If a task job is created from a gateway session with source_channel="gateway",
-        # it will be executed by the gateway process — verify this is the intended behavior.
+        # Design note — task partition ownership (§72):
+        # Currently classify_job() routes by source_channel: "gateway" → GATEWAY, others → WEB.
+        # This means tasks (no target_session) created from a gateway session are executed by
+        # the gateway process. Ideally, tasks should belong to a PUBLIC partition (any process
+        # with the scheduler lock can execute them), but adding JobPartition.PUBLIC requires
+        # reworking every `classify_job(j) == self._partition` check and making `_scheduling`
+        # load-bearing for execution again. Deferred to a future iteration.
+        # Current limitation: gateway-created tasks only run while the gateway is alive.
         times = [
             j.state.next_run_at_ms for j in self._store.jobs
             if j.enabled and j.state.next_run_at_ms
