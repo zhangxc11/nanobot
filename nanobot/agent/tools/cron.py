@@ -212,7 +212,7 @@ class CronTool(Tool):
             target_session=target_session,
             source_channel=source_channel,
         )
-        result = f"Created job '{job.name}' (id: {job.id})"
+        result = f"Created job '{job.name}' (id: {job.id}) [source={source_channel}]"
         if target_session:
             result += f" [target: {target_session}]"
         return result

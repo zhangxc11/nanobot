@@ -366,6 +366,10 @@ class CronService:
         """Get the earliest next run time for this partition's jobs."""
         if not self._store:
             return None
+        # TODO: classify_job() maps source_channel="gateway" → GATEWAY, all others → WEB.
+        # Task-type jobs (no target_session) with source_channel="web"/"cli"/None all land in WEB
+        # partition. If a task job is created from a gateway session with source_channel="gateway",
+        # it will be executed by the gateway process — verify this is the intended behavior.
         times = [
             j.state.next_run_at_ms for j in self._store.jobs
             if j.enabled and j.state.next_run_at_ms
@@ -430,6 +434,8 @@ class CronService:
             if self._running:
                 await self._on_timer()
 
+        logger.debug("Cron: armed timer for partition={}, next wake in {:.1f}s",
+                     self._partition.value, delay_s)
         self._timer_task = asyncio.create_task(tick())
 
     async def _on_timer(self) -> None:
@@ -449,6 +455,19 @@ class CronService:
             and not (j.state.last_run_at_ms and j.state.last_run_at_ms >= j.state.next_run_at_ms)
         ]
 
+        skipped = [j for j in self._store.jobs
+                   if j.enabled and j.state.next_run_at_ms and now >= j.state.next_run_at_ms
+                   and classify_job(j) == self._partition
+                   and j.state.last_run_at_ms and j.state.last_run_at_ms >= j.state.next_run_at_ms]
+        if skipped:
+            logger.info("Cron: Bug4 guard — skipped {} already-executed jobs [{}]",
+                        len(skipped), ", ".join(f"{j.name}({j.id})" for j in skipped))
+
+        if due_jobs:
+            logger.info("Cron: timer tick — {} due jobs for partition={} [{}]",
+                        len(due_jobs), self._partition.value,
+                        ", ".join(f"{j.name}({j.id})" for j in due_jobs))
+
         for job in due_jobs:
             await self._execute_job(job)
 
@@ -458,7 +477,10 @@ class CronService:
     async def _execute_job(self, job: CronJob) -> None:
         """Execute a single job via executor or legacy on_job callback."""
         start_ms = _now_ms()
-        logger.info("Cron: executing job '{}' ({})", job.name, job.id)
+        mode = "reminder" if job.payload.target_session else "task"
+        logger.info("Cron: executing job '{}' ({}) [mode={}, source={}, partition={}, target={}]",
+                    job.name, job.id, mode, job.payload.source_channel,
+                    classify_job(job).value, job.payload.target_session or "new-session")
 
         try:
             response = None
@@ -563,7 +585,8 @@ class CronService:
         # Both processes arm timer after add (partition-aware)
         self._arm_timer()
 
-        logger.info("Cron: added job '{}' ({})", name, job.id)
+        logger.info("Cron: added job '{}' ({}) [source={}, target={}, partition={}]",
+                    name, job.id, source_channel, target_session, classify_job(job).value)
         return job
 
     def remove_job(self, job_id: str) -> bool:
