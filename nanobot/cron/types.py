@@ -1,7 +1,7 @@
 """Cron types."""
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal  # kept for CronJobState
 
 
 @dataclass
@@ -21,15 +21,16 @@ class CronSchedule:
 @dataclass
 class CronPayload:
     """What to do when the job runs."""
-    kind: Literal["system_event", "agent_turn"] = "agent_turn"
     message: str = ""
-    # Deliver response to channel
-    deliver: bool = False
-    channel: str | None = None  # e.g. "whatsapp"
-    to: str | None = None  # e.g. phone number
-    # Target session ID — send message to existing session instead of creating new cron session
-    # Uses session_id format (underscore-separated, e.g. "webchat_1773591411")
+    # Non-None → reminder mode (send to existing session); None → task mode (create new session)
     target_session: str | None = None
+    # Executor binding (only meaningful for reminders): "gateway" | "web" | None (legacy → web)
+    source_channel: str | None = None
+    # === deprecated fields (kept for backward compat read/write) ===
+    kind: str = "agent_turn"
+    deliver: bool = False
+    channel: str | None = None
+    to: str | None = None
 
 
 @dataclass
