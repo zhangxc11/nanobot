@@ -629,7 +629,7 @@ Session summary 在多次 consolidation 后丢失早期信息（Phase C 3-way �
 
 **分支**: `feat/cron-partition`
 **需求**: [requirements/cron-partition.md](requirements/cron-partition.md)
-**设计文档**: `~/.nanobot/workspace/data/analysis/cron-partition-redesign.md`
+**设计文档**: `~/.nanobot/workspace/data/analysis/cron/cron-partition-redesign.md`
 
 ### 背景
 
@@ -647,6 +647,9 @@ Session summary 在多次 consolidation 后丢失早期信息（Phase C 3-way �
 - [x] **T64.4** Poll 机制 — _ensure_poll_task 检测外部 jobs.json 变更
 - [x] **T64.5** CronTool 改造 — source_channel 推断 + CLI 拒绝 reminder
 - [x] **T64.6** GatewayCronExecutor 改造 — 前台/后台 session 切换逻辑
+- [x] **T64.6a** _resolve_channel_for_session 三阶段匹配 — Pass 1 精确(跳过cron:) + Pass 2 prefix match + Pass 3 fallback
+- [x] **T64.6b** 场景3/4 系统通知 — 切换通知含 reminder 内容，后台执行通知 + channel=cron 静默
 - [x] **T64.7** _load_store / _save_store — source_channel 序列化 + 旧数据兼容
 - [x] **T64.8** add_job API 改造 — 去掉 deliver/channel/to，新增 source_channel
+- [x] **T64.8a** web-chat WorkerCronExecutor.execute_job — channel 改为 "cron"
 - [x] **T64.9** Git commit 所有改动
