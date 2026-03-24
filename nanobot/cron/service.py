@@ -6,6 +6,7 @@ import json
 import time
 import uuid
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Coroutine, Protocol, runtime_checkable
 
@@ -16,6 +17,20 @@ from nanobot.cron.types import CronJob, CronJobState, CronPayload, CronSchedule,
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+class JobPartition(Enum):
+    """Which process is responsible for executing a job."""
+    WEB = "web"
+    GATEWAY = "gateway"
+
+
+def classify_job(job: CronJob) -> JobPartition:
+    """Classify a job into a partition based on source_channel."""
+    if job.payload.source_channel == "gateway":
+        return JobPartition.GATEWAY
+    # "web", "cli", None (legacy compat) → WEB partition
+    return JobPartition.WEB
 
 
 def _compute_next_run(schedule: CronSchedule, now_ms: int) -> int | None:
@@ -150,16 +165,22 @@ class CronService:
         store_path: Path,
         on_job: Callable[[CronJob], Coroutine[Any, Any, str | None]] | None = None,
         executor: CronExecutor | None = None,
+        process_role: str = "web",
     ):
         self.store_path = store_path
         self.on_job = on_job
         self.executor = executor
+        self._process_role = process_role
+        self._partition = (
+            JobPartition.GATEWAY if process_role == "gateway" else JobPartition.WEB
+        )
         self._store: CronStore | None = None
         self._last_mtime: float = 0.0
         self._timer_task: asyncio.Task | None = None
+        self._poll_task: asyncio.Task | None = None
         self._watchdog_task: asyncio.Task | None = None
         self._running = False
-        self._scheduling = False  # True if this instance holds the scheduler lock
+        self._scheduling = False  # True if this instance holds the scheduler lock (for task/PUBLIC jobs)
         self._lock: _SchedulerLock | None = None
 
     def _load_store(self) -> CronStore:
@@ -195,6 +216,7 @@ class CronService:
                             channel=j["payload"].get("channel"),
                             to=j["payload"].get("to"),
                             target_session=j["payload"].get("targetSession"),
+                            source_channel=j["payload"].get("sourceChannel") or "web",
                         ),
                         state=CronJobState(
                             next_run_at_ms=j.get("state", {}).get("nextRunAtMs"),
@@ -243,6 +265,7 @@ class CronService:
                         "channel": j.payload.channel,
                         "to": j.payload.to,
                         "targetSession": j.payload.target_session,
+                        "sourceChannel": j.payload.source_channel,
                     },
                     "state": {
                         "nextRunAtMs": j.state.next_run_at_ms,
@@ -262,32 +285,35 @@ class CronService:
         self._last_mtime = self.store_path.stat().st_mtime
     
     async def start(self) -> None:
-        """Start the cron service with file-lock arbitration.
+        """Start the cron service.
 
-        Tries to acquire the scheduler lock:
-        - Success → scheduling mode (arm timers, execute jobs)
-        - Failure → standby mode (manage jobs but don't schedule) + watchdog
+        Both processes arm their own partition timer immediately.
+        The scheduler lock is used only for task (PUBLIC) jobs — the lock holder
+        also executes WEB-partition jobs as fallback if the web worker is down.
         """
         self._running = True
         self._load_store()
 
-        # Set up file lock
+        # Set up file lock (used for task/PUBLIC job arbitration)
         lock_path = self.store_path.parent / "scheduler.lock"
         self._lock = _SchedulerLock(lock_path)
 
         if self._lock.try_acquire():
             self._scheduling = True
-            logger.info("Cron: acquired scheduler lock — entering scheduling mode")
+            logger.info("Cron: acquired scheduler lock (role={})", self._process_role)
             self._recompute_next_runs()
             self._save_store()
-            self._arm_timer()
         else:
             self._scheduling = False
-            logger.info("Cron: scheduler lock held by another process — entering standby mode")
+            logger.info("Cron: scheduler lock held by another process (role={})", self._process_role)
             self._start_watchdog()
 
-        logger.info("Cron service started with {} jobs (scheduling={})",
-                     len(self._store.jobs if self._store else []), self._scheduling)
+        # Both processes arm their partition timer
+        self._arm_timer()
+
+        logger.info("Cron service started (role={}, partition={}, scheduling={}, jobs={})",
+                     self._process_role, self._partition.value, self._scheduling,
+                     len(self._store.jobs if self._store else []))
 
     def _start_watchdog(self) -> None:
         """Start watchdog that periodically tries to acquire the scheduler lock."""
@@ -317,6 +343,9 @@ class CronService:
         if self._timer_task:
             self._timer_task.cancel()
             self._timer_task = None
+        if self._poll_task:
+            self._poll_task.cancel()
+            self._poll_task = None
         if self._watchdog_task:
             self._watchdog_task.cancel()
             self._watchdog_task = None
@@ -334,37 +363,77 @@ class CronService:
                 job.state.next_run_at_ms = _compute_next_run(job.schedule, now)
 
     def _get_next_wake_ms(self) -> int | None:
-        """Get the earliest next run time across all jobs."""
+        """Get the earliest next run time for this partition's jobs."""
         if not self._store:
             return None
-        times = [j.state.next_run_at_ms for j in self._store.jobs
-                 if j.enabled and j.state.next_run_at_ms]
+        times = [
+            j.state.next_run_at_ms for j in self._store.jobs
+            if j.enabled and j.state.next_run_at_ms
+            and classify_job(j) == self._partition
+        ]
         return min(times) if times else None
 
+    _POLL_INTERVAL_S = 15
+
+    def _ensure_poll_task(self) -> None:
+        """Start periodic poll task to detect new jobs when no timer is armed."""
+        if self._poll_task and not self._poll_task.done():
+            return
+
+        async def _poll_loop():
+            last_mtime = self._last_mtime
+            while self._running:
+                await asyncio.sleep(self._POLL_INTERVAL_S)
+                if not self._running:
+                    break
+                if self.store_path.exists():
+                    mtime = self.store_path.stat().st_mtime
+                    if mtime != last_mtime:
+                        last_mtime = mtime
+                        self._load_store()
+                        next_wake = self._get_next_wake_ms()
+                        if next_wake:
+                            # New jobs found — switch to timer mode
+                            self._arm_timer()
+                            return
+
+        self._poll_task = asyncio.create_task(_poll_loop())
+
+    def _cancel_poll_task(self) -> None:
+        if self._poll_task:
+            self._poll_task.cancel()
+            self._poll_task = None
+
     def _arm_timer(self) -> None:
-        """Schedule the next timer tick. Only active in scheduling mode."""
+        """Schedule the next timer tick for this partition."""
         if self._timer_task:
             self._timer_task.cancel()
+            self._timer_task = None
 
-        if not self._scheduling:
+        if not self._running:
             return
 
         next_wake = self._get_next_wake_ms()
-        if not next_wake or not self._running:
+        if not next_wake:
+            # No pending jobs — start poll to detect future additions
+            self._ensure_poll_task()
             return
+
+        # Cancel poll since we have a real timer
+        self._cancel_poll_task()
 
         delay_ms = max(0, next_wake - _now_ms())
         delay_s = delay_ms / 1000
 
         async def tick():
             await asyncio.sleep(delay_s)
-            if self._running and self._scheduling:
+            if self._running:
                 await self._on_timer()
 
         self._timer_task = asyncio.create_task(tick())
 
     async def _on_timer(self) -> None:
-        """Handle timer tick - run due jobs."""
+        """Handle timer tick - run due jobs for this partition."""
         self._load_store()
         if not self._store:
             return
@@ -372,7 +441,12 @@ class CronService:
         now = _now_ms()
         due_jobs = [
             j for j in self._store.jobs
-            if j.enabled and j.state.next_run_at_ms and now >= j.state.next_run_at_ms
+            if j.enabled
+            and j.state.next_run_at_ms
+            and now >= j.state.next_run_at_ms
+            and classify_job(j) == self._partition
+            # Bug4 防重入: skip if already executed this scheduled slot
+            and not (j.state.last_run_at_ms and j.state.last_run_at_ms >= j.state.next_run_at_ms)
         ]
 
         for job in due_jobs:
@@ -459,11 +533,9 @@ class CronService:
         name: str,
         schedule: CronSchedule,
         message: str,
-        deliver: bool = False,
-        channel: str | None = None,
-        to: str | None = None,
         delete_after_run: bool = False,
         target_session: str | None = None,
+        source_channel: str | None = None,
     ) -> CronJob:
         """Add a new job."""
         store = self._load_store()
@@ -476,12 +548,9 @@ class CronService:
             enabled=True,
             schedule=schedule,
             payload=CronPayload(
-                kind="agent_turn",
                 message=message,
-                deliver=deliver,
-                channel=channel,
-                to=to,
                 target_session=target_session,
+                source_channel=source_channel,
             ),
             state=CronJobState(next_run_at_ms=_compute_next_run(schedule, now)),
             created_at_ms=now,
@@ -491,8 +560,8 @@ class CronService:
 
         store.jobs.append(job)
         self._save_store()
-        if self._scheduling:
-            self._arm_timer()
+        # Both processes arm timer after add (partition-aware)
+        self._arm_timer()
 
         logger.info("Cron: added job '{}' ({})", name, job.id)
         return job
@@ -506,8 +575,7 @@ class CronService:
 
         if removed:
             self._save_store()
-            if self._scheduling:
-                self._arm_timer()
+            self._arm_timer()
             logger.info("Cron: removed job {}", job_id)
 
         return removed
@@ -524,8 +592,7 @@ class CronService:
                 else:
                     job.state.next_run_at_ms = None
                 self._save_store()
-                if self._scheduling:
-                    self._arm_timer()
+                self._arm_timer()
                 return job
         return None
 
@@ -538,8 +605,7 @@ class CronService:
                     return False
                 await self._execute_job(job)
                 self._save_store()
-                if self._scheduling:
-                    self._arm_timer()
+                self._arm_timer()
                 return True
         return False
 
