@@ -348,14 +348,32 @@ def gateway(
     from nanobot.cron.types import CronJob
     from nanobot.heartbeat.service import HeartbeatService
     from nanobot.session.manager import SessionManager
-    from loguru import logger
+    from loguru import logger as loguru_logger
     
+    # ── Logging setup ──
     if verbose:
         import logging
         logging.basicConfig(level=logging.DEBUG)
-        logger.enable("nanobot")
+        loguru_level = "DEBUG"
     else:
-        logger.disable("nanobot")
+        loguru_level = "INFO"
+
+    # Route loguru to gateway.log (same pattern as worker.py)
+    log_dir = os.environ.get(
+        "NANOBOT_LOG_DIR",
+        os.path.join(os.path.expanduser("~"), ".nanobot", "logs"),
+    )
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, "gateway.log")
+
+    loguru_logger.remove()  # remove default stderr sink
+    loguru_logger.add(
+        log_file,
+        format="[{time:YYYY-MM-DD HH:mm:ss}] {level} {message}",
+        level=loguru_level,
+        rotation=None,
+        encoding="utf-8",
+    )
     
 
     console.print(f"{__logo__} Starting nanobot gateway on port {port}...")
@@ -472,10 +490,10 @@ def gateway(
                         # Foreground idle → switch to target session then send
                         target_sid = target_session_key.replace(":", "_", 1)
                         self._sessions.switch_session(real_channel, real_chat_id, target_sid)
-                        logger.info("GatewayCronExecutor: switched foreground to {} for reminder", target_session_key)
+                        loguru_logger.info("GatewayCronExecutor: switched foreground to {} for reminder", target_session_key)
                     else:
                         # Foreground busy → background silent execution
-                        logger.info("GatewayCronExecutor: foreground busy, executing reminder for {} in background", target_session_key)
+                        loguru_logger.info("GatewayCronExecutor: foreground busy, executing reminder for {} in background", target_session_key)
                         from nanobot.bus.events import InboundMessage
                         msg = InboundMessage(
                             channel="cron",
@@ -498,7 +516,7 @@ def gateway(
                 await self._bus.publish_inbound(msg)
                 return True
             except Exception as e:
-                logger.error("GatewayCronExecutor.send_to_session failed: {}", e)
+                loguru_logger.error("GatewayCronExecutor.send_to_session failed: {}", e)
                 return False
 
     cron.executor = GatewayCronExecutor(agent, bus, session_manager)
