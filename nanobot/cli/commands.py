@@ -452,18 +452,84 @@ def gateway(
             return response
 
         def _resolve_channel_for_session(self, target_session_key: str) -> tuple[str, str]:
-            """Resolve real channel/chat_id for a session key from routing table."""
+            """Resolve real channel/chat_id for a session key from routing table.
+
+            Strategy:
+            1. Exact match: find routing entry whose routed_key == target_session_key
+               (skip internal cron: entries).
+            2. Channel prefix match: extract channel prefix from target_session_key,
+               find a routing entry whose channel matches. This handles background
+               sessions where the routing table points to a different (foreground)
+               session for the same channel.
+            3. Fallback: use natural key format or default to cron channel.
+            """
+            from loguru import logger
+
             routing = self._sessions._load_routing()
+
+            # --- Pass 1: exact match (existing logic) ---
+            fallback_match = None
             for natural_key, routed_key in routing.items():
                 if routed_key == target_session_key:
                     parts = natural_key.split(":", 1)
                     if len(parts) == 2:
+                        # Skip internal routing entries (cron:, web:, etc.)
+                        if parts[0] in ("cron",):
+                            logger.debug(
+                                "Skipping internal routing entry: {} -> {}",
+                                natural_key, routed_key,
+                            )
+                            if fallback_match is None:
+                                fallback_match = (parts[0], parts[1])
+                            continue
+                        logger.debug(
+                            "Resolved session {} -> channel={}, chat_id={} (exact match)",
+                            target_session_key, parts[0], parts[1],
+                        )
                         return parts[0], parts[1]
-                    break
+
+            # --- Pass 2: channel prefix match ---
+            # Session key format: {channel}.{timestamp} or {channel}.{chat_id}.{timestamp}
+            # Channel may contain dots (e.g. "feishu.ST"), so we match against
+            # known channels from the routing table.
+            for natural_key, routed_key in routing.items():
+                parts = natural_key.split(":", 1)
+                if len(parts) != 2:
+                    continue
+                channel, chat_id = parts[0], parts[1]
+                # Skip internal routing entries
+                if channel in ("cron",):
+                    continue
+                # Check if this channel is a prefix of target_session_key
+                # and the next char after the prefix is '.' (session key separator)
+                if (target_session_key.startswith(channel)
+                        and len(target_session_key) > len(channel)
+                        and target_session_key[len(channel)] == "."):
+                    logger.debug(
+                        "Resolved session {} -> channel={}, chat_id={} (prefix match via {})",
+                        target_session_key, channel, chat_id, natural_key,
+                    )
+                    return channel, chat_id
+
+            # --- Pass 3: fallback ---
+            if fallback_match:
+                logger.debug(
+                    "Using internal routing fallback for session {}: channel={}, chat_id={}",
+                    target_session_key, fallback_match[0], fallback_match[1],
+                )
+                return fallback_match
             # Fallback: try natural key format
             parts = target_session_key.split(":", 1)
             if len(parts) == 2:
+                logger.debug(
+                    "No routing match for session {}, using natural key: channel={}, chat_id={}",
+                    target_session_key, parts[0], parts[1],
+                )
                 return parts[0], parts[1]
+            logger.debug(
+                "No routing match for session {}, defaulting to cron channel",
+                target_session_key,
+            )
             return "cron", target_session_key
 
         async def send_to_session(self, target_session_key: str, message: str, source: str | None = None) -> bool:
