@@ -557,9 +557,35 @@ def gateway(
                         target_sid = target_session_key.replace(":", "_", 1)
                         self._sessions.switch_session(real_channel, real_chat_id, target_sid)
                         loguru_logger.info("GatewayCronExecutor: switched foreground to {} for reminder", target_session_key)
+
+                        # Send a system notice so the user knows the foreground was switched
+                        from nanobot.bus.events import OutboundMessage
+                        notice = f"⏰ 定时任务触发，已切换回此会话。\n\n📋 {message}"
+                        await self._bus.publish_outbound(OutboundMessage(
+                            channel=real_channel,
+                            chat_id=real_chat_id,
+                            content=notice,
+                        ))
+                        # Continue below to send InboundMessage and trigger agent turn
                     else:
-                        # Foreground busy → background silent execution
+                        # Foreground busy → background execution with notification
                         loguru_logger.info("GatewayCronExecutor: foreground busy, executing reminder for {} in background", target_session_key)
+
+                        # Notify user about background execution
+                        target_sid = target_session_key.replace(":", "_", 1)
+                        session_name = self._sessions.get_session_name(target_sid)
+                        display = f"{session_name} ({target_sid})" if session_name else target_sid
+                        from nanobot.bus.events import OutboundMessage
+                        await self._bus.publish_outbound(OutboundMessage(
+                            channel=real_channel,
+                            chat_id=real_chat_id,
+                            content=f"⏰ 后台会话「{display}」有定时任务触发，正在后台执行。\n\n📋 {message}",
+                        ))
+
+                        # Use channel="cron" so agent replies are silently dropped
+                        # (ChannelManager has no "cron" channel → Unknown channel warning → discard)
+                        # This achieves "background silent execution" — session gets the message
+                        # and agent processes it, but replies don't appear in the user's chat.
                         from nanobot.bus.events import InboundMessage
                         msg = InboundMessage(
                             channel="cron",
