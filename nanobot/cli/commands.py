@@ -368,7 +368,7 @@ def gateway(
 
     # Create cron service first (callback set after agent creation)
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
-    cron = CronService(cron_store_path)
+    cron = CronService(cron_store_path, process_role="gateway")
 
     # Unified usage recorder (SQLite)
     from nanobot.usage.recorder import UsageRecorder
@@ -412,13 +412,13 @@ def gateway(
     class GatewayCronExecutor:
         """CronExecutor for gateway mode — executes jobs via agent.process_direct."""
 
-        def __init__(self, agent_loop, message_bus):
+        def __init__(self, agent_loop, message_bus, sessions_mgr):
             self._agent = agent_loop
             self._bus = message_bus
+            self._sessions = sessions_mgr
 
         async def execute_job(self, job: CronJob) -> str | None:
             """Create a new cron session and execute the job."""
-            from nanobot.agent.tools.message import MessageTool
             reminder_note = (
                 "[Scheduled Task] Timer finished.\n\n"
                 f"Task '{job.name}' has been triggered.\n"
@@ -428,22 +428,25 @@ def gateway(
             response = await self._agent.process_direct(
                 reminder_note,
                 session_key=f"cron:{job.id}",
-                channel=job.payload.channel or "cli",
-                chat_id=job.payload.to or "direct",
+                channel="cron",
+                chat_id="direct",
             )
-
-            message_tool = self._agent.tools.get("message")
-            if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
-                return response
-
-            if job.payload.deliver and job.payload.to and response:
-                from nanobot.bus.events import OutboundMessage
-                await self._bus.publish_outbound(OutboundMessage(
-                    channel=job.payload.channel or "cli",
-                    chat_id=job.payload.to,
-                    content=response
-                ))
             return response
+
+        def _resolve_channel_for_session(self, target_session_key: str) -> tuple[str, str]:
+            """Resolve real channel/chat_id for a session key from routing table."""
+            routing = self._sessions._load_routing()
+            for natural_key, routed_key in routing.items():
+                if routed_key == target_session_key:
+                    parts = natural_key.split(":", 1)
+                    if len(parts) == 2:
+                        return parts[0], parts[1]
+                    break
+            # Fallback: try natural key format
+            parts = target_session_key.split(":", 1)
+            if len(parts) == 2:
+                return parts[0], parts[1]
+            return "cron", target_session_key
 
         async def send_to_session(self, target_session_key: str, message: str, source: str | None = None) -> bool:
             """Send a message to an existing session via the gateway agent."""
@@ -453,11 +456,42 @@ def gateway(
                 else:
                     prefixed = message
 
+                # Resolve real channel/chat_id so OutboundMessage routes correctly
+                real_channel, real_chat_id = self._resolve_channel_for_session(target_session_key)
+
+                # Check if target session is the current foreground session
+                current_key = self._sessions.resolve_session_key(f"{real_channel}:{real_chat_id}")
+                is_foreground = (current_key == target_session_key)
+
+                if not is_foreground:
+                    # Check if foreground is idle
+                    foreground_worker = self._agent.subagents.session_messenger._active.get(current_key) if hasattr(self._agent, 'subagents') and self._agent.subagents.session_messenger else None
+                    foreground_busy = foreground_worker and not foreground_worker.task.done()
+
+                    if not foreground_busy:
+                        # Foreground idle → switch to target session then send
+                        target_sid = target_session_key.replace(":", "_", 1)
+                        self._sessions.switch_session(real_channel, real_chat_id, target_sid)
+                        logger.info("GatewayCronExecutor: switched foreground to {} for reminder", target_session_key)
+                    else:
+                        # Foreground busy → background silent execution
+                        logger.info("GatewayCronExecutor: foreground busy, executing reminder for {} in background", target_session_key)
+                        from nanobot.bus.events import InboundMessage
+                        msg = InboundMessage(
+                            channel="cron",
+                            sender_id=source or "cron",
+                            chat_id=target_session_key,
+                            content=prefixed,
+                            session_key_override=target_session_key,
+                        )
+                        await self._bus.publish_inbound(msg)
+                        return True
+
                 from nanobot.bus.events import InboundMessage
                 msg = InboundMessage(
-                    channel="cron",
+                    channel=real_channel,
                     sender_id=source or "cron",
-                    chat_id=target_session_key,
+                    chat_id=real_chat_id,
                     content=prefixed,
                     session_key_override=target_session_key,
                 )
@@ -467,7 +501,7 @@ def gateway(
                 logger.error("GatewayCronExecutor.send_to_session failed: {}", e)
                 return False
 
-    cron.executor = GatewayCronExecutor(agent, bus)
+    cron.executor = GatewayCronExecutor(agent, bus, session_manager)
 
     # Create channel manager
     channels = ChannelManager(config, bus)
