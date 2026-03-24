@@ -625,7 +625,7 @@ Session summary 在多次 consolidation 后丢失早期信息（Phase C 3-way �
 
 ---
 
-## Phase 64: Cron 分区重设计 (§72) 🔜
+## Phase 64: Cron 分区重设计 (§72) ✅
 
 **分支**: `feat/cron-partition`
 **需求**: [requirements/cron-partition.md](requirements/cron-partition.md)
@@ -641,12 +641,12 @@ Session summary 在多次 consolidation 后丢失早期信息（Phase C 3-way �
 
 ### 任务清单
 
-- [ ] **T64.1** CronPayload 简化 — 新增 source_channel，标记 deprecated 字段
-- [ ] **T64.2** 分区调度 — JobPartition + classify_job + process_role + 分区过滤
-- [ ] **T64.3** Bug4 防重入守卫 — _on_timer 过滤已执行 job
-- [ ] **T64.4** Poll 机制 — _ensure_poll_task 检测外部 jobs.json 变更
-- [ ] **T64.5** CronTool 改造 — source_channel 推断 + CLI 拒绝 reminder
-- [ ] **T64.6** GatewayCronExecutor 改造 — 前台/后台 session 切换逻辑
-- [ ] **T64.7** _load_store / _save_store — source_channel 序列化 + 旧数据兼容
-- [ ] **T64.8** add_job API 改造 — 去掉 deliver/channel/to，新增 source_channel
-- [ ] **T64.9** Git commit 所有改动
+- [x] **T64.1** CronPayload 简化 — 新增 source_channel，标记 deprecated 字段
+- [x] **T64.2** 分区调度 — JobPartition + classify_job + process_role + 分区过滤
+- [x] **T64.3** Bug4 防重入守卫 — _on_timer 过滤已执行 job
+- [x] **T64.4** Poll 机制 — _ensure_poll_task 检测外部 jobs.json 变更
+- [x] **T64.5** CronTool 改造 — source_channel 推断 + CLI 拒绝 reminder
+- [x] **T64.6** GatewayCronExecutor 改造 — 前台/后台 session 切换逻辑
+- [x] **T64.7** _load_store / _save_store — source_channel 序列化 + 旧数据兼容
+- [x] **T64.8** add_job API 改造 — 去掉 deliver/channel/to，新增 source_channel
+- [x] **T64.9** Git commit 所有改动
