@@ -111,8 +111,8 @@ local    ← 本地自定义改动（基于 main）
 | §69 | Session Summary 增量更新（防遗忘） | ✅ | [requirements/s60-s69.md](requirements/s60-s69.md) |
 | §66 | Consolidation Pipeline 重写 | ✅ | [requirements/s60-s69.md](requirements/s60-s69.md) |
 | §70 | Consolidation 统一重设计 | ✅ | [requirements/s70-s79.md](requirements/s70-s79.md) |
-| §73 | Consolidation timeout 调整 + 失败 dump | 🔲 | [requirements/s73-consolidation-timeout.md](requirements/s73-consolidation-timeout.md) |
-| §74 | config.json extraHeaders Pydantic 验证失败 | 🔲 | [requirements/s74-config-extraheaders.md](requirements/s74-config-extraheaders.md) |
+| §73 | Consolidation timeout 调整 + 失败 dump | 🚧 | [requirements/s73-consolidation-timeout.md](requirements/s73-consolidation-timeout.md) |
+| §74 | config.json extraHeaders Pydantic 验证失败 | 🚧 | [requirements/s74-config-extraheaders.md](requirements/s74-config-extraheaders.md) |
 | §75 | Gateway progress 中间回复前缀标识 | 🔲 | [requirements/s75-gateway-progress-prefix.md](requirements/s75-gateway-progress-prefix.md) |
 | §76 | Gateway ASR 插件注册架构 | 🔲 | [requirements/s76-gateway-asr-plugin.md](requirements/s76-gateway-asr-plugin.md) |
 

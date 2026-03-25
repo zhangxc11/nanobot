@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 _CONSOLIDATION_DEFAULT_MAX_TOKENS = 16384
-_CONSOLIDATION_TIMEOUT = httpx.Timeout(connect=30.0, read=600.0, write=30.0, pool=30.0)
+_CONSOLIDATION_TIMEOUT = httpx.Timeout(connect=30.0, read=900.0, write=30.0, pool=30.0)
 _MAX_RETRIES = 3
 
 _RETRIABLE_TIMEOUT_KEYWORDS = ("timeout", "connection", "network")
@@ -142,8 +142,35 @@ class MemoryStore:
             response = await self._call_with_retry(
                 provider, messages, tools, model, effective_max_tokens,
             )
-        except Exception:
+        except Exception as err:
             logger.exception("Memory consolidation failed (all retries exhausted)")
+            # Dump the failed consolidation call to detail_logger for diagnostics
+            if detail_logger is not None:
+                try:
+                    from datetime import datetime as _dt
+
+                    provider_name = getattr(provider, "provider_name", "")
+                    log_messages = []
+                    for m in messages:
+                        content = m.get("content", "")
+                        if isinstance(content, str) and len(content) > 300:
+                            content = content[:300] + "..."
+                        log_messages.append({"role": m.get("role", "unknown"), "content": content})
+
+                    detail_logger.log_call(
+                        session_key=session.key,
+                        model=model,
+                        iteration=0,
+                        messages=log_messages,
+                        response_content=f"ERROR: {err}",
+                        response_tool_calls=None,
+                        response_finish_reason="error",
+                        response_usage=None,
+                        timestamp=_dt.now().isoformat(),
+                        provider=provider_name,
+                    )
+                except Exception:
+                    logger.debug("Failed to dump failed consolidation call to detail_logger")
             return False
 
         # ── 5. Record usage / logging ─────────────────────────────────

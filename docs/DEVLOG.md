@@ -653,3 +653,31 @@ Session summary 在多次 consolidation 后丢失早期信息（Phase C 3-way �
 - [x] **T64.8** add_job API 改造 — 去掉 deliver/channel/to，新增 source_channel
 - [x] **T64.8a** web-chat WorkerCronExecutor.execute_job — channel 改为 "cron"
 - [x] **T64.9** Git commit 所有改动
+
+---
+
+## Phase 65: §73 Consolidation timeout + failure dump, §74 save_config exclude_none ✅
+
+**分支**: `feat/batch-20260325-plan-a`
+
+### §73 Consolidation timeout 调整 + 失败 dump
+
+- `_CONSOLIDATION_TIMEOUT` read 超时从 600s → 900s，适应大上下文 consolidation
+- consolidation 失败（所有重试耗尽）时，通过 `detail_logger.log_call()` dump 完整调用信息到 LLM logs
+  - 包含 messages（截断到300字符）、错误信息、时间戳、model/provider、session_key
+  - `response_finish_reason="error"`，`response_content="ERROR: {err}"`
+  - dump 本身的异常被静默捕获，不影响主流程
+
+### §74 config.json extraHeaders 空字符串致 Pydantic 验证失败
+
+- `save_config()` 中 `model_dump(by_alias=True)` → `model_dump(by_alias=True, exclude_none=True)`
+- `Optional[dict]` 类型字段（如 `extraHeaders`）为 None 时不再写入 JSON
+- 避免 None → null → 重新加载时类型不匹配的问题
+- 验证：保存的 JSON 可通过 `Config.model_validate()` 正确 round-trip
+
+### 改动文件
+
+- `nanobot/agent/memory.py` — timeout 调整 + 失败 dump 逻辑
+- `nanobot/config/loader.py` — save_config exclude_none
+- `docs/REQUIREMENTS.md` — §73/§74 状态更新
+- `docs/DEVLOG.md` — 本记录
