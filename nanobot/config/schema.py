@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.alias_generators import to_camel
 from pydantic_settings import BaseSettings
 
@@ -244,6 +244,18 @@ class ProviderConfig(Base):
     api_base: str | None = None
     extra_headers: dict[str, str] | None = None  # Custom headers (e.g. APP-Code for AiHubMix)
     preferred_model: str | None = None  # Preferred default model for this provider (overrides built-in defaults)
+
+    @field_validator('api_base', 'preferred_model', mode='before')
+    @classmethod
+    def empty_str_to_none(cls, v: object) -> object:
+        """Treat empty string as None for optional string fields."""
+        return None if v == "" else v
+
+    @field_validator('extra_headers', mode='before')
+    @classmethod
+    def empty_str_headers_to_none(cls, v: object) -> object:
+        """Treat empty string as None for extra_headers (frontend sends "" when cleared)."""
+        return None if v == "" else v
 
 
 class ProvidersConfig(Base):

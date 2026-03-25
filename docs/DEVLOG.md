@@ -719,3 +719,11 @@ Session summary 在多次 consolidation 后丢失早期信息（Phase C 3-way �
 - **Bug 1**: inject 路径跳过 ASR — `loop.py` active session inject 分支直接 `continue`，语音消息不经 `_try_asr()`。修复：inject 前先调用 ASR，ASR 完成后重新检查 task 状态；若 turn 已结束则 fall through 作为新 turn 启动。
 - **Bug 2**: feishu ASR 降级日志缺文件名 — `feishu-parser/scripts/asr.py` 降级到 local 引擎时日志无文件路径，不便排查。修复：改为 WARNING 并附上 `file_path`。
 - **Bug 3**: ASR registry stderr 日志级别 — `registry.py` 将 subprocess stderr 统一用 `logger.debug` 记录，导致 `asr.py` 输出的 WARNING（如引擎降级信息）在 INFO 级别日志中不可见。修复：检测 stderr 内容是否包含 "WARNING"，若是则用 `logger.warning` 记录，其余保持 `logger.debug`。
+
+### §74 Bugfix (2026-03-25): extraHeaders 空字符串保存为 null
+
+- **Bug**: web UI 编辑配置时将 `extraHeaders` 删空后保存，前端传来 `""` 而非 `null`，`webserver.py` 直接写入文件，导致 `extra_headers: dict[str, str] | None` 字段存储非法值 `""`，引发请求异常。
+- **根因**: `_handle_put_config()` 直接 `json.dump` 原始前端数据，未经 pydantic 验证。
+- **修复 1** (`nanobot/config/schema.py`): `ProviderConfig` 新增 `field_validator`，对 `api_base`、`preferred_model`、`extra_headers` 三个 Optional 字段在 `mode='before'` 阶段将 `""` 转为 `None`。
+- **修复 2** (`web-chat/webserver.py`): `_handle_put_config()` 写入前做 pydantic round-trip：`Config.model_validate(data)` → `model_dump(by_alias=True, exclude_none=True)`，确保所有 None 字段不写入文件，并对非法数据返回 400。
+
