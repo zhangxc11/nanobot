@@ -681,3 +681,41 @@ Session summary 在多次 consolidation 后丢失早期信息（Phase C 3-way �
 - `nanobot/config/loader.py` — save_config exclude_none
 - `docs/REQUIREMENTS.md` — §73/§74 状态更新
 - `docs/DEVLOG.md` — 本记录
+
+---
+
+## Phase 66: §75 Gateway progress 前缀 + §76 ASR 插件注册
+
+**分支**: `feat/batch-20260325-plan-b`
+**需求**: §75 [requirements/s75-gateway-progress-prefix.md](requirements/s75-gateway-progress-prefix.md) + §76 [requirements/s76-gateway-asr-plugin.md](requirements/s76-gateway-asr-plugin.md)
+
+### 背景
+
+- §75: Gateway 中间回复（progress callback）缺少视觉区分，用户难以分辨是中间思考还是最终回复
+- §76: 飞书语音消息需要 agent 手动调用 transcribe 脚本，应在 gateway 层自动完成 ASR
+
+### 改动
+
+- `nanobot/agent/loop.py`: progress 回调加 💭 前缀（仅 display，不影响 dump jsonl）
+- `nanobot/asr/__init__.py` + `nanobot/asr/registry.py`: ASR 插件注册加载器（新模块）
+- `nanobot/agent/loop.py`: `_try_asr()` 方法 + `asr_registry` 参数（AgentLoop）
+- `nanobot/cli/commands.py`: gateway 启动时加载 ASR registry
+
+### 关联
+
+- feishu-parser FR-6: `scripts/asr.py` ASR 插件脚本 + 注册 JSON
+
+### 任务清单
+
+- [x] **T66.1** §75 — progress callback 加 💭 前缀
+- [x] **T66.2** §76 — ASR registry 模块 (`nanobot/asr/registry.py`)
+- [x] **T66.3** §76 — `_try_asr()` 方法 + `asr_registry` 参数
+- [x] **T66.4** §76 — gateway 启动时加载 ASR registry (`commands.py`)
+- [x] **T66.5** FR-6 — feishu-parser `scripts/asr.py` + `--register`
+- [x] **T66.6** 文档更新 (REQUIREMENTS.md, DEVLOG.md, SKILL.md)
+
+### §76 Bugfix (2026-03-25)
+
+- **Bug 1**: inject 路径跳过 ASR — `loop.py` active session inject 分支直接 `continue`，语音消息不经 `_try_asr()`。修复：inject 前先调用 ASR，ASR 完成后重新检查 task 状态；若 turn 已结束则 fall through 作为新 turn 启动。
+- **Bug 2**: feishu ASR 降级日志缺文件名 — `feishu-parser/scripts/asr.py` 降级到 local 引擎时日志无文件路径，不便排查。修复：改为 WARNING 并附上 `file_path`。
+- **Bug 3**: ASR registry stderr 日志级别 — `registry.py` 将 subprocess stderr 统一用 `logger.debug` 记录，导致 `asr.py` 输出的 WARNING（如引擎降级信息）在 INFO 级别日志中不可见。修复：检测 stderr 内容是否包含 "WARNING"，若是则用 `logger.warning` 记录，其余保持 `logger.debug`。

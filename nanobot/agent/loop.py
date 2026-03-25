@@ -136,6 +136,7 @@ class AgentLoop:
         subagent_manager: "SubagentManager | None" = None,  # §40: external singleton
         spawn_max_concurrency: int = 4,  # §46: spawn concurrency limit
         on_iteration: "Callable[[int, int, str | None], None] | None" = None,  # §47: iteration callback
+        asr_registry: "Any | None" = None,  # §76: ASR plugin registry
     ):
         from nanobot.config.schema import ExecToolConfig
         self.bus = bus
@@ -159,6 +160,7 @@ class AgentLoop:
         self.audit_logger = audit_logger
         self.session_messenger = session_messenger
         self._on_iteration = on_iteration  # §47: iteration callback
+        self.asr_registry = asr_registry  # §76: ASR plugin registry
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
@@ -789,7 +791,7 @@ class AgentLoop:
                 if _progress_fn:
                     clean = self._strip_think(response.content)
                     if clean:
-                        await _progress_fn(clean)
+                        await _progress_fn(f"💭 {clean}")
                     await _progress_fn(self._tool_hint(response.tool_calls), tool_hint=True)
 
                 tool_call_dicts = [
@@ -1206,14 +1208,26 @@ class AgentLoop:
             if session_key in active_sessions:
                 worker = active_sessions[session_key]
                 if not worker.task.done():
-                    logger.info("Injecting message into active session {}", session_key)
-                    await worker.callbacks.inject(f"[Message from user during execution]\n{msg.content}")
-                    continue
+                    # §76: ASR — recognize audio before injecting
+                    if self.asr_registry and self.asr_registry.available:
+                        msg = await self._try_asr(msg)
+                    # Re-check after ASR (turn may have ended during recognition)
+                    if not worker.task.done():
+                        logger.info("Injecting message into active session {}", session_key)
+                        await worker.callbacks.inject(f"[Message from user during execution]\n{msg.content}")
+                        continue
+                    else:
+                        # Turn ended during ASR, fall through to start new turn
+                        active_sessions.pop(session_key, None)
                 else:
                     # Task already done, remove stale entry
                     active_sessions.pop(session_key, None)
 
             # ── New/idle session → start task ──
+            # §76: ASR — recognize audio messages before dispatching
+            if self.asr_registry and self.asr_registry.available:
+                msg = await self._try_asr(msg)
+
             # Resolve per-session provider/model
             pool = self.provider
             if isinstance(pool, ProviderPool):
@@ -1958,6 +1972,55 @@ class AgentLoop:
                 content=f"❌ Session 不存在: `{arg}`",
             )
         return arg
+
+    # ── §76: ASR audio recognition ──────────────────────────────────
+
+    async def _try_asr(self, msg: InboundMessage) -> InboundMessage:
+        """Try to recognize audio in the message via ASR plugin.
+
+        Looks for ``[audio: filename, Ns]`` patterns in the message content,
+        finds the corresponding audio file in ``msg.media``, and calls the
+        ASR registry to get a transcription.  Returns a new InboundMessage
+        with the recognition result embedded, or the original message if
+        ASR is unavailable or fails.
+        """
+        import re
+        pattern = r'\[audio: ([^,\]]+),\s*([\d.]+)s\]'
+        match = re.search(pattern, msg.content)
+        if not match:
+            return msg
+
+        filename = match.group(1)
+        duration_s = float(match.group(2))
+        duration_ms = int(duration_s * 1000)
+
+        # Find audio file in media list
+        audio_path = None
+        for path in msg.media:
+            if path.endswith(filename) or filename in path:
+                audio_path = path
+                break
+
+        if not audio_path:
+            return msg
+
+        result = await self.asr_registry.recognize(audio_path, duration_ms)
+        if result and result.get("recognition"):
+            recognition = result["recognition"]
+            engine = result.get("engine", "unknown")
+            new_tag = f'[audio: {filename}, {duration_s}s, recognition="{recognition}", engine={engine}]'
+            new_content = msg.content.replace(match.group(0), new_tag)
+            return InboundMessage(
+                channel=msg.channel,
+                sender_id=msg.sender_id,
+                chat_id=msg.chat_id,
+                content=new_content,
+                timestamp=msg.timestamp,
+                media=msg.media,
+                metadata=msg.metadata,
+                session_key_override=msg.session_key_override,
+            )
+        return msg
 
     async def _process_message_safe(
         self,
