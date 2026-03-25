@@ -401,6 +401,9 @@ def gateway(
     audit_logger = AuditLogger()
 
     # Create agent with cron service
+    from nanobot.asr.registry import ASRRegistry
+    asr_registry = ASRRegistry(Path.home() / ".nanobot" / "plugins" / "asr")
+
     agent = AgentLoop(
         bus=bus,
         provider=provider,
@@ -424,6 +427,7 @@ def gateway(
         detail_logger=detail_logger,
         audit_logger=audit_logger,
         spawn_max_concurrency=config.spawn.max_concurrency,
+        asr_registry=asr_registry,
     )
 
     # Set cron executor (needs agent + bus)

@@ -653,3 +653,35 @@ Session summary 在多次 consolidation 后丢失早期信息（Phase C 3-way �
 - [x] **T64.8** add_job API 改造 — 去掉 deliver/channel/to，新增 source_channel
 - [x] **T64.8a** web-chat WorkerCronExecutor.execute_job — channel 改为 "cron"
 - [x] **T64.9** Git commit 所有改动
+
+---
+
+## Phase 66: §75 Gateway progress 前缀 + §76 ASR 插件注册
+
+**分支**: `feat/batch-20260325-plan-b`
+**需求**: §75 [requirements/s75-gateway-progress-prefix.md](requirements/s75-gateway-progress-prefix.md) + §76 [requirements/s76-gateway-asr-plugin.md](requirements/s76-gateway-asr-plugin.md)
+
+### 背景
+
+- §75: Gateway 中间回复（progress callback）缺少视觉区分，用户难以分辨是中间思考还是最终回复
+- §76: 飞书语音消息需要 agent 手动调用 transcribe 脚本，应在 gateway 层自动完成 ASR
+
+### 改动
+
+- `nanobot/agent/loop.py`: progress 回调加 💭 前缀（仅 display，不影响 dump jsonl）
+- `nanobot/asr/__init__.py` + `nanobot/asr/registry.py`: ASR 插件注册加载器（新模块）
+- `nanobot/agent/loop.py`: `_try_asr()` 方法 + `asr_registry` 参数（AgentLoop）
+- `nanobot/cli/commands.py`: gateway 启动时加载 ASR registry
+
+### 关联
+
+- feishu-parser FR-6: `scripts/asr.py` ASR 插件脚本 + 注册 JSON
+
+### 任务清单
+
+- [x] **T66.1** §75 — progress callback 加 💭 前缀
+- [x] **T66.2** §76 — ASR registry 模块 (`nanobot/asr/registry.py`)
+- [x] **T66.3** §76 — `_try_asr()` 方法 + `asr_registry` 参数
+- [x] **T66.4** §76 — gateway 启动时加载 ASR registry (`commands.py`)
+- [x] **T66.5** FR-6 — feishu-parser `scripts/asr.py` + `--register`
+- [x] **T66.6** 文档更新 (REQUIREMENTS.md, DEVLOG.md, SKILL.md)
