@@ -1208,9 +1208,17 @@ class AgentLoop:
             if session_key in active_sessions:
                 worker = active_sessions[session_key]
                 if not worker.task.done():
-                    logger.info("Injecting message into active session {}", session_key)
-                    await worker.callbacks.inject(f"[Message from user during execution]\n{msg.content}")
-                    continue
+                    # §76: ASR — recognize audio before injecting
+                    if self.asr_registry and self.asr_registry.available:
+                        msg = await self._try_asr(msg)
+                    # Re-check after ASR (turn may have ended during recognition)
+                    if not worker.task.done():
+                        logger.info("Injecting message into active session {}", session_key)
+                        await worker.callbacks.inject(f"[Message from user during execution]\n{msg.content}")
+                        continue
+                    else:
+                        # Turn ended during ASR, fall through to start new turn
+                        active_sessions.pop(session_key, None)
                 else:
                     # Task already done, remove stale entry
                     active_sessions.pop(session_key, None)

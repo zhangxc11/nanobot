@@ -685,3 +685,8 @@ Session summary 在多次 consolidation 后丢失早期信息（Phase C 3-way �
 - [x] **T66.4** §76 — gateway 启动时加载 ASR registry (`commands.py`)
 - [x] **T66.5** FR-6 — feishu-parser `scripts/asr.py` + `--register`
 - [x] **T66.6** 文档更新 (REQUIREMENTS.md, DEVLOG.md, SKILL.md)
+
+### §76 Bugfix (2026-03-25)
+
+- **Bug 1**: inject 路径跳过 ASR — `loop.py` active session inject 分支直接 `continue`，语音消息不经 `_try_asr()`。修复：inject 前先调用 ASR，ASR 完成后重新检查 task 状态；若 turn 已结束则 fall through 作为新 turn 启动。
+- **Bug 2**: feishu ASR 降级日志缺文件名 — `feishu-parser/scripts/asr.py` 降级到 local 引擎时日志无文件路径，不便排查。修复：改为 WARNING 并附上 `file_path`。
