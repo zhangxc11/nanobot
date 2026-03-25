@@ -101,7 +101,11 @@ class ASRRegistry:
             )
 
             if stderr:
-                logger.debug("ASR stderr: {}", stderr.decode(errors="replace")[:500])
+                stderr_text = stderr.decode(errors="replace")[:500]
+                if "WARNING" in stderr_text:
+                    logger.warning("ASR stderr: {}", stderr_text)
+                else:
+                    logger.debug("ASR stderr: {}", stderr_text)
 
             if proc.returncode == 0:
                 result = json.loads(stdout.decode(errors="replace"))
