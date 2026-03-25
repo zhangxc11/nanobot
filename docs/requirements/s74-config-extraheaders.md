@@ -1,7 +1,7 @@
 # §74 config.json extraHeaders 空字符串致 Pydantic 验证失败
 
 > TODO: 0b23ced8
-> 状态: 需求已对齐，待排期开发
+> 状态: ✅ 已完成
 > **P0** | [← 返回索引](../REQUIREMENTS.md)
 
 ## Summary
@@ -17,6 +17,11 @@ save_config 的 model_dump 在某些情况下将 None 序列化为空字符串�
 - 在 save_config 或 model 层面修复 None → 空字符串的序列化问题
 - 确保 None 值字段不写入或写入 null
 
+### 实际修复
+
+1. **schema.py** — `ProviderConfig` 新增 `field_validator`，将 `api_base` / `preferred_model` / `extra_headers` 的空字符串自动转为 `None`
+2. **web-chat webserver.py** — `_handle_put_config()` 做 Pydantic round-trip（`Config.model_validate()` + `model_dump(exclude_none=True)`），确保写入 config.json 时不含空字符串或 None 字段
+
 ## Glossary
 
 | 术语 | 说明 |
@@ -26,7 +31,7 @@ save_config 的 model_dump 在某些情况下将 None 序列化为空字符串�
 
 ## 验收 Checklist
 
-- [ ] ✅ save_config 后 config.json 不出现空字符串字段
-- [ ] ✅ None 值字段正确处理（不写入或写入 null）
-- [ ] ✅ dev worker 可正常重启加载
-- [ ] ✅ 验证后 config.json 恢复原状（⚠️ 验证过程不能改坏 config）
+- [x] save_config 后 config.json 不出现空字符串字段
+- [x] None 值字段正确处理（不写入或写入 null）
+- [x] dev worker 可正常重启加载
+- [x] 验证后 config.json 恢复原状（⚠️ 验证过程不能改坏 config）
