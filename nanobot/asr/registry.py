@@ -102,10 +102,11 @@ class ASRRegistry:
 
             if stderr:
                 stderr_text = stderr.decode(errors="replace")[:500]
-                if "WARNING" in stderr_text:
-                    logger.warning("ASR stderr: {}", stderr_text)
-                else:
-                    logger.debug("ASR stderr: {}", stderr_text)
+                # Always log ASR stderr at INFO level for observability.
+                # The ASR script uses structured prefixes (INFO/WARNING/ERROR)
+                # in its stderr output; we capture everything at INFO to ensure
+                # diagnostic messages (retry attempts, engine selection) are visible.
+                logger.info("ASR stderr: {}", stderr_text)
 
             if proc.returncode == 0:
                 result = json.loads(stdout.decode(errors="replace"))
