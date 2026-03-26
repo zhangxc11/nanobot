@@ -514,6 +514,11 @@ class AgentLoop:
             ``ToolRegistry.clone_for_session()``.
         """
         _provider = provider or self.provider
+        from loguru import logger as _dbg_logger
+        _dbg_logger.debug("_run_agent_loop: _provider type={}, provider_name={}, has_property={}", 
+                         type(_provider).__name__, 
+                         getattr(_provider, "provider_name", "(MISSING)"),
+                         hasattr(type(_provider), 'provider_name') and isinstance(getattr(type(_provider), 'provider_name', None), property))
         _model = model or self.model
         _tools = tools or self.tools
 
