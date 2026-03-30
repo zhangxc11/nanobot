@@ -1185,9 +1185,6 @@ def cron_add(
             name=name,
             schedule=schedule,
             message=message,
-            deliver=deliver,
-            to=to,
-            channel=channel,
         )
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")

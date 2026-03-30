@@ -16,7 +16,8 @@ from nanobot.agent.context import ContextBuilder
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.budget import build_budget_alert
 from nanobot.agent.subagent import SubagentManager
-from nanobot.agent.tools.cron import CronTool
+from nanobot.agent.tools.cron_task import CronTaskTool
+from nanobot.agent.tools.reminder import ReminderTool
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.registry import ToolRegistry
@@ -234,7 +235,8 @@ class AgentLoop:
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
         self.tools.register(SpawnTool(manager=self.subagents))
         if self.cron_service:
-            self.tools.register(CronTool(self.cron_service))
+            self.tools.register(ReminderTool(self.cron_service))
+            self.tools.register(CronTaskTool(self.cron_service))
 
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
@@ -279,10 +281,21 @@ class AgentLoop:
             if isinstance(spawn_tool, SpawnTool):
                 spawn_tool.set_context(channel, chat_id, session_key=session_key)
 
-        if cron_tool := _tools.get("cron"):
-            if isinstance(cron_tool, CronTool):
-                cron_tool.set_context(channel, chat_id, session_key=session_key, session_id=session_key.replace(":", "_"),
-                                      sessions_dir=self.workspace / "sessions")
+        if reminder_tool := _tools.get("reminder"):
+            if isinstance(reminder_tool, ReminderTool):
+                reminder_tool.set_context(
+                    channel, chat_id,
+                    session_key=session_key,
+                    session_id=session_key.replace(":", "_"),
+                    sessions_dir=self.workspace / "sessions",
+                )
+
+        if cron_task_tool := _tools.get("cron_task"):
+            if isinstance(cron_task_tool, CronTaskTool):
+                cron_task_tool.set_context(
+                    channel, chat_id,
+                    session_id=session_key.replace(":", "_"),
+                )
 
         # Audit context: session_key + channel + chat_id
         _tools.set_audit_context(
@@ -1204,6 +1217,18 @@ class AgentLoop:
                 await self.bus.publish_outbound(response)
                 continue
 
+            # ── /tasks: list scheduled cron tasks ──
+            if cmd == "/tasks":
+                response = self._handle_tasks_command(msg)
+                await self.bus.publish_outbound(response)
+                continue
+
+            # ── /reminders: list reminders ──
+            if cmd == "/reminders":
+                response = self._handle_reminders_command(msg, session_key=session_key)
+                await self.bus.publish_outbound(response)
+                continue
+
             # ── Active session → inject ──
             if session_key in active_sessions:
                 worker = active_sessions[session_key]
@@ -1269,6 +1294,90 @@ class AgentLoop:
             channel=msg.channel, chat_id=msg.chat_id,
             content="No active task to stop.",
         ))
+
+    def _handle_tasks_command(self, msg: InboundMessage) -> OutboundMessage:
+        """Handle /tasks slash command: list all scheduled cron tasks."""
+        if not self.cron_service:
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content="Cron service is not available.",
+            )
+
+        jobs = self.cron_service.list_jobs()
+        tasks = [j for j in jobs if not j.payload.target_session]
+
+        if not tasks:
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content="📋 No scheduled tasks.",
+            )
+
+        from collections import defaultdict
+        by_owner: dict[str, list] = defaultdict(list)
+        for j in tasks:
+            owner_key = j.owner or "(no owner)"
+            by_owner[owner_key].append(j)
+
+        lines = ["📋 **Scheduled Tasks**\n"]
+        for owner_key in sorted(by_owner.keys()):
+            lines.append(f"**[{owner_key}]**")
+            for j in by_owner[owner_key]:
+                sched = self._format_schedule_brief(j.schedule)
+                status = f" ✅" if j.state.last_status == "ok" else (f" ❌" if j.state.last_status == "error" else "")
+                enabled = "" if j.enabled else " 🔇"
+                lines.append(f"  • `{j.id}` {j.name} ({sched}){status}{enabled}")
+
+        return OutboundMessage(
+            channel=msg.channel, chat_id=msg.chat_id,
+            content="\n".join(lines),
+        )
+
+    def _handle_reminders_command(self, msg: InboundMessage,
+                                  session_key: str | None = None) -> OutboundMessage:
+        """Handle /reminders slash command: list all reminders."""
+        if not self.cron_service:
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content="Cron service is not available.",
+            )
+
+        jobs = self.cron_service.list_jobs()
+        reminders = [j for j in jobs if j.payload.target_session]
+
+        if not reminders:
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content="🔔 No active reminders.",
+            )
+
+        lines = ["🔔 **Active Reminders**\n"]
+        for j in reminders:
+            sched = self._format_schedule_brief(j.schedule)
+            target = j.payload.target_session or "?"
+            creator = f" [by: {j.created_by_session}]" if j.created_by_session else ""
+            enabled = "" if j.enabled else " 🔇"
+            lines.append(f"  • `{j.id}` {j.name} ({sched}) → {target}{creator}{enabled}")
+
+        return OutboundMessage(
+            channel=msg.channel, chat_id=msg.chat_id,
+            content="\n".join(lines),
+        )
+
+    @staticmethod
+    def _format_schedule_brief(schedule) -> str:
+        """Format a CronSchedule for display."""
+        if schedule.kind == "every":
+            secs = (schedule.every_ms or 0) // 1000
+            if secs >= 3600:
+                return f"every {secs // 3600}h"
+            elif secs >= 60:
+                return f"every {secs // 60}m"
+            return f"every {secs}s"
+        elif schedule.kind == "cron":
+            tz_str = f" {schedule.tz}" if schedule.tz else ""
+            return f"cron: {schedule.expr or ''}{tz_str}"
+        else:
+            return "one-time"
 
     def _handle_provider_command(self, msg: InboundMessage,
                                  session_key: str | None = None) -> OutboundMessage:

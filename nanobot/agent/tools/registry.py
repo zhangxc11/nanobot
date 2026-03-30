@@ -172,14 +172,27 @@ def _extract_audit_fields(tool_name: str, params: dict[str, Any], result: str) -
             "error": error_msg,
         }
 
-    # ── Cron ──
+    # ── Cron / Reminder / CronTask ──
 
-    if tool_name == "cron":
-        action = params.get("action", "")
+    if tool_name in ("cron", "reminder", "cron_task"):
+        action_val = params.get("action", "")
         message_preview = _truncate(params.get("message"), 80)
+        owner = params.get("owner", "")
+        target = params.get("target_session", "")
+        job_id = params.get("job_id", "")
+        audit_params: dict[str, Any] = {
+            "cron_action": action_val,
+            "message_preview": message_preview,
+        }
+        if owner:
+            audit_params["owner"] = owner
+        if target:
+            audit_params["target_session"] = target
+        if job_id:
+            audit_params["job_id"] = job_id
         return {
-            "action": "cron",
-            "params": {"cron_action": action, "message_preview": message_preview},
+            "action": tool_name,
+            "params": audit_params,
             "result": {"success": not is_error},
             "resolved_path": None,
             "error": error_msg,
@@ -363,7 +376,7 @@ class ToolRegistry:
 
     # Tools that hold per-session state (channel/chat_id context) and must
     # be cloned for each concurrent session task.
-    _STATEFUL_TOOL_NAMES = frozenset({"message", "spawn", "cron"})
+    _STATEFUL_TOOL_NAMES = frozenset({"message", "spawn", "cron", "reminder", "cron_task"})
 
     def clone_for_session(self) -> "ToolRegistry":
         """Create a shallow clone suitable for a concurrent session task.

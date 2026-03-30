@@ -166,11 +166,13 @@ class CronService:
         on_job: Callable[[CronJob], Coroutine[Any, Any, str | None]] | None = None,
         executor: CronExecutor | None = None,
         process_role: str = "web",
+        audit_logger: Any | None = None,
     ):
         self.store_path = store_path
         self.on_job = on_job
         self.executor = executor
         self._process_role = process_role
+        self._audit_logger = audit_logger
         self._partition = (
             JobPartition.GATEWAY if process_role == "gateway" else JobPartition.WEB
         )
@@ -232,6 +234,8 @@ class CronService:
                         created_at_ms=j.get("createdAtMs", 0),
                         updated_at_ms=j.get("updatedAtMs", 0),
                         delete_after_run=j.get("deleteAfterRun", False),
+                        owner=j.get("owner", ""),
+                        created_by_session=j.get("createdBySession", ""),
                     ))
                 self._store = CronStore(jobs=jobs)
             except Exception as e:
@@ -281,6 +285,8 @@ class CronService:
                     "createdAtMs": j.created_at_ms,
                     "updatedAtMs": j.updated_at_ms,
                     "deleteAfterRun": j.delete_after_run,
+                    "owner": j.owner,
+                    "createdBySession": j.created_by_session,
                 }
                 for j in self._store.jobs
             ]
@@ -511,6 +517,7 @@ class CronService:
                                        job.name, job.payload.target_session)
                         job.state.last_run_at_ms = start_ms
                         job.updated_at_ms = _now_ms()
+                        self._audit_job_execution(job, start_ms)
                         self._advance_schedule(job)
                         return
                 else:
@@ -519,6 +526,7 @@ class CronService:
                     job.state.last_error = "No executor available for target_session"
                     job.state.last_run_at_ms = start_ms
                     job.updated_at_ms = _now_ms()
+                    self._audit_job_execution(job, start_ms)
                     self._advance_schedule(job)
                     return
             elif self.executor:
@@ -537,7 +545,40 @@ class CronService:
 
         job.state.last_run_at_ms = start_ms
         job.updated_at_ms = _now_ms()
+        self._audit_job_execution(job, start_ms)
         self._advance_schedule(job)
+
+    def _audit_job_execution(self, job: CronJob, start_ms: int) -> None:
+        """Write an audit entry for a cron job execution."""
+        if not self._audit_logger:
+            return
+        try:
+            from nanobot.audit.logger import AuditEntry
+            duration_ms = _now_ms() - start_ms
+            entry = AuditEntry(
+                timestamp=datetime.fromtimestamp(start_ms / 1000).isoformat(),
+                session_key=f"cron:{job.id}",
+                channel="cron",
+                tool="cron_execution",
+                action="execute",
+                params={
+                    "job_id": job.id,
+                    "job_name": job.name,
+                    "owner": job.owner,
+                    "schedule_kind": job.schedule.kind,
+                    "target_session": job.payload.target_session or "",
+                    "source_channel": job.payload.source_channel or "",
+                },
+                result={
+                    "success": job.state.last_status == "ok",
+                    "status": job.state.last_status,
+                },
+                error=job.state.last_error,
+                duration_ms=round(duration_ms, 2),
+            )
+            self._audit_logger.log(entry)
+        except Exception as exc:
+            logger.warning("Cron: audit logging failed: {}", exc)
 
     def _advance_schedule(self, job: CronJob) -> None:
         """Advance job schedule after execution (or handle one-shot cleanup)."""
@@ -567,6 +608,8 @@ class CronService:
         delete_after_run: bool = False,
         target_session: str | None = None,
         source_channel: str | None = None,
+        owner: str = "",
+        created_by_session: str = "",
     ) -> CronJob:
         """Add a new job."""
         store = self._load_store()
@@ -587,6 +630,8 @@ class CronService:
             created_at_ms=now,
             updated_at_ms=now,
             delete_after_run=delete_after_run,
+            owner=owner,
+            created_by_session=created_by_session,
         )
 
         store.jobs.append(job)
@@ -609,6 +654,16 @@ class CronService:
             self._save_store()
             self._arm_timer()
             logger.info("Cron: removed job {}", job_id)
+
+        return removed
+
+    def get_job(self, job_id: str) -> CronJob | None:
+        """Get a job by ID."""
+        store = self._load_store()
+        for job in store.jobs:
+            if job.id == job_id:
+                return job
+        return None
 
         return removed
 

@@ -54,6 +54,11 @@ class CronJob:
     created_at_ms: int = 0
     updated_at_ms: int = 0
     delete_after_run: bool = False
+    # ── Owner & creator isolation (added for tool split) ──
+    # For task jobs: namespace owner (e.g. "cil", "tushare")
+    owner: str = ""
+    # For reminder jobs: session_id that created this job
+    created_by_session: str = ""
 
 
 @dataclass
