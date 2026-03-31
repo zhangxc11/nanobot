@@ -369,3 +369,8 @@ After testing the skill, users may request improvements. Often this happens righ
 2. Notice struggles or inefficiencies
 3. Identify how SKILL.md or bundled resources should be updated
 4. Implement changes and test again
+
+## Skill 设计准则
+
+- Skill 准则注入通过 skill 指引 agent 写 summary 实现
+- 统一用 `### 写入 summary 的准则` 格式，内容用代码块包裹，agent 一字不改地复制到 session summary 的 `## 当前工作准则` 段
