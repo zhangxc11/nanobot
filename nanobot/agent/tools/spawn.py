@@ -136,12 +136,12 @@ class SpawnTool(Tool):
                     ),
                 },
             },
-            "required": ["task"],
+            "required": [],
         }
 
     async def execute(
         self,
-        task: str,
+        task: str = "",
         label: str | None = None,
         max_iterations: int | None = None,
         max_tokens: int | None = None,
@@ -162,6 +162,12 @@ class SpawnTool(Tool):
         active_ops = [name for name, val in ops.items() if val]
         if len(active_ops) > 1:
             return f"Error: `{'` and `'.join(active_ops)}` are mutually exclusive. Use one at a time."
+
+        # `task` is required for new spawn and follow_up, optional for stop/status
+        if not task and not stop and not status:
+            if follow_up:
+                return "Error: `task` is required when using `follow_up` (the message to send to the subagent)."
+            return "Error: `task` is required when spawning a new subagent."
 
         if status:
             # §38: Status query

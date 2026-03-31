@@ -437,7 +437,9 @@ class TestSpawnToolParameters:
         assert "persist" in params["properties"]
         assert params["properties"]["max_iterations"]["type"] == "integer"
         assert params["properties"]["persist"]["type"] == "boolean"
-        assert "task" in params["required"]
+        # task is no longer schema-required; validated in execute() instead
+        # (task is only needed for new spawn and follow_up, not for stop/status)
+        assert "task" not in params.get("required", [])
         assert "max_iterations" not in params.get("required", [])
         assert "persist" not in params.get("required", [])
 
@@ -471,6 +473,46 @@ class TestSpawnToolParameters:
 
 
 # ── Tests: Task Keeper (GC prevention) ──────────────────────────────────────
+
+
+class TestSpawnToolTaskValidation:
+    """Tests for task parameter conditional validation (no longer schema-required)."""
+
+    @pytest.mark.asyncio
+    async def test_status_without_task(self):
+        """status should work without task."""
+        manager = MagicMock()
+        manager.list_subagents = MagicMock(return_value="no subagents")
+        tool = SpawnTool(manager=manager)
+        result = await tool.execute(status="list")
+        assert "no subagents" in result
+
+    @pytest.mark.asyncio
+    async def test_stop_without_task(self):
+        """stop should work without task."""
+        manager = AsyncMock()
+        manager.stop_subagent = AsyncMock(return_value="stopped")
+        tool = SpawnTool(manager=manager)
+        result = await tool.execute(stop="some-task-id")
+        assert result == "stopped"
+
+    @pytest.mark.asyncio
+    async def test_spawn_without_task_errors(self):
+        """Spawning a new subagent without task should error."""
+        manager = MagicMock()
+        tool = SpawnTool(manager=manager)
+        result = await tool.execute()
+        assert "Error" in result
+        assert "task" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_follow_up_without_task_errors(self):
+        """follow_up without task should error."""
+        manager = MagicMock()
+        tool = SpawnTool(manager=manager)
+        result = await tool.execute(follow_up="some-task-id")
+        assert "Error" in result
+        assert "task" in result.lower()
 
 
 class TestTaskKeeper:
