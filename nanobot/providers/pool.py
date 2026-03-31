@@ -66,6 +66,11 @@ class ProviderPool(LLMProvider):
     # ── State queries ──
 
     @property
+    def provider_name(self) -> str:
+        """Name of the currently active provider (for usage logging)."""
+        return self._active_provider
+
+    @property
     def active_provider(self) -> str:
         """Name of the currently active provider."""
         return self._active_provider
